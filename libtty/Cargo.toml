@@ -1,0 +1,19 @@
+[package]
+name = "libtty"
+version = "0.0.1"
+edition = "2024"
+license = "MIT"
+description = "Terminal input for Peios' authentication tools, including reading a secret without echoing it."
+publish = false
+
+# Shared by `login` and `lps`, which both have to read a password from a
+# terminal without echoing it. That is a handful of termios calls wrapped in a
+# guard, and getting it wrong leaves a user's terminal with echo disabled — so
+# it is worth having exactly one copy rather than two that drift.
+#
+# Unlike the other members, this is NOT a trust domain. It is a utility, and it
+# is deliberately tiny: if it ever grows into somewhere convenient to put things,
+# that is the signal it has stopped being one.
+[dependencies]
+libauthd = { path = "../libauthd" }
+libc = "0.2"

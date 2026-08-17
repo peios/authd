@@ -1,0 +1,19 @@
+[package]
+name = "lps"
+version = "0.0.1"
+edition = "2024"
+license = "MIT"
+description = "Administer Peios' local principal store."
+publish = false
+
+[[bin]]
+name = "lps"
+path = "src/main.rs"
+
+# A client and nothing more. It holds no state, reads no store, and has no
+# privilege of its own — everything it does is a request lpsd decides whether to
+# honour, which is why the store's descriptor can stay as narrow as it is.
+[dependencies]
+libauthd = { path = "../libauthd" }
+libtty = { path = "../libtty" }
+peios = { path = "../../peios-rs/peios" }

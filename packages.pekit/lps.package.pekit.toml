@@ -1,0 +1,22 @@
+# lps — administer the local principal store.
+#
+# A client of lpsd and nothing else: it holds no state, opens no store, and has
+# no privilege of its own. Every command is a request over /run/lpsd/admin.sock
+# that lpsd decides whether to honour, which is what lets the store's descriptor
+# stay LocalSystem-only — a tool that edited the file would have needed that
+# widened to whatever it runs as.
+#
+# A separate package from lpsd because it is a separate trust domain and a
+# separate audience. A machine can run the daemon without shipping the
+# administration tool; a machine administered from elsewhere may want the tool
+# without the daemon.
+#
+# Carries no package dependency on lpsd, for the same reason login carries none
+# on authd: what it needs at runtime is *a* daemon listening on that socket,
+# which is a protocol contract rather than a packaging one.
+
+[package]
+description = "Peios local principal store administration tool"
+
+[files]
+":usr/bin/lps" = "usr/bin/lps"

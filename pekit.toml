@@ -1,0 +1,126 @@
+# authd — Peios' authentication daemon (the PGSS Logon authority), lpsd (the
+# local principal source), lps (its administration tool) and login (the terminal
+# logon originator). All four binaries come from one cargo workspace and are
+# carved into separate packages; see packages.pekit/ for why.
+#
+# The libpeios bootstrap mirrors peinit's and for the same reason: use
+# pkg-config rather than PEIOS_LIB_DIR, so peios-sys does not bake a
+# checkout-local rpath into a shipped binary. Local monorepo builds synthesize a
+# temporary peios.pc from the sibling libpeios/pkm trees when libpeios-devel is
+# not already installed in the build root.
+#
+# Milestone 1 deliberately omits the debuginfo/debugsource split peinit does.
+# It is copy-paste to add and worth adding once the shape settles; leaving it
+# out keeps the first bootable version small.
+
+out_dir = "out"
+
+[build]
+command = """
+set -eu
+set -o pipefail 2>/dev/null || true
+
+SRC="$(pwd)"
+REPO_ROOT="$(cd "$SRC/.." && pwd)"
+
+for tool in cargo rustc gcc pkg-config; do
+  command -v "$tool" >/dev/null || { echo "missing required authd build tool: $tool" >&2; exit 1; }
+done
+
+# Force the packaging-safe peios-sys path even if a developer shell happens to
+# carry the env overrides used for quick local tests.
+unset PEIOS_LIB_DIR PEIOS_INCLUDE PKM_UAPI
+
+if ! pkg-config --exists peios; then
+  LIBPEIOS_ROOT="$REPO_ROOT/libpeios"
+  # The BUILT pkm headers, not pkm/uapi. The two trees disagree: pkm/uapi has
+  # an in-flight rename (KACS_TOKEN_ADJUST_SESSIONID ->
+  # KACS_TOKEN_ADJUST_INTERACTIVITY_SCOPE) that libpeios and peios-rs have not
+  # followed, so building against pkm/uapi fails with what looks like a broken
+  # peios-rs but is a header-tree mismatch.
+  PKM_UAPI_ROOT="$REPO_ROOT/pkm/out/build/headers/usr/include"
+
+  [ -f "$LIBPEIOS_ROOT/Cargo.toml" ] || {
+    echo "libpeios package metadata not found at $LIBPEIOS_ROOT" >&2
+    exit 1
+  }
+  [ -d "$LIBPEIOS_ROOT/include/peios" ] || {
+    echo "libpeios headers not found at $LIBPEIOS_ROOT/include" >&2
+    exit 1
+  }
+  [ -d "$PKM_UAPI_ROOT/pkm" ] || {
+    echo "pkm UAPI headers not found at $PKM_UAPI_ROOT" >&2
+    exit 1
+  }
+
+  cargo build --release --locked --manifest-path "$LIBPEIOS_ROOT/Cargo.toml"
+
+  PC_DIR="$PEKIT_OUT/pkgconfig"
+  mkdir -p "$PC_DIR"
+  LIBPEIOS_VERSION="$(sed -n 's/^version = "\\([^"]*\\)".*/\\1/p' "$LIBPEIOS_ROOT/Cargo.toml" | head -1)"
+  {
+    printf 'prefix=%s\\n' "$LIBPEIOS_ROOT"
+    printf 'exec_prefix=${prefix}\\n'
+    printf 'libdir=%s/target/release\\n' "$LIBPEIOS_ROOT"
+    printf 'includedir=%s/include\\n' "$LIBPEIOS_ROOT"
+    printf '\\n'
+    printf 'Name: peios\\n'
+    printf 'Description: Peios userspace C ABI library (libpeios)\\n'
+    printf 'Version: %s\\n' "$LIBPEIOS_VERSION"
+    printf 'Libs: -L${libdir} -lpeios\\n'
+    printf 'Cflags: -I${includedir} -I%s\\n' "$PKM_UAPI_ROOT"
+  } > "$PC_DIR/peios.pc"
+  export PKG_CONFIG_PATH="$PC_DIR${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
+fi
+
+# bindgen needs freestanding C headers such as stddef.h. A full clang install
+# has these in its resource dir; libclang-only hosts need GCC's include dir
+# passed explicitly.
+export BINDGEN_EXTRA_CLANG_ARGS="-isystem $(gcc -print-file-name=include) ${BINDGEN_EXTRA_CLANG_ARGS:-}"
+
+cargo build --release --locked --bin authd --bin lpsd --bin lps --bin login --target-dir "$PEKIT_OUT/target"
+
+mkdir -p "$PEKIT_OUT/usr/sbin" "$PEKIT_OUT/usr/bin"
+install -m 0755 "$PEKIT_OUT/target/release/authd" "$PEKIT_OUT/usr/sbin/authd"
+install -m 0755 "$PEKIT_OUT/target/release/lpsd" "$PEKIT_OUT/usr/sbin/lpsd"
+install -m 0755 "$PEKIT_OUT/target/release/login" "$PEKIT_OUT/usr/bin/login"
+install -m 0755 "$PEKIT_OUT/target/release/lps" "$PEKIT_OUT/usr/bin/lps"
+
+# The script that creates the first account on a fresh image, run by the
+# oneshot service lpsd-first-account.reg defines. It carries a password that
+# ships in the image and is therefore public, which is why it and its service
+# are separately opt-in-able from lpsd itself.
+mkdir -p "$PEKIT_OUT/usr/libexec/lpsd"
+install -m 0755 "$SRC/libexec/first-account" "$PEKIT_OUT/usr/libexec/lpsd/first-account"
+
+# The registry seed that registers lpsd as a principal source. Packages may
+# write registry.d/ but not the auto-apply queue, so shipping this only *offers*
+# the seed: an image opts in with `[registry] autoapply` in its peiso.toml. The
+# package proposes, the image decides — which is what stops installing a package
+# from silently granting it the right to assert identity.
+#
+# lpsd-first-account.reg is the second, separately opt-in-able half: a oneshot
+# service that creates a development account so an image with no operator can be
+# logged into. Deliberately a distinct file rather than more values in lpsd.reg,
+# so that "lpsd may assert identity" and "this image ships a known credential"
+# are two decisions an image makes independently.
+#
+# authd-policy.reg is the third: the default local policy — which privileges
+# and integrity level each principal gets. Separate again, and for a sharper
+# reason than the other two. Because authd treats the policy key as the WHOLE
+# answer whenever it exists, this file is not a suggestion an image can half
+# take: applying it means adopting these defaults entire, and a hardened image
+# is expected to ship its own file in place of it rather than edit around it.
+mkdir -p "$PEKIT_OUT/usr/share/regim"
+install -m 0644 "$SRC/registry.d/lpsd.reg" "$PEKIT_OUT/usr/share/regim/lpsd.reg"
+install -m 0644 "$SRC/registry.d/lpsd-first-account.reg" "$PEKIT_OUT/usr/share/regim/lpsd-first-account.reg"
+install -m 0644 "$SRC/registry.d/authd-policy.reg" "$PEKIT_OUT/usr/share/regim/authd-policy.reg"
+"""
+
+[build.dependencies.peipkg]
+cargo = "*"
+rust = "*"
+gcc = "*"
+pkgconf-pkg-config = "*"
+libpeios-devel = "*"
+kernel-headers = "*"

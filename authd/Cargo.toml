@@ -1,0 +1,24 @@
+[package]
+name = "authd"
+version = "0.0.1"
+edition = "2024"
+license = "MIT"
+description = "Peios' authentication daemon — the PGSS Logon authority."
+publish = false
+
+[[bin]]
+name = "authd"
+path = "src/main.rs"
+
+# authd runs at PeiosTcb holding SeCreateTokenPrivilege. Dependencies here are
+# dependencies of the most privileged userspace process on the system, so the
+# list stays short and every addition needs a reason.
+[dependencies]
+libauthd = { path = "../libauthd" }
+libc = "0.2"
+peios = { path = "../../peios-rs/peios" }
+# Deriving a service's SID from its name, which is how a principal source is
+# identified. Pure computation with no I/O and no unsafe; peinit carries the
+# same dependency for the same derivation. The duplication wants resolving by
+# moving the derivation into libpeios — see src/service_sid.rs.
+sha1 = "0.10"

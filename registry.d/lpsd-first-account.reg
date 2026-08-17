@@ -1,0 +1,49 @@
+{
+  "_comment": [
+    "A oneshot service that creates the development account on a fresh machine.",
+    "",
+    "!! THE PASSWORD IT SETS SHIPS IN THE IMAGE AND IS THEREFORE PUBLIC. !!",
+    "See /usr/libexec/lpsd/first-account, which holds it. This belongs on a live",
+    "or development image and nowhere else; a production image simply does not",
+    "list this file in [registry] autoapply, provisions an empty store, and has",
+    "an administrator run `lps add` for the first account.",
+    "",
+    "Why a service and not an autorun script: autoruns run in Phase 1.5, before",
+    "peinit starts any service, so lpsd is not listening yet. `lps` talks to lpsd",
+    "over /run/lpsd/admin.sock, so the work has to happen after lpsd is up --",
+    "which is what Requires expresses.",
+    "",
+    "Readiness is Alive (1) rather than Notify (0): the script does not speak the",
+    "notify protocol, it just exits. Type Oneshot (1) with RestartPolicy Never",
+    "(0) says run it once and do not bring it back. ErrorControl stays Normal so",
+    "a failure is a warning rather than a boot abort -- an image that cannot",
+    "create its demo account should still boot far enough to be debugged.",
+    "",
+    "Identity is stated rather than left to a default: `lps` accepts SYSTEM",
+    "BUILTIN\\Administrators precisely for this case: at first boot there is no",
+    "administrator yet, which is the problem this service exists to solve.",
+    "",
+    "No self-deletion and no idempotence guard. A live image is tmpfs, so every",
+    "boot provisions a fresh store and this runs against an empty one; an",
+    "installed system loses both this key and the script when the installer",
+    "commits the filesystem to disk.",
+    "",
+    "Shipped by the lpsd package into /usr/share/peios/registry.d/; it applies",
+    "only if an image opts in via [registry] autoapply in its peiso.toml."
+  ],
+  "keys": [
+    {
+      "path": "Machine\\System\\Services\\lpsd-first-account",
+      "values": [
+        { "name": "ImagePath", "type": "sz", "data": "/usr/libexec/lpsd/first-account" },
+        { "name": "Type", "type": "dword", "data": 1 },
+        { "name": "Triggers", "type": "multi", "data": ["boot"] },
+        { "name": "Requires", "type": "multi", "data": ["lpsd"] },
+        { "name": "Identity", "type": "sz", "data": "SYSTEM" },
+        { "name": "Readiness", "type": "dword", "data": 1 },
+        { "name": "RestartPolicy", "type": "dword", "data": 0 },
+        { "name": "ErrorControl", "type": "dword", "data": 0 }
+      ]
+    }
+  ]
+}

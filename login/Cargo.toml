@@ -1,0 +1,20 @@
+[package]
+name = "login"
+version = "0.0.1"
+edition = "2024"
+license = "MIT"
+description = "Peios /bin/login — a PGSS Logon originator for terminal sessions."
+publish = false
+
+[[bin]]
+name = "login"
+path = "src/main.rs"
+
+[dependencies]
+libauthd = { path = "../libauthd" }
+libc = "0.2"
+# Terminal input, shared with `lps`: both must take a password from a terminal
+# without echoing it, and the termios guard that restores echo afterwards is
+# exactly the sort of thing that should exist once.
+libtty = { path = "../libtty" }
+peios = { path = "../../peios-rs/peios" }

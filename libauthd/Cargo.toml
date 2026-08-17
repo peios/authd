@@ -1,0 +1,18 @@
+[package]
+name = "libauthd"
+version = "0.0.1"
+edition = "2024"
+license = "MIT"
+description = "The wire protocol spoken to authd, Peios' authentication daemon."
+publish = false
+
+# The codec is deliberately dependency-free. This crate is linked into a
+# PeiosTcb process holding SeCreateTokenPrivilege, and every dependency there is
+# attack surface in the most privileged userspace component on the system — a
+# message parser especially. It is small enough to own outright.
+#
+# libc is the one exception, and only for the transport: passing a file
+# descriptor requires sendmsg/recvmsg with ancillary data, which std does not
+# expose on stable. Bindings to syscalls, not logic.
+[dependencies]
+libc = "0.2"
