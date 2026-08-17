@@ -1,0 +1,21 @@
+# Base metadata shared by every package carved from the authd build tree.
+#
+# Four packages come out of one build.main, and the split is deliberate rather
+# than cosmetic — it mirrors four trust domains:
+#
+#   authd  Mainline's PGSS Logon *authority*. Mints, cannot verify.
+#   lpsd   a *principal source*. Verifies, cannot mint.
+#   lps    lpsd's *administration tool*. Neither; it asks, over a socket.
+#   login  a PGSS Logon *client*. Neither; it collects.
+#
+# A machine could run a different authority and keep this login, a different
+# logon originator against this authd, or an entirely different principal source
+# behind it. Shipping them as one package would make that story false at the
+# packaging layer.
+
+format = "peipkg"
+
+[package]
+version      = "{{version}}-1"
+architecture = "x86_64"
+license      = "MIT"

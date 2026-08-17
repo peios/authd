@@ -1,0 +1,56 @@
+{
+  "_comment": [
+    "Registers lpsd as a principal source authd will accept.",
+    "",
+    "The existence of the Sources\\lpsd key IS the permission. authd derives the",
+    "service SID for each configured name and requires a connecting peer's token",
+    "to carry it, so this key says 'a service named lpsd may assert identity on",
+    "this machine' and nothing else can say it. Deleting this key stops lpsd",
+    "registering; there is no second list anywhere.",
+    "",
+    "MayAssertForeignMemberships lifts the rule that a source may only assert",
+    "groups in the same domain as the principal it just authenticated. lpsd needs",
+    "it because local group membership of ANY principal is a local decision --",
+    "'CORP\\Domain Admins is in BUILTIN\\Administrators' is a record this machine",
+    "keeps, not something a domain controller asserts at it. A directory-backed",
+    "source must NOT have this, which is what stops it declaring its own users",
+    "administrators here.",
+    "",
+    "UnixIDBase and UnixIDCount give lpsd the range its POSIX ids land in. A",
+    "source counts from 1 and knows nothing about where its range begins; authd",
+    "adds the base, so lpsd's first principal (1) projects to uid 1000001.",
+    "",
+    "This is a containment boundary, not bookkeeping. Because the numbers a",
+    "source sends are relative, the base and the count are together what stop it",
+    "reaching uid 0 -- authd reserves everything below 1000000 for its own",
+    "table, which begins with SYSTEM at 0 -- and what stop it reaching another",
+    "source's numbers, since a relative id at or past the count is refused",
+    "rather than wrapped. It is the numeric counterpart of confining a source to",
+    "its domain SID.",
+    "",
+    "A directory source gets a base of its own, well clear of this one:",
+    "10000000, say. Nothing here has to change when it arrives, which is the",
+    "point of the source never knowing its own base.",
+    "",
+    "Absent, lpsd still authenticates but every principal projects to uid 65534",
+    "(nobody). That is the safe direction -- 65534 grants nothing -- and it is",
+    "visible in both the warning authd logs at registration and the uid itself.",
+    "",
+    "Shipped by the lpsd package into /usr/share/regim/; it only",
+    "applies if an image opts in via [registry] autoapply in its peiso.toml.",
+    "The package proposes, the image decides."
+  ],
+  "keys": [
+    { "path": "Machine\\Software" },
+    { "path": "Machine\\Software\\Authd" },
+    { "path": "Machine\\Software\\Authd\\Sources" },
+    {
+      "path": "Machine\\Software\\Authd\\Sources\\lpsd",
+      "values": [
+        { "name": "MayAssertForeignMemberships", "type": "dword", "data": 1 },
+        { "name": "UnixIDBase", "type": "dword", "data": 1000000 },
+        { "name": "UnixIDCount", "type": "dword", "data": 1000000 }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,35 @@
+# lpsd — the Local Principal Source Daemon: Peios' local identity database, and
+# the local half of PSI.
+#
+# lpsd holds every local credential verifier on the system. It runs strictly
+# below authd's PIP level and holds none of authd's privileges: it can say who
+# someone is, and it has no way to say anything else. Compromising it yields the
+# material an offline attack is run against, never the ability to mint identity.
+#
+# Deliberately carries NO package dependency on authd, for the same reason login
+# does not. What lpsd needs at runtime is *an* authority listening on
+# /run/psi.sock — a protocol contract rather than a packaging one. Boot ordering
+# (lpsd requires authd, because sources dial in to the authority) is peinit's
+# job, not the package manager's.
+#
+# Runtime library dependencies (libpeios, glibc) are derived from the binary's
+# DT_NEEDED entries.
+
+[package]
+description = "Peios local principal source daemon - the local identity database"
+
+[files]
+":usr/sbin/lpsd" = "usr/sbin/lpsd"
+# The seed that registers lpsd with authd. Inert on its own: it lands in the
+# vendor seed library, and only an image that names it in `[registry] autoapply`
+# stages it into the queue peinit drains on first boot. Installing lpsd
+# therefore does not grant lpsd anything — the image has to say so.
+":usr/share/regim/lpsd.reg" = "usr/share/regim/lpsd.reg"
+# The development-account service, shipped for the same reason and just as
+# inert. Separate from lpsd.reg so that "lpsd may assert identity" and "this
+# image ships a known password" are independent choices — an image can take the
+# first without the second, which is what every non-development image should do.
+":usr/share/regim/lpsd-first-account.reg" = "usr/share/regim/lpsd-first-account.reg"
+# The script that service runs. It holds the password, so it travels with the
+# service that invokes it rather than with the daemon.
+":usr/libexec/lpsd/first-account" = "usr/libexec/lpsd/first-account"

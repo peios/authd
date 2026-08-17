@@ -1,0 +1,27 @@
+[workspace]
+resolver = "2"
+members = ["libauthd", "libtty", "authd", "lpsd", "lps", "login"]
+
+# authd is its own workspace root, like peios-rs and libpeios.
+#
+# Members, and the trust boundaries between them:
+#
+#   libauthd  the wire protocols. No I/O, no policy, no privilege.
+#   authd     the daemon. Runs at PeiosTcb with SeCreateTokenPrivilege.
+#   lpsd      the local principal source. Owns the local identity bytes.
+#   lps       administers lpsd's store, over a socket. Owns nothing.
+#   login     /bin/login. Runs as LogonService.
+#
+# libtty is the exception that proves the rule: not a trust domain but a
+# utility, shared by login and lps because both must read a password from a
+# terminal and neither should own a second copy of the termios guard.
+#
+# Each daemon is a separate crate *because* each sits in a separate trust
+# domain: sharing a crate would make it easy to share code across a boundary by
+# accident. libauthd is the only thing they are permitted to depend on, and it
+# is deliberately inert — types and a codec, nothing that can act.
+#
+# The three-way split is the shape the whole design rests on. authd can mint but
+# cannot verify; lpsd can verify but cannot mint; login can do neither and
+# merely collects. Compromising lpsd yields the material an offline attack is
+# run against, not the ability to issue identity.

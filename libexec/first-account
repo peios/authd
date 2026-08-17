@@ -1,0 +1,45 @@
+#!/usr/bin/sh
+# Create the development account on a machine that has none.
+#
+# !! THE PASSWORD BELOW SHIPS IN THE IMAGE AND IS THEREFORE PUBLIC. !!
+# Anyone holding the ISO holds this credential. This file belongs on a live or
+# development image and nowhere else; a production image does not enable the
+# service that runs it, provisions an empty store, and has an administrator
+# create the first account with `lps add`.
+#
+# Run by peinit as a oneshot service ordered after lpsd, because `lps` talks to
+# lpsd over /run/lpsd/admin.sock and the daemon has to be listening. That is
+# also why this cannot be an autorun script: autoruns are Phase 1.5, before any
+# service exists.
+#
+# It runs as SYSTEM, which `lps` accepts alongside BUILTIN\Administrators
+# precisely for this case -- at first boot there is no administrator yet, which
+# is the problem this script exists to solve.
+#
+# No self-deletion and no idempotence guard. On a live image the root is tmpfs,
+# so every boot provisions a fresh store and this runs against an empty one; on
+# an installed system the installer drops this file and the service alongside it
+# when it commits the filesystem to disk.
+set -eu
+
+NAME=jack
+PASSWORD=password
+# BUILTIN\Administrators. Without it the account can traverse to files but
+# cannot enumerate a directory -- the tree-wide seed ACL grants administrators
+# and SYSTEM, and nothing else.
+#
+# Named rather than written as S-1-5-32-544: lpsd resolves group names, so the
+# script says what it means. A SID would still work.
+GROUP=Administrators
+
+# One line, not two: `lps` reads a single line when stdin is not a terminal,
+# because down a pipe there is nobody to confirm the password with.
+#
+# --no-prompt is belt and braces. `lps add` already asks for nothing when stdin
+# is not a terminal, and a pipe is not one -- but a prompt appearing here would
+# consume the password line and hang the boot, so the intent is stated rather
+# than inferred.
+#
+# An absolute path: a service's environment is not a login shell's and carries
+# no PATH to rely on.
+printf '%s\n' "$PASSWORD" | /usr/bin/lps add "$NAME" --group "$GROUP" --no-prompt

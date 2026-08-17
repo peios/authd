@@ -1,0 +1,15 @@
+# login — Peios' /bin/login, a PGSS Logon originator for terminal sessions.
+#
+# Deliberately carries NO package dependency on authd. What it needs at runtime
+# is *an* authority listening on /run/logon.sock, which is a protocol contract
+# rather than a package one — and expressing it as `Requires: authd` would
+# assert exactly the coupling PGSS Logon exists to avoid.
+#
+# Ordering at boot is peinit's job (the compiled-in login service `requires`
+# authd), not the package manager's.
+
+[package]
+description = "Peios login - a PGSS Logon originator for terminal sessions"
+
+[files]
+":usr/bin/login" = "usr/bin/login"

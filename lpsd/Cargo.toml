@@ -1,0 +1,34 @@
+[package]
+name = "lpsd"
+version = "0.0.1"
+edition = "2024"
+license = "MIT"
+description = "Peios' local principal source daemon — the local half of PSI."
+publish = false
+
+[[bin]]
+name = "lpsd"
+path = "src/main.rs"
+
+# lpsd holds every local credential verifier on the system, so its dependency
+# list is kept as short as authd's — for a different reason. authd is guarded
+# because it can mint; lpsd is guarded because compromising it hands over the
+# thing an offline attack is run against.
+[dependencies]
+libauthd = { path = "../libauthd" }
+peios = { path = "../../peios-rs/peios" }
+# The password verifier. This is the one dependency lpsd exists to have: a
+# memory-hard KDF is not something to own outright, because the value is in the
+# scrutiny the implementation has had, not in the algorithm being hard to write.
+#
+# `default-features = false` drops `password-hash` and `rand`. lpsd neither
+# parses nor emits PHC strings — the store carries parameters as fields, so an
+# encoded-string parser would be a second, redundant representation of them —
+# and it draws its own randomness from the kernel rather than through a trait
+# object. What is left is the KDF.
+argon2 = { version = "0.5", default-features = false, features = ["alloc"] }
+# `getrandom(2)`, for domain SIDs and salts. Bindings to one syscall, not
+# logic — the same exception libauthd carves out for its transport. std has no
+# equivalent, and the alternative (`/dev/urandom`) cannot promise the CRNG was
+# seeded, which is exactly the promise first-boot provisioning needs.
+libc = "0.2"
