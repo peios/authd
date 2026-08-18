@@ -42,6 +42,8 @@ struct Requested {
     /// Fail rather than ask. For a script that wants a missing field to be an
     /// error rather than a hang — which on a terminal it otherwise would be.
     no_prompt: bool,
+    /// Create a principal that authenticates without a credential.
+    no_password: bool,
 }
 
 /// `lps add`.
@@ -91,7 +93,15 @@ pub fn add(options: &[&str]) -> Result<(), Failed> {
     // Read before connecting: a prompt that appears and then fails because the
     // daemon is unreachable wastes the operator's typing, and there is no reason
     // to hold a connection open while a human thinks.
-    let secret = confirmed_password(&format!("Password for {name}: "))?;
+    //
+    // `--no-password` asks for nothing, including in the interactive flow. An
+    // operator who has said the account needs no credential should not then be
+    // asked to invent one.
+    let secret = if requested.no_password {
+        None
+    } else {
+        Some(confirmed_password(&format!("Password for {name}: "))?)
+    };
 
     if interactive {
         describe(&name, &requested);
@@ -107,7 +117,10 @@ pub fn add(options: &[&str]) -> Result<(), Failed> {
     let mut session = Session::open()?;
     let message = lps::encode_add(&lps::Add {
         name: name.clone(),
-        secret: secret.expose(),
+        credential: match &secret {
+            Some(secret) => lps::Credential::Password(secret.expose()),
+            None => lps::Credential::None,
+        },
         enabled: requested.enabled,
         groups: requested.groups.clone(),
     })
@@ -173,6 +186,11 @@ fn parse(options: &[&str]) -> Result<Requested, Failed> {
             }
             "--no-prompt" => {
                 requested.no_prompt = true;
+                rest = tail;
+                continue;
+            }
+            "--no-password" => {
+                requested.no_password = true;
                 rest = tail;
                 continue;
             }
@@ -267,12 +285,31 @@ fn confirm(question: &str) -> Result<bool, Failed> {
 /// tool and compare two unrelated things. So a non-terminal reads exactly one
 /// line and takes it at face value, which is what the boot-time script that
 /// creates the first account on a fresh image relies on.
+/// Read a password, refusing an empty one.
+///
+/// The daemon refuses it too, and that is where the rule lives — but a round
+/// trip to be told the obvious is a poor way to learn it, and an operator who
+/// pressed Enter by accident should find out before anything is sent.
+///
+/// Empty is not a way to spell "no password": `--no-password` is, and the
+/// message says so, because the two produce accounts that behave differently
+/// and an operator who wanted the second should not get the first.
 pub fn confirmed_password(label: &str) -> Result<libauthd::Secret, Failed> {
     let read =
         |error: std::io::Error| Failed::Refused(format!("could not read a password: {error}"));
+    let refuse_empty = |secret: libauthd::Secret| {
+        if secret.expose().is_empty() {
+            return Err(Failed::Refused(
+                "an empty password is not a password: pass --no-password to create a principal \
+                 that authenticates without one"
+                    .into(),
+            ));
+        }
+        Ok(secret)
+    };
 
     if !libtty::stdin_is_a_terminal() {
-        return libtty::read_line_secret().map_err(read);
+        return refuse_empty(libtty::read_line_secret().map_err(read)?);
     }
 
     let first = libtty::prompt_secret(label).map_err(read)?;
@@ -281,7 +318,7 @@ pub fn confirmed_password(label: &str) -> Result<libauthd::Secret, Failed> {
     if first.expose() != again.expose() {
         return Err(Failed::Refused("the passwords did not match".into()));
     }
-    Ok(first)
+    refuse_empty(first)
 }
 
 #[cfg(test)]
@@ -360,6 +397,18 @@ mod tests {
     #[test]
     fn an_option_missing_its_value_is_refused() {
         assert!(matches!(parse(&["jack", "--home"]), Err(Failed::Usage(_))));
+    }
+
+    #[test]
+    fn no_password_is_recorded_without_consuming_a_value() {
+        let requested = parsed(&["kiosk", "--no-password", "--home", "/srv/kiosk"]);
+        assert!(requested.no_password);
+        assert_eq!(requested.home.as_deref(), Some("/srv/kiosk"));
+    }
+
+    #[test]
+    fn a_principal_needs_no_password_flag_by_default() {
+        assert!(!parsed(&["jack"]).no_password);
     }
 
     #[test]

@@ -1,7 +1,8 @@
 # authd — Peios' authentication daemon (the PGSS Logon authority), lpsd (the
-# local principal source), lps (its administration tool) and login (the terminal
-# logon originator). All four binaries come from one cargo workspace and are
-# carved into separate packages; see packages.pekit/ for why.
+# local principal source), lps (its administration tool), login (the terminal
+# logon originator) and libnss_peios.so (the NSS shim through which a POSIX
+# program sees a Peios principal). All of it comes from one cargo workspace and
+# is carved into separate packages; see packages.pekit/ for why.
 #
 # The libpeios bootstrap mirrors peinit's and for the same reason: use
 # pkg-config rather than PEIOS_LIB_DIR, so peios-sys does not bake a
@@ -79,6 +80,7 @@ fi
 export BINDGEN_EXTRA_CLANG_ARGS="-isystem $(gcc -print-file-name=include) ${BINDGEN_EXTRA_CLANG_ARGS:-}"
 
 cargo build --release --locked --bin authd --bin lpsd --bin lps --bin login --target-dir "$PEKIT_OUT/target"
+cargo build --release --locked -p nss_peios --target-dir "$PEKIT_OUT/target"
 
 mkdir -p "$PEKIT_OUT/usr/sbin" "$PEKIT_OUT/usr/bin"
 install -m 0755 "$PEKIT_OUT/target/release/authd" "$PEKIT_OUT/usr/sbin/authd"
@@ -86,6 +88,18 @@ install -m 0755 "$PEKIT_OUT/target/release/lpsd" "$PEKIT_OUT/usr/sbin/lpsd"
 install -m 0755 "$PEKIT_OUT/target/release/login" "$PEKIT_OUT/usr/bin/login"
 install -m 0755 "$PEKIT_OUT/target/release/lps" "$PEKIT_OUT/usr/bin/lps"
 
+# glibc dlopens an NSS module by name — `libnss_peios.so.2`, where the 2 is the
+# NSS interface version rather than anything about this module. On Peios the
+# name is not derived from nsswitch.conf: glibc is patched so the identity
+# databases reach this module and nothing else (pkgs/glibc/patches/nss).
+#
+# Two things about the path. The SONAME cargo produces is not the name that gets
+# loaded, so the rename is what makes it findable at all. And it goes in the
+# triplet directory rather than /usr/lib, because that is glibc's configured
+# --libdir and therefore where its dlopen search path looks — the same place
+# libpeios installs, for the same reason.
+mkdir -p "$PEKIT_OUT/usr/lib/x86_64-linux-peios"
+install -m 0644 "$PEKIT_OUT/target/release/libnss_peios.so" "$PEKIT_OUT/usr/lib/x86_64-linux-peios/libnss_peios.so.2"
 
 # The script that creates the first account on a fresh image, run by the
 # oneshot service lpsd-first-account.reg defines. It carries a password that

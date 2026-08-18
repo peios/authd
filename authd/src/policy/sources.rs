@@ -58,6 +58,21 @@ const FOREIGN_MEMBERSHIPS_VALUE: &str = "MayAssertForeignMemberships";
 /// lower-trust party writing into the key that governs what it may do.
 const DOMAIN_VALUE: &str = "Domain";
 
+/// Where this source sits when authd resolves a name nobody qualified.
+///
+/// Lower first. This is the value that decides who `jack` is on a machine with
+/// more than one source, and it is deliberately explicit: resolving in
+/// registration order would let a slow disk change which principal a name refers
+/// to, and two components disagreeing about that is a confused deputy rather
+/// than a cosmetic inconsistency.
+const SEARCH_ORDER_VALUE: &str = "SearchOrder";
+
+/// The order a source resolves at when it names none.
+///
+/// Mid-range, so a source can be configured either side of the default without
+/// having to renumber the ones already there.
+pub const DEFAULT_SEARCH_ORDER: u32 = 1000;
+
 /// How many source entries authd will consider.
 ///
 /// A bound on work done for an unauthenticated connection, not a policy limit.
@@ -97,6 +112,9 @@ pub struct SourceEntry {
     /// The Unix ID range this source's numbers land in. `None` when
     /// [`UNIX_ID_BASE_VALUE`] is absent or unusable.
     pub unix_id_range: Option<unix_id::Range>,
+    /// Where this source sits when resolving a bare name — see
+    /// [`SEARCH_ORDER_VALUE`].
+    pub search_order: u32,
 }
 
 /// Every configured principal source.
@@ -157,12 +175,13 @@ pub fn sources() -> Vec<SourceEntry> {
             continue;
         };
 
-        let (may_assert_foreign_memberships, pinned_domain, unix_id_range) =
+        let (may_assert_foreign_memberships, pinned_domain, unix_id_range, order) =
             match Key::open(Some(&key), &name, KeyAccess::QUERY_VALUE, OpenFlags::empty()) {
                 Ok(entry) => (
                     is_set(&entry, FOREIGN_MEMBERSHIPS_VALUE),
                     pinned_domain(&entry, &name),
                     unix_id_range(&entry, &name),
+                    search_order(&entry, &name),
                 ),
                 Err(error) => {
                     // The entry exists — it was just enumerated — so failing to
@@ -173,7 +192,7 @@ pub fn sources() -> Vec<SourceEntry> {
                         "could not read {SOURCES_KEY}\\{name} ({error}); assuming no \
                          foreign memberships and no Unix ID range"
                     ));
-                    (false, None, None)
+                    (false, None, None, DEFAULT_SEARCH_ORDER)
                 }
             };
 
@@ -183,6 +202,7 @@ pub fn sources() -> Vec<SourceEntry> {
             may_assert_foreign_memberships,
             pinned_domain,
             unix_id_range,
+            search_order: order,
         });
     }
 
@@ -284,6 +304,27 @@ fn unix_id_range(entry: &Key, name: &str) -> Option<unix_id::Range> {
 /// have — visible, and failing towards nobody registering.
 fn unsatisfiable_pin() -> Sid {
     Sid::well_known(WellKnown::Null)
+}
+
+/// Where a source sits when resolving a bare name.
+///
+/// Lower is consulted first. Sources sharing a value are ordered by name, so the
+/// result never depends on which source happened to register first — a slow disk
+/// must not be able to change which principal `jack` refers to.
+fn search_order(key: &Key, name: &str) -> u32 {
+    match key.query_value(SEARCH_ORDER_VALUE.as_bytes(), None) {
+        Ok(value) => match dword(&value.ty, &value.data) {
+            Some(order) => order,
+            None => {
+                log::warn(format_args!(
+                    "{SOURCES_KEY}\\{name}\\{SEARCH_ORDER_VALUE} is not a REG_DWORD; \
+                     resolving it at the default {DEFAULT_SEARCH_ORDER}"
+                ));
+                DEFAULT_SEARCH_ORDER
+            }
+        },
+        Err(_) => DEFAULT_SEARCH_ORDER,
+    }
 }
 
 /// Whether a value is present and not zero. Absent is false.

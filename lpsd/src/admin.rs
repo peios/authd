@@ -467,7 +467,10 @@ fn dispatch(
                     groups,
                     ..NewPrincipal::named(&add.name)
                 },
-                add.secret,
+                match add.credential {
+                    lps::Credential::Password(secret) => Some(secret),
+                    lps::Credential::None => None,
+                },
             )?;
             Ok((Changed::Yes, encoded(lps::encode_created(rid))?))
         }

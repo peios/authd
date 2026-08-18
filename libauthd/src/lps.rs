@@ -326,9 +326,33 @@ pub struct NamedClaim {
 /// Borrows `secret` from the message buffer, so the password is never copied
 /// out of the self-wiping buffer the transport read it into.
 #[derive(Debug)]
+pub enum Credential<'a> {
+    /// A password, verified at every logon. Never empty — an empty password and
+    /// no password are different things, and the daemon refuses the first.
+    Password(&'a [u8]),
+    /// None required: this principal authenticates without collecting anything.
+    None,
+}
+
+impl Credential<'_> {
+    /// The wire tag. Explicit rather than inferring "no password" from an empty
+    /// secret, so a client cannot create a passwordless principal by accident —
+    /// the most consequential thing this message can do should be the thing it
+    /// most plainly says.
+    const TAG_NONE: u8 = 0;
+    const TAG_PASSWORD: u8 = 1;
+
+    fn tag(&self) -> u8 {
+        match self {
+            Self::Password(_) => Self::TAG_PASSWORD,
+            Self::None => Self::TAG_NONE,
+        }
+    }
+}
+
 pub struct Add<'a> {
     pub name: String,
-    pub secret: &'a [u8],
+    pub credential: Credential<'a>,
     pub enabled: bool,
     /// Groups as the operator wrote them, resolved by the daemon — see
     /// [`Membership::group`].
@@ -462,7 +486,16 @@ pub fn encode_add(add: &Add<'_>) -> Result<Secret, WireError> {
     let mut w = begin(MSG_ADD);
     let body = w.open();
     w.string(&add.name, MAX_NAME_BYTES)?;
-    w.bytes(add.secret, MAX_SECRET_BYTES)?;
+    w.u8(add.credential.tag());
+    // The frame is written either way, so the field count does not depend on
+    // the tag and a decoder never has to branch before it has read one.
+    w.bytes(
+        match &add.credential {
+            Credential::Password(secret) => secret,
+            Credential::None => &[][..],
+        },
+        MAX_SECRET_BYTES,
+    )?;
     w.u8(u8::from(add.enabled));
     // Each group in its own frame, matching PSI: `Reader::array` opens one
     // frame per element, so a bare `bytes` here would be read as a frame length
@@ -484,9 +517,19 @@ pub fn encode_add(add: &Add<'_>) -> Result<Secret, WireError> {
 /// **The caller must wipe `buf` afterwards.** It holds a password in the clear.
 pub fn decode_add(buf: &[u8]) -> Result<Add<'_>, WireError> {
     let mut b = open_body(buf, MSG_ADD)?;
+    let name = b.string(MAX_NAME_BYTES)?.to_owned();
+    let tag = b.u8()?;
+    let secret = b.bytes(MAX_SECRET_BYTES)?;
+    let credential = match tag {
+        Credential::TAG_NONE => Credential::None,
+        Credential::TAG_PASSWORD => Credential::Password(secret),
+        // The closed-enum rule: an unrecognised credential kind fails the
+        // exchange rather than defaulting to either answer.
+        _ => return Err(WireError::UnknownValue),
+    };
     Ok(Add {
-        name: b.string(MAX_NAME_BYTES)?.to_owned(),
-        secret: b.bytes(MAX_SECRET_BYTES)?,
+        name,
+        credential,
         enabled: b.u8()? != 0,
         groups: b.array(MAX_GROUPS, |g| Ok(g.string(MAX_NAME_BYTES)?.to_owned()))?,
     })
@@ -938,14 +981,14 @@ mod tests {
     fn add_round_trips() {
         let add = Add {
             name: "jack".into(),
-            secret: b"hunter2",
+            credential: Credential::Password(b"hunter2"),
             enabled: true,
             groups: vec!["Administrators".into()],
         };
         let encoded = encode_add(&add).unwrap();
         let decoded = decode_add(encoded.expose()).unwrap();
         assert_eq!(decoded.name, "jack");
-        assert_eq!(decoded.secret, b"hunter2");
+        assert!(matches!(decoded.credential, Credential::Password(b"hunter2")));
         assert!(decoded.enabled);
         assert_eq!(decoded.groups, vec!["Administrators".to_string()]);
     }
@@ -954,7 +997,7 @@ mod tests {
     fn add_with_no_groups_round_trips() {
         let add = Add {
             name: "guest".into(),
-            secret: b"",
+            credential: Credential::None,
             enabled: false,
             groups: vec![],
         };
@@ -962,7 +1005,67 @@ mod tests {
         let decoded = decode_add(encoded.expose()).unwrap();
         assert!(decoded.groups.is_empty());
         assert!(!decoded.enabled);
-        assert_eq!(decoded.secret, b"");
+        assert!(matches!(decoded.credential, Credential::None));
+    }
+
+    /// The closed-enum rule. A credential kind this build does not know must
+    /// fail the exchange rather than fall back to either answer — defaulting to
+    /// `None` would create a passwordless principal from a message nobody
+    /// understood.
+    #[test]
+    fn an_unknown_credential_kind_is_refused() {
+        let encoded = encode_add(&Add {
+            name: "jack".into(),
+            credential: Credential::Password(b"pw"),
+            enabled: true,
+            groups: vec![],
+        })
+        .unwrap();
+
+        // The tag sits immediately after the name, which is the first field.
+        let mut bytes = encoded.expose().to_vec();
+        let tag = bytes
+            .windows(4)
+            .position(|w| w == b"jack")
+            .expect("the name is in the message")
+            + 4;
+        assert_eq!(bytes[tag], Credential::TAG_PASSWORD);
+        bytes[tag] = 0x7f;
+
+        // `matches!` rather than `unwrap_err`: `Add` has no `Debug`, on purpose
+        // — it holds a password, and a derived one is how that reaches a log.
+        assert!(matches!(decode_add(&bytes), Err(WireError::UnknownValue)));
+    }
+
+    /// A passwordless add and an add with an empty password must not encode to
+    /// the same bytes — the whole point of the tag is that the two are
+    /// different requests.
+    #[test]
+    fn no_credential_and_an_empty_password_are_distinguishable() {
+        let none = encode_add(&Add {
+            name: "jack".into(),
+            credential: Credential::None,
+            enabled: true,
+            groups: vec![],
+        })
+        .unwrap();
+        let empty = encode_add(&Add {
+            name: "jack".into(),
+            credential: Credential::Password(b""),
+            enabled: true,
+            groups: vec![],
+        })
+        .unwrap();
+
+        assert_ne!(none.expose(), empty.expose());
+        assert!(matches!(
+            decode_add(none.expose()).unwrap().credential,
+            Credential::None
+        ));
+        assert!(matches!(
+            decode_add(empty.expose()).unwrap().credential,
+            Credential::Password(b"")
+        ));
     }
 
     #[test]
@@ -1295,7 +1398,7 @@ mod tests {
         assert_eq!(
             encode_add(&Add {
                 name: "jack".into(),
-                secret: &long,
+                credential: Credential::Password(&long),
                 enabled: true,
                 groups: vec![],
             })
@@ -1309,7 +1412,7 @@ mod tests {
         assert_eq!(
             encode_add(&Add {
                 name: "jack".into(),
-                secret: b"pw",
+                credential: Credential::Password(b"pw"),
                 enabled: true,
                 groups: vec!["Administrators".to_string(); MAX_GROUPS + 1],
             })

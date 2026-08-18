@@ -632,6 +632,30 @@ mod tests {
         }
     }
 
+    /// An empty capability list must survive the round trip *as empty*.
+    ///
+    /// The decoder defaults a **missing** field to `[Password]`, for clients
+    /// that predate it. An explicitly empty list is a different statement — "I
+    /// can complete a logon that requires no interaction, and nothing else"
+    /// (PSD-012 §4.1) — and it is the entire mechanism behind
+    /// `login --try-no-password`. If the two ever collapsed together, that flag
+    /// would quietly start prompting instead of falling back, and the failure
+    /// would look like a UX quirk rather than a wire bug.
+    #[test]
+    fn an_empty_capability_list_is_not_a_missing_one() {
+        let mut start = start();
+        start.supported_credential_types = vec![];
+
+        let encoded = encode_logon_start(&start).expect("must encode");
+        let decoded = decode_logon_start(&encoded).expect("must decode");
+
+        assert!(
+            decoded.supported_credential_types.is_empty(),
+            "an explicit empty list decoded as {:?}",
+            decoded.supported_credential_types,
+        );
+    }
+
     fn request() -> CredentialRequest {
         CredentialRequest {
             messages: vec![Message {

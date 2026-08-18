@@ -1,21 +1,27 @@
 # Base metadata shared by every package carved from the authd build tree.
 #
-# Four packages come out of one build.main, and the split is deliberate rather
-# than cosmetic — it mirrors four trust domains:
+# Five packages come out of one build.main, and the split is deliberate rather
+# than cosmetic — it mirrors five trust domains:
 #
-#   authd  Mainline's PGSS Logon *authority*. Mints, cannot verify.
-#   lpsd   a *principal source*. Verifies, cannot mint.
-#   lps    lpsd's *administration tool*. Neither; it asks, over a socket.
-#   login  a PGSS Logon *client*. Neither; it collects.
+#   authd      Mainline's PGSS Logon *authority*. Mints, cannot verify.
+#   lpsd       a *principal source*. Verifies, cannot mint.
+#   lps        lpsd's *administration tool*. Neither; it asks, over a socket.
+#   login      a PGSS Logon *client*. Neither; it collects.
+#   nss-peios  a PGSS Logon *identity client*, loaded into every process.
 #
 # A machine could run a different authority and keep this login, a different
 # logon originator against this authd, or an entirely different principal source
 # behind it. Shipping them as one package would make that story false at the
 # packaging layer.
+#
+# nss-peios is the sharpest case for the split rather than the softest. It is
+# the only thing here that ends up mapped into every address space on the
+# system, so an image that wants an authority without that reach must be able to
+# say so by not installing a package.
 
 format = "peipkg"
 
 [package]
-version      = "{{version}}-4"
+version      = "{{version}}-5"
 architecture = "x86_64"
 license      = "MIT"
