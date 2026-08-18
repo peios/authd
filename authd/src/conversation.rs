@@ -252,6 +252,21 @@ fn relay(
                 ));
                 return deny(stream, refusal.denial, &refusal.reason);
             }
+            // A lookup answer, on a logon conversation. authd allocated this
+            // identifier for a logon and asked no question a query could answer,
+            // so the source has confused two of its own conversations — which
+            // means anything else it says on this one is suspect too.
+            Inbound::Results(_) | Inbound::Page(_) => {
+                log::error(format_args!(
+                    "source {} answered a logon with a lookup result",
+                    conversation.source_name()
+                ));
+                return deny(
+                    stream,
+                    Denial::Internal,
+                    "The authority could not complete the logon.",
+                );
+            }
         }
     }
 

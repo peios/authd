@@ -58,6 +58,7 @@ mod admin;
 mod codec;
 mod fs;
 mod log;
+mod query;
 mod random;
 mod store;
 mod verifier;
@@ -307,6 +308,18 @@ fn register(stream: &UnixStream, store: &Store) -> io::Result<psi::Registered> {
     let message = psi::encode_register(&psi::Register {
         source_name: SOURCE_NAME.to_string(),
         domain: domain.as_ref().as_bytes().to_vec(),
+        // Everything: the store is a few hundred records held in memory, so
+        // there is no query lpsd cannot answer and no reason to decline one.
+        capabilities: psi::Capabilities::QUERIES
+            | psi::Capabilities::ENUMERATES
+            | psi::Capabilities::MEMBERS
+            | psi::Capabilities::PUSHES_CHANGES,
+        // Zero, and correct rather than lazy: lpsd pushes an invalidation on
+        // every write, so an entry stays good until it says otherwise. A time
+        // limit would only make authd re-ask for answers it already knows are
+        // current.
+        entry_ttl: 0,
+        max_batch: psi::MAX_KEYS as u32,
     })
     .map_err(|_| io::Error::other("could not encode a registration"))?;
     send_message(stream, &message)?;
@@ -352,7 +365,20 @@ fn pump(
         if ready.admin {
             match listener.accept() {
                 Ok((connection, _)) => admin::serve(connection, store, registered, |store| {
-                    store.save(&RealFs, Path::new(store::STORE_PATH))
+                    let saved = store.save(&RealFs, Path::new(store::STORE_PATH));
+                    if saved.is_ok() {
+                        // Here rather than after `serve` returns, because a
+                        // failed save rolls the store back and there is then
+                        // nothing to invalidate.
+                        //
+                        // The ordering PSD-013 §5.7 requires — the notification
+                        // before the new answer is observable — is structural
+                        // rather than careful: one thread serves both
+                        // descriptors, so no query can be answered until this
+                        // returns to the poll loop.
+                        notify_changed(stream);
+                    }
+                    saved
                 }),
                 Err(error) => log::warn(format_args!("admin: could not accept: {error}")),
             }
@@ -376,9 +402,13 @@ fn pump(
         };
 
         match envelope.msg_type {
-            psi::MSG_AUTHENTICATE => {
-                begin(stream, &mut pending, envelope.conversation, received.expose())?
-            }
+            psi::MSG_AUTHENTICATE => begin(
+                stream,
+                store,
+                &mut pending,
+                envelope.conversation,
+                received.expose(),
+            )?,
             psi::MSG_CREDENTIAL_RESPONSE => answer(
                 stream,
                 store,
@@ -389,6 +419,10 @@ fn pump(
             psi::MSG_ABANDON => {
                 pending.remove(&envelope.conversation);
             }
+            psi::MSG_QUERY => serve_query(stream, store, envelope.conversation, received.expose())?,
+            psi::MSG_ENUMERATE_SOURCE => {
+                serve_enumeration(stream, store, envelope.conversation, received.expose())?
+            }
             other => {
                 log::warn(format_args!("unexpected message type {other:#06x}"));
             }
@@ -396,9 +430,88 @@ fn pump(
     }
 }
 
-/// Open a conversation: decide what to ask for.
+/// Answer a lookup. One message in, one message out; the conversation is over.
+///
+/// A query is not a logon and holds no state, so nothing goes into `pending`.
+fn serve_query(
+    stream: &UnixStream,
+    store: &Store,
+    conversation: u64,
+    buf: &[u8],
+) -> io::Result<()> {
+    let Ok(query) = psi::decode_query(buf) else {
+        return refuse_query(stream, conversation, "malformed query");
+    };
+    let result = query::answer(store, &query);
+    match psi::encode_query_result(conversation, &result) {
+        Ok(message) => send_message(stream, &message),
+        // The answers were correct and too large to carry. Refusing the whole
+        // conversation is right: a short array would pair answers with the wrong
+        // questions, which is worse than no answer.
+        Err(_) => refuse_query(stream, conversation, "the answer does not fit one message"),
+    }
+}
+
+/// Answer an enumeration page.
+fn serve_enumeration(
+    stream: &UnixStream,
+    store: &Store,
+    conversation: u64,
+    buf: &[u8],
+) -> io::Result<()> {
+    let Ok(request) = psi::decode_enumerate_source(buf) else {
+        return refuse_query(stream, conversation, "malformed enumeration");
+    };
+    let result = query::enumerate(store, &request);
+    match psi::encode_enumerate_result(conversation, &result) {
+        Ok(message) => send_message(stream, &message),
+        Err(_) => refuse_query(stream, conversation, "the page does not fit one message"),
+    }
+}
+
+fn refuse_query(stream: &UnixStream, conversation: u64, reason: &str) -> io::Result<()> {
+    log::warn(format_args!("query: refusing conversation {conversation}: {reason}"));
+    let message = psi::encode_refusal(
+        conversation,
+        &psi::Refusal {
+            denial: Denial::MalformedRequest,
+            reason: reason.to_string(),
+        },
+    )
+    .map_err(|_| io::Error::other("could not encode a refusal"))?;
+    send_message(stream, &message)
+}
+
+/// Tell the authority that everything here may have changed.
+///
+/// Sent on every administrative write, and deliberately before the write is
+/// observable through a query: an invalidation arriving *after* the new answer
+/// leaves a window in which authd's cache and this store disagree while both
+/// believe themselves current — which is indistinguishable, from authd's side,
+/// from the notification never arriving at all.
+///
+/// [`psi::ChangeScope::All`] rather than naming the object. Over-invalidating
+/// costs a query; under-invalidating costs correctness, and the administrative
+/// protocol has calls that touch more than one principal.
+fn notify_changed(stream: &UnixStream) {
+    let Ok(message) = psi::encode_changed(&psi::Changed {
+        scope: psi::ChangeScope::All,
+        sid: Vec::new(),
+    }) else {
+        return;
+    };
+    if let Err(error) = send_message(stream, &message) {
+        // Not fatal. authd treats a lost connection as an invalidation of
+        // everything this source holds, so the failure this could cause is the
+        // one it already handles.
+        log::warn(format_args!("could not notify the authority of a change: {error}"));
+    }
+}
+
+/// Open a conversation: decide what to ask for, or that nothing is needed.
 fn begin(
     stream: &UnixStream,
+    store: &Store,
     pending: &mut HashMap<u64, Pending>,
     conversation: u64,
     buf: &[u8],
@@ -433,39 +546,89 @@ fn begin(
         );
     }
 
-    // The client must be able to render what we are about to ask for. authd
-    // polices this too, and would refuse to relay a prompt the client cannot
-    // handle — but the source is where the choice is actually made, so this is
-    // where the capability list belongs.
-    if !request
-        .start
-        .supported_credential_types
-        .contains(&CredentialType::Password)
-    {
-        return refuse(
-            stream,
-            conversation,
-            Denial::AuthenticationFailed,
-            "No supported authentication method.",
-        );
+    // What this principal needs, before anything is collected. Only two answers
+    // come back, and neither separates "exists" from "does not exist" — see
+    // `Store::credential_requirement`.
+    match store.credential_requirement(&request.start.identifier) {
+        // Nothing to collect. Assert straight away: the relay carries an
+        // assertion on the first inbound perfectly well (PGSS Logon §4.1 —
+        // "a client that supports nothing … an authority MUST either complete
+        // the logon without prompting or deny it"), so no prompt is ever
+        // rendered and the client shows nothing.
+        store::CredentialRequirement::None(identity) => {
+            log::info(format_args!(
+                "asserting {} without a credential",
+                identity.name
+            ));
+            assert_identity(stream, conversation, &identity)
+        }
+
+        store::CredentialRequirement::Password => {
+            // The client must be able to render what we are about to ask for.
+            // Checked *here*, after the requirement is known, rather than on the
+            // way in: a client that advertises nothing is asking whether this
+            // principal is passwordless, and answering "no supported method"
+            // before looking would refuse the one question it came to ask.
+            //
+            // authd polices this too and would catch the prompt on the way out,
+            // but its denial says the authority asked for something the client
+            // cannot provide — which reads as an authd fault on every ordinary
+            // fallback. The source is where the choice is made, so the refusal
+            // belongs here.
+            if !request
+                .start
+                .supported_credential_types
+                .contains(&CredentialType::Password)
+            {
+                return refuse(
+                    stream,
+                    conversation,
+                    Denial::AuthenticationFailed,
+                    "Authentication failed.",
+                );
+            }
+
+            let identifier = request.start.identifier.clone();
+            pending.insert(conversation, Pending { identifier });
+
+            ask(stream, conversation, &request.start.identifier)
+        }
     }
-
-    pending.insert(
-        conversation,
-        Pending {
-            identifier: request.start.identifier,
-        },
-    );
-
-    ask(stream, conversation)
 }
 
-/// Ask for the password.
-fn ask(stream: &UnixStream, conversation: u64) -> io::Result<()> {
+/// An identifier, rendered safe to put on a terminal.
+///
+/// The identifier is arbitrary bytes chosen by the client, and this message is
+/// displayed by `login` on a real tty. Control characters are replaced rather
+/// than passed through, so a name cannot carry escape sequences that reposition
+/// the cursor or clear the screen around a password prompt.
+///
+/// Not a security boundary — the caller is rendering its own bytes to its own
+/// terminal — but a prompt is a bad place to start trusting input, and a
+/// relayed identifier reaches a terminal nobody has vetted.
+fn displayable(identifier: &[u8]) -> String {
+    String::from_utf8_lossy(identifier)
+        .chars()
+        .map(|c| if c.is_control() { '\u{fffd}' } else { c })
+        .collect()
+}
+
+/// Ask for the password, saying who is being logged in.
+///
+/// The name comes back from the authority rather than being printed by the
+/// client, because the client does not know the realm — a qualified
+/// `name@realm` is the authority's to render once realms exist, and putting the
+/// line here now means only the text changes then.
+///
+/// Rendered from the identifier the *client sent*, never from a store lookup.
+/// Echoing a looked-up name would say this principal exists, which is exactly
+/// the distinction obligation 22 forbids; echoing the caller's own bytes back
+/// to the caller says nothing it did not already know.
+fn ask(stream: &UnixStream, conversation: u64, identifier: &[u8]) -> io::Result<()> {
     let request = CredentialRequest {
         messages: vec![Message {
             severity: MessageSeverity::Info,
-            text: format!("Authenticating against {SOURCE_NAME}."),
+            text: format!("Logging in as {}", displayable(identifier)),
         }],
         prompts: vec![Prompt {
             credential_ref: PASSWORD_REF,

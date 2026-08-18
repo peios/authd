@@ -133,6 +133,31 @@ const MAX_GROUPS: usize = 128;
 const MAX_PATH_BYTES: usize = 4096;
 const MAX_DISPLAY_NAME_BYTES: usize = 256;
 
+/// Characters a principal or group name may not contain.
+///
+/// Every one of these is a separator somewhere a name is going to end up, and
+/// the damage is done by the reader rather than by us:
+///
+/// - `@` is reserved for the qualified-name syntax (`jack@local`) that realms
+///   will use. Nothing parses it yet, which is precisely why it has to be
+///   reserved now: an account literally named `jack@local` created today would
+///   collide with the syntax the day it arrives, and unpicking that means
+///   renaming principals that already exist.
+/// - `\` is the other spelling of a qualified name (`DOMAIN\jack`), reserved on
+///   the same grounds — and already given meaning by [`well_known_group`],
+///   which strips a `BUILTIN\` prefix.
+/// - `/` is a path separator, and a name becomes path components in
+///   [`default_home`].
+/// - `:` separates the fields of `/etc/passwd` and `/etc/group`.
+/// - `,` separates a group's members in `/etc/group`, and the subfields of
+///   GECOS.
+///
+/// Control characters — NUL, newline, carriage return, tab — are refused by the
+/// printable-ASCII rule in [`check_name`] rather than listed here. Those are the
+/// record separators, and a name carrying one could forge a whole line in any of
+/// those files, or in a log.
+const RESERVED_IN_NAME: &[u8] = b"@\\/:,";
+
 /// The shell a principal gets when nobody chose one.
 const DEFAULT_SHELL: &str = "/bin/sh";
 
@@ -189,6 +214,30 @@ pub fn well_known_group(name: &str) -> Option<Sid> {
         .iter()
         .find(|(known, _, _)| known.eq_ignore_ascii_case(name))
         .and_then(|(_, authority, subs)| Sid::build(*authority, subs).ok())
+}
+
+/// Groups the authority staples onto every token it mints.
+///
+/// Nothing records who is in them. `Everyone` and `Authenticated Users` are not
+/// memberships anyone stores; they are a rule authd applies at derivation, so
+/// "who is in this group" has no answer a store could give.
+///
+/// The distinction is not well-known-versus-local: `BUILTIN\Administrators` is
+/// equally well-known and lpsd holds real memberships into it. What matters is
+/// whether anything records an edge.
+///
+/// lpsd could return every principal it holds for these, and it would be a wrong
+/// answer rather than a partial one — it knows nothing of other sources'
+/// principals, and the group is a property of a token rather than of an account.
+const STAPLED_GROUPS: &[(u64, &[u32])] = &[
+    (1, &[0]),  // Everyone
+    (5, &[11]), // Authenticated Users
+];
+
+fn is_stapled(sid: &SidRef) -> bool {
+    STAPLED_GROUPS.iter().any(|(authority, subs)| {
+        Sid::build(*authority, subs).is_ok_and(|built| built.as_ref().as_bytes() == sid.as_bytes())
+    })
 }
 
 /// The name of a well-known group, if this is one.
@@ -256,7 +305,19 @@ struct Principal {
     /// principal is actually called.
     name: String,
     enabled: bool,
-    verifier: Verifier,
+    /// `None` means this principal authenticates with no credential at all.
+    ///
+    /// Distinct from a verifier over an empty password, which is why the empty
+    /// password is rejected outright ([`Store::add`]): two encodings of "type
+    /// nothing" that behave differently — one prompting, one not — is the kind
+    /// of ambiguity an administrator discovers at the worst moment.
+    ///
+    /// Whether the account *has* one is deliberately not derivable from
+    /// [`Store::authenticate`], which runs one derivation either way. The
+    /// distinction is drawn by [`Store::credential_requirement`], before any
+    /// credential is asked for, and only ever separates "passwordless" from
+    /// everything else — never "exists" from "does not exist".
+    verifier: Option<Verifier>,
     /// Groups lpsd says this principal belongs to.
     ///
     /// SIDs only. Whether a group is enabled, owner-marked or deny-only is a
@@ -336,6 +397,41 @@ pub struct GroupSummary {
     pub members: usize,
 }
 
+/// What a lookup key resolved to.
+///
+/// One enum rather than two lookups because principals and groups share a RID
+/// counter here: a relative identifier names at most one object, whichever kind
+/// it turns out to be.
+#[derive(Debug, Clone)]
+pub enum Object {
+    Principal(Record),
+    Group(GroupRecord),
+}
+
+/// A group this machine can name — one of its own, or a well-known one.
+#[derive(Debug, Clone)]
+pub struct GroupRecord {
+    pub sid: Sid,
+    pub name: String,
+    /// `None` for a well-known group, which lpsd does not number.
+    pub unix_id: Option<u32>,
+    /// Whether anything records membership edges into it. False for a group the
+    /// authority staples onto tokens — see [`STAPLED_GROUPS`].
+    pub enumerable: bool,
+}
+
+/// A principal in a group's membership list.
+#[derive(Debug, Clone)]
+pub struct Member {
+    pub sid: Sid,
+    pub name: String,
+    /// Relative to lpsd's range, like every other number it states.
+    pub unix_id: u32,
+    /// The paging cursor: RIDs are never reused, so resuming after one is stable
+    /// across a store that changed in between.
+    pub rid: u32,
+}
+
 /// One principal in full, as administration sees them.
 ///
 /// Carries composed SIDs rather than the domain and RIDs separately, so no
@@ -372,6 +468,41 @@ pub struct Identity {
     pub shell: String,
     pub display_name: String,
     pub claims: Vec<Claim>,
+}
+
+/// What the store needs before it can authenticate a given identifier.
+///
+/// Deliberately two variants and not three. There is no `NoSuchPrincipal`,
+/// because a source that answered one would hand an unauthenticated caller an
+/// account-existence oracle over the logon channel — which PGSS Logon
+/// obligation 22 forbids, and which the decoy verifier in
+/// [`Store::authenticate`] exists to prevent.
+#[derive(Debug)]
+pub enum CredentialRequirement {
+    /// Collect a password and call [`Store::authenticate`]. Also the answer for
+    /// a principal who does not exist, and for a disabled one.
+    Password,
+    /// Nothing to collect: this principal is already identified. Boxed because
+    /// an `Identity` is far larger than the other variant and this type is
+    /// returned by value on every logon.
+    None(Box<Identity>),
+}
+
+/// Refuse an empty password.
+///
+/// An empty password and no password are two spellings of "type nothing" that
+/// behave differently — one prompts and fails on anything else, the other never
+/// prompts — so the store admits exactly one of them. `lps add name --no-password`
+/// says it; `lps add name ""` is a mistake.
+fn refuse_empty_password(credential: Option<&[u8]>) -> Result<(), StoreError> {
+    if credential.is_some_and(<[u8]>::is_empty) {
+        return Err(StoreError::Invalid(
+            "an empty password is not a password: use --no-password to create a principal that \
+             authenticates without one"
+                .into(),
+        ));
+    }
+    Ok(())
 }
 
 /// Everything an administrator may choose when creating a principal.
@@ -569,6 +700,145 @@ impl Store {
     }
 
     /// Describe a group SID as fully as this machine can.
+    // -----------------------------------------------------------------------
+    // Lookup: answering about principals outside a logon
+    //
+    // PSI's `Query` (PSD-013 §5.5) asks about objects by name, by SID, or by
+    // *relative* identifier — never by an absolute Unix ID, because lpsd does
+    // not know its base and must not be able to act on one.
+    // -----------------------------------------------------------------------
+
+    /// Resolve a name to whatever this machine calls by it.
+    ///
+    /// Groups win over principals for a well-known name, which cannot collide in
+    /// practice: [`check_name`] refuses those names at creation.
+    pub fn lookup_name(&self, name: &str) -> Option<Object> {
+        if let Some(sid) = well_known_group(name) {
+            return self.group_record(sid.as_ref()).map(Object::Group);
+        }
+        if let Some(group) = self.groups.iter().find(|g| g.matches(name)) {
+            return self.group_record_of(group).map(Object::Group);
+        }
+        let principal = self
+            .principals
+            .iter()
+            .find(|p| p.matches(name.as_bytes()))?;
+        self.record(&principal.name).ok().map(Object::Principal)
+    }
+
+    /// Resolve a relative identifier — a RID — to the object holding it.
+    ///
+    /// Principals and groups share one counter (see the module docs), so a RID
+    /// names at most one of them and no disambiguation is needed.
+    pub fn lookup_relative_id(&self, rid: u32) -> Option<Object> {
+        if let Some(group) = self.groups.iter().find(|g| g.rid == rid) {
+            return self.group_record_of(group).map(Object::Group);
+        }
+        let principal = self.principals.iter().find(|p| p.rid == rid)?;
+        self.record(&principal.name).ok().map(Object::Principal)
+    }
+
+    /// Resolve a SID, which may be one of this domain's or a well-known group's.
+    pub fn lookup_sid(&self, sid: &SidRef) -> Option<Object> {
+        if let Some(rid) = self.rid_in_domain(sid) {
+            return self.lookup_relative_id(rid);
+        }
+        self.group_record(sid).map(Object::Group)
+    }
+
+    /// A group this machine can name, local or well-known.
+    pub fn group_record(&self, sid: &SidRef) -> Option<GroupRecord> {
+        if let Some(rid) = self.rid_in_domain(sid) {
+            let group = self.groups.iter().find(|g| g.rid == rid)?;
+            return self.group_record_of(group);
+        }
+        let name = well_known_group_name(sid)?;
+        Some(GroupRecord {
+            sid: sid.to_owned(),
+            name: name.to_string(),
+            // lpsd does not number what it does not own — applying its base to a
+            // `BUILTIN` group would land it inside lpsd's range.
+            unix_id: None,
+            enumerable: !is_stapled(sid),
+        })
+    }
+
+    fn group_record_of(&self, group: &Group) -> Option<GroupRecord> {
+        Some(GroupRecord {
+            sid: self.sid_of(group.rid).ok()?,
+            name: group.name.clone(),
+            unix_id: Some(group.unix_id),
+            enumerable: true,
+        })
+    }
+
+    /// Who is in a group, in RID order.
+    ///
+    /// `after` resumes a walk: only principals with a **higher** RID are
+    /// returned. RIDs are never reused, so a cursor stays meaningful across a
+    /// store that changed underneath it — a deletion is skipped and an addition
+    /// lands past the end. That is what lets lpsd page a membership without
+    /// holding per-cursor state or ever refusing a cursor it issued.
+    ///
+    /// `None` where nothing records edges into the group. See [`is_stapled`].
+    pub fn members_of(&self, sid: &SidRef, after: Option<u32>) -> Option<Vec<Member>> {
+        if is_stapled(sid) {
+            return None;
+        }
+        let owned = self.rid_in_domain(sid).is_some();
+        if !owned && well_known_group_name(sid).is_none() {
+            return None;
+        }
+        let sid = sid.to_owned();
+        Some(
+            self.principals
+                .iter()
+                .filter(|p| after.is_none_or(|rid| p.rid > rid))
+                .filter(|p| {
+                    p.groups.iter().any(|g| g.as_ref().as_bytes() == sid.as_ref().as_bytes())
+                        // A primary group is a membership claim (PSD-013 §5.3),
+                        // but only where lpsd owns the group. Every principal
+                        // defaults to `Authenticated Users`, and listing them
+                        // all as its members would be an answer this machine is
+                        // in no position to give.
+                        || (owned
+                            && p.primary_group.as_ref().as_bytes() == sid.as_ref().as_bytes())
+                })
+                .filter_map(|p| {
+                    Some(Member {
+                        sid: self.sid_of(p.rid).ok()?,
+                        name: p.name.clone(),
+                        unix_id: p.unix_id,
+                        rid: p.rid,
+                    })
+                })
+                .collect(),
+        )
+    }
+
+    /// Every principal after `after`, in RID order.
+    pub fn principals_after(&self, after: Option<u32>) -> Vec<Record> {
+        self.principals
+            .iter()
+            .filter(|p| after.is_none_or(|rid| p.rid > rid))
+            .filter_map(|p| self.record(&p.name).ok())
+            .collect()
+    }
+
+    /// Every local group after `after`, in RID order.
+    ///
+    /// Well-known groups are **not** included. They exist on every Peios machine
+    /// whether or not this store mentions them, so they are the authority's to
+    /// enumerate, not a source's — a source listing them would have every source
+    /// on the system claim the same handful of objects.
+    pub fn groups_after(&self, after: Option<u32>) -> Vec<GroupRecord> {
+        self.groups
+            .iter()
+            .filter(|g| after.is_none_or(|rid| g.rid > rid))
+            .filter_map(|g| self.group_record_of(g))
+            .collect()
+    }
+
     fn group_ref(&self, sid: &Sid) -> GroupRef {
         if let Some(rid) = self.rid_in_domain(sid.as_ref()) {
             if let Some(group) = self.groups.iter().find(|g| g.rid == rid) {
@@ -692,16 +962,13 @@ impl Store {
     // -----------------------------------------------------------------------
 
     /// Add a principal, returning the RID allocated to them.
-    pub fn add(&mut self, new: NewPrincipal, password: &[u8]) -> Result<u32, StoreError> {
-        let name = new.name.trim();
-        if name.is_empty() {
-            return Err(StoreError::Invalid("a principal needs a name".into()));
-        }
-        if name.len() > MAX_NAME_BYTES {
-            return Err(StoreError::Invalid(format!(
-                "the name {name:?} is longer than {MAX_NAME_BYTES} bytes"
-            )));
-        }
+    ///
+    /// `credential` of `None` creates a principal that authenticates without
+    /// one. An empty password is refused rather than accepted as a synonym —
+    /// see [`Principal::verifier`].
+    pub fn add(&mut self, new: NewPrincipal, credential: Option<&[u8]>) -> Result<u32, StoreError> {
+        let name = check_name(&new.name, "principal")?;
+        refuse_empty_password(credential)?;
         if new.groups.len() > MAX_GROUPS {
             return Err(StoreError::Invalid(format!(
                 "{name} is in more than {MAX_GROUPS} groups"
@@ -718,7 +985,7 @@ impl Store {
 
         let home = match new.home {
             Some(home) => check_path(&home, "home directory")?,
-            None => default_home(name),
+            None => default_home(&name),
         };
         let shell = match new.shell {
             Some(shell) => check_path(&shell, "shell")?,
@@ -734,9 +1001,9 @@ impl Store {
             // docs. Stored so that an account imported from another system can
             // keep the number it already had.
             unix_id: rid,
-            name: name.to_string(),
+            name,
             enabled: new.enabled,
-            verifier: Verifier::create(password)?,
+            verifier: credential.map(Verifier::create).transpose()?,
             groups: new.groups,
             primary_group: new.primary_group.unwrap_or_else(default_primary_group),
             home,
@@ -780,8 +1047,9 @@ impl Store {
     /// against without verifying — which would turn this into a password oracle
     /// for anyone entitled to call it.
     pub fn set_password(&mut self, name: &str, password: &[u8]) -> Result<(), StoreError> {
+        refuse_empty_password(Some(password))?;
         let at = self.position(name)?;
-        self.principals[at].verifier = Verifier::create(password)?;
+        self.principals[at].verifier = Some(Verifier::create(password)?);
         Ok(())
     }
 
@@ -903,24 +1171,8 @@ impl Store {
 
     /// Create a local group, returning the RID allocated to it.
     pub fn create_group(&mut self, name: &str) -> Result<u32, StoreError> {
-        let name = name.trim();
-        if name.is_empty() {
-            return Err(StoreError::Invalid("a group needs a name".into()));
-        }
-        if name.len() > MAX_NAME_BYTES {
-            return Err(StoreError::Invalid(format!(
-                "the name {name:?} is longer than {MAX_NAME_BYTES} bytes"
-            )));
-        }
-        // A local group that shadows a well-known name would be unreachable —
-        // `resolve_group` prefers the well-known spelling — so creating one
-        // would produce a group nothing could ever be added to.
-        if well_known_group(name).is_some() {
-            return Err(StoreError::Invalid(format!(
-                "{name} is a well-known group and already exists"
-            )));
-        }
-        if self.groups.iter().any(|g| g.matches(name)) {
+        let name = check_name(name, "group")?;
+        if self.groups.iter().any(|g| g.matches(&name)) {
             return Err(StoreError::Invalid(format!("the group {name} already exists")));
         }
         if self.groups.len() >= MAX_GROUP_OBJECTS {
@@ -933,7 +1185,7 @@ impl Store {
         self.groups.push(Group {
             rid,
             unix_id: rid,
-            name: name.to_string(),
+            name,
         });
         Ok(rid)
     }
@@ -1003,15 +1255,60 @@ impl Store {
     /// account", and it is inherent to keeping old verifiers working at all.
     pub fn authenticate(&self, identifier: &[u8], secret: &[u8]) -> Option<Identity> {
         let found = self.principals.iter().find(|p| p.matches(identifier));
-        let verifier = found.map_or(&self.decoy, |principal| &principal.verifier);
+        // A passwordless principal takes the decoy too. It is not authenticable
+        // by password at all, and giving it its own early return would cost a
+        // different amount of time from an unknown name — reintroducing exactly
+        // the distinction the decoy exists to erase. The passwordless path does
+        // not come through here; see `credential_requirement`.
+        let verifier = found
+            .and_then(|principal| principal.verifier.as_ref())
+            .unwrap_or(&self.decoy);
 
         // Unconditional, and before any decision is taken on `found`.
         let correct = verifier.verify(secret);
 
         let principal = found?;
-        if !correct || !principal.enabled {
+        if !correct || !principal.enabled || principal.verifier.is_none() {
             return None;
         }
+        self.identity_of(principal)
+    }
+
+    /// What must be collected before [`Store::authenticate`] can be called for
+    /// `identifier`.
+    ///
+    /// # This is the only place the store answers a question before a credential
+    ///
+    /// So it is the only place that could leak one, and what it may separate is
+    /// therefore narrow: [`CredentialRequirement::None`] for a principal that
+    /// exists, is enabled and has no verifier, and [`CredentialRequirement::Password`]
+    /// for *everything else* — a principal with a password, a disabled one, and
+    /// a name that does not exist, all alike.
+    ///
+    /// That keeps PGSS Logon obligation 22 (never distinguish an unknown
+    /// principal from a bad credential) intact. The one thing an unauthenticated
+    /// caller can learn here is that a name is passwordless — which is a name
+    /// they could have logged in as anyway, so there is nothing left to protect.
+    ///
+    /// Existence on its own is a question for the identity-lookup channel
+    /// (PSD-012 §6), which answers it plainly and by design.
+    pub fn credential_requirement(&self, identifier: &[u8]) -> CredentialRequirement {
+        let Some(principal) = self.principals.iter().find(|p| p.matches(identifier)) else {
+            return CredentialRequirement::Password;
+        };
+        if !principal.enabled || principal.verifier.is_some() {
+            return CredentialRequirement::Password;
+        }
+        match self.identity_of(principal) {
+            Some(identity) => CredentialRequirement::None(Box::new(identity)),
+            // The SID could not be built. Fall back to asking, which fails —
+            // rather than granting on a half-built identity.
+            None => CredentialRequirement::Password,
+        }
+    }
+
+    /// The assertion this principal produces once authenticated.
+    fn identity_of(&self, principal: &Principal) -> Option<Identity> {
         Some(Identity {
             name: principal.name.clone(),
             sid: self.sid_of(principal.rid).ok()?,
@@ -1091,8 +1388,16 @@ impl Store {
             // The verifier goes in its own length frame so its format can grow
             // — a new KDF with more parameters — without displacing the groups
             // that follow it. Same discipline as PSI nesting `LogonStart`.
+            //
+            // An *empty* frame is a principal with no verifier at all. That
+            // needs no format version: every store ever written held a real
+            // verifier here, whose encoding starts with an algorithm byte and
+            // is never zero-length, so the empty frame was unreachable until it
+            // was given this meaning.
             let mut inner = Writer::new();
-            principal.verifier.encode(&mut inner);
+            if let Some(verifier) = &principal.verifier {
+                verifier.encode(&mut inner);
+            }
             w.bytes(&inner.finish());
 
             w.u32(principal.groups.len() as u32);
@@ -1195,7 +1500,11 @@ impl Store {
             }
 
             let verifier_frame = r.bytes()?;
-            let verifier = Verifier::decode(&mut Reader::new(verifier_frame))?;
+            let verifier = if verifier_frame.is_empty() {
+                None
+            } else {
+                Some(Verifier::decode(&mut Reader::new(verifier_frame))?)
+            };
 
             let group_count = bounded(r.u32()?, MAX_GROUPS, "group memberships")?;
             let mut memberships = Vec::with_capacity(group_count);
@@ -1405,6 +1714,60 @@ fn check_path(path: &str, what: &str) -> Result<String, StoreError> {
     Ok(path.to_string())
 }
 
+/// A principal or group name, canonicalised.
+///
+/// Trimmed, non-empty, bounded, printable ASCII, free of [`RESERVED_IN_NAME`],
+/// and not the name of a well-known group.
+///
+/// Surrounding whitespace is stripped rather than refused. It is nearly always a
+/// typo, and stripping it is what stops a name differing from another only by a
+/// trailing space ever reaching the store — which would render identically
+/// everywhere an operator could look at it.
+///
+/// **ASCII, deliberately.** Unicode names bring confusables — `jack` with a
+/// Cyrillic `а` renders identically and is a different principal — and
+/// normalisation, where NFC and NFD spell one name in two byte sequences that a
+/// byte comparison calls two people. Matching here is `eq_ignore_ascii_case`, so
+/// admitting Unicode would also mean defining what case means across the whole
+/// of it, and freezing that definition for as long as the accounts live.
+/// Restricting now and relaxing later is backward compatible; the reverse means
+/// renaming principals that already exist.
+///
+/// Interior spaces are allowed. Well-known groups have them (`Authenticated
+/// Users`), and a local group called `Backup Operators` is a reasonable thing to
+/// want.
+fn check_name(name: &str, what: &str) -> Result<String, StoreError> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err(StoreError::Invalid(format!("a {what} needs a name")));
+    }
+    if name.len() > MAX_NAME_BYTES {
+        return Err(StoreError::Invalid(format!(
+            "the name {name:?} is longer than {MAX_NAME_BYTES} bytes"
+        )));
+    }
+    if let Some(byte) = name.bytes().find(|byte| !(0x20..=0x7e).contains(byte)) {
+        return Err(StoreError::Invalid(format!(
+            "the name {name:?} contains {byte:#04x}; a {what} name is printable ASCII"
+        )));
+    }
+    if let Some(byte) = name.bytes().find(|byte| RESERVED_IN_NAME.contains(byte)) {
+        return Err(StoreError::Invalid(format!(
+            "a {what} name may not contain {:?}",
+            char::from(byte)
+        )));
+    }
+    // A name that shadows a well-known group is unreachable: `resolve_group`
+    // prefers the well-known spelling, and the resolver in authd will do the
+    // same. Creating one produces an object nothing can ever name.
+    if well_known_group(name).is_some() {
+        return Err(StoreError::Invalid(format!(
+            "{name} is a well-known group, and that name is reserved"
+        )));
+    }
+    Ok(name.to_string())
+}
+
 fn check_display_name(display: &str) -> Result<String, StoreError> {
     let display = display.trim();
     if display.len() > MAX_DISPLAY_NAME_BYTES {
@@ -1575,9 +1938,141 @@ mod tests {
     fn seeded() -> Store {
         let mut store = Store::provision().expect("must provision");
         store
-            .add(new("jack", vec![administrators()]), b"password")
+            .add(new("jack", vec![administrators()]), Some(b"password"))
             .expect("must add");
         store
+    }
+
+    // -----------------------------------------------------------------------
+    // Passwordless principals
+    // -----------------------------------------------------------------------
+
+    fn requirement(store: &Store, name: &str) -> CredentialRequirement {
+        store.credential_requirement(name.as_bytes())
+    }
+
+    fn needs_a_password(store: &Store, name: &str) -> bool {
+        matches!(requirement(store, name), CredentialRequirement::Password)
+    }
+
+    #[test]
+    fn a_passwordless_principal_needs_no_credential() {
+        let mut store = Store::provision().expect("must provision");
+        store.add(new("kiosk", vec![]), None).expect("must add");
+
+        let CredentialRequirement::None(identity) = requirement(&store, "kiosk") else {
+            panic!("a principal with no verifier must need nothing collected");
+        };
+        assert_eq!(identity.name, "kiosk");
+    }
+
+    /// The canonical name comes from the store, not from what the caller typed
+    /// — the same rule an assertion follows after a password logon.
+    #[test]
+    fn a_passwordless_assertion_carries_the_canonical_name() {
+        let mut store = Store::provision().expect("must provision");
+        store.add(new("Kiosk", vec![]), None).expect("must add");
+
+        let CredentialRequirement::None(identity) = requirement(&store, "KIOSK") else {
+            panic!("names are case-insensitive");
+        };
+        assert_eq!(identity.name, "Kiosk");
+    }
+
+    /// The heart of it. A caller that asks whether a name is passwordless must
+    /// not be able to read an account-existence answer out of the reply —
+    /// PGSS Logon obligation 22. "Has a password" and "does not exist" are one
+    /// answer here, as they are everywhere else.
+    #[test]
+    fn an_unknown_principal_is_indistinguishable_from_one_with_a_password() {
+        let store = seeded();
+
+        assert!(needs_a_password(&store, "jack"));
+        assert!(needs_a_password(&store, "nobody"));
+        assert!(needs_a_password(&store, ""));
+    }
+
+    /// A disabled account must not become *easier* to use by having no
+    /// password. It takes the same branch as a nonexistent one.
+    #[test]
+    fn a_disabled_passwordless_principal_still_needs_a_credential() {
+        let mut store = Store::provision().expect("must provision");
+        store.add(new("kiosk", vec![]), None).expect("must add");
+        store
+            .add(new("root", vec![administrators()]), Some(b"pw"))
+            .expect("must add");
+        store.set_enabled("kiosk", false).expect("must disable");
+
+        assert!(needs_a_password(&store, "kiosk"));
+    }
+
+    /// A passwordless principal is not authenticable *by password* — including
+    /// by the empty one. Otherwise "no password" would quietly mean "the
+    /// password is empty", which is the ambiguity the store refuses to store.
+    #[test]
+    fn a_passwordless_principal_cannot_be_password_authenticated() {
+        let mut store = Store::provision().expect("must provision");
+        store.add(new("kiosk", vec![]), None).expect("must add");
+
+        assert!(store.authenticate(b"kiosk", b"").is_none());
+        assert!(store.authenticate(b"kiosk", b"anything").is_none());
+    }
+
+    #[test]
+    fn an_empty_password_is_refused_on_add() {
+        let mut store = Store::provision().expect("must provision");
+
+        assert!(matches!(
+            store.add(new("jack", vec![]), Some(b"")),
+            Err(StoreError::Invalid(_))
+        ));
+        assert!(store.is_empty(), "a refused add must not create anything");
+    }
+
+    #[test]
+    fn an_empty_password_is_refused_on_set_password() {
+        let mut store = seeded();
+
+        assert!(matches!(
+            store.set_password("jack", b""),
+            Err(StoreError::Invalid(_))
+        ));
+        // And the old one still works, so a refused change is not a lockout.
+        assert!(store.authenticate(b"jack", b"password").is_some());
+    }
+
+    /// Giving a passwordless principal a password is a one-way door only
+    /// because nothing exposes the reverse — but it must at least work.
+    #[test]
+    fn a_passwordless_principal_can_be_given_a_password() {
+        let mut store = Store::provision().expect("must provision");
+        store.add(new("kiosk", vec![]), None).expect("must add");
+        store.set_password("kiosk", b"pw").expect("must set");
+
+        assert!(needs_a_password(&store, "kiosk"));
+        assert!(store.authenticate(b"kiosk", b"pw").is_some());
+    }
+
+    /// The empty verifier frame survives a write and a read. If it did not, a
+    /// passwordless account would come back as a corrupt store — or worse, as
+    /// an account with an unknown password.
+    #[test]
+    fn a_passwordless_principal_round_trips_through_the_codec() {
+        let mut store = Store::provision().expect("must provision");
+        store.add(new("kiosk", vec![]), None).expect("must add");
+        store
+            .add(new("jack", vec![administrators()]), Some(b"password"))
+            .expect("must add");
+
+        let body = store.encode();
+        let back = Store::decode(codec::VERSION, &body).expect("must decode");
+
+        assert!(matches!(
+            back.credential_requirement(b"kiosk"),
+            CredentialRequirement::None(_)
+        ));
+        assert!(needs_a_password(&back, "jack"));
+        assert!(back.authenticate(b"jack", b"password").is_some());
     }
 
     #[test]
@@ -1638,12 +2133,12 @@ mod tests {
     #[test]
     fn rids_are_not_reused() {
         let mut store = Store::provision().expect("must provision");
-        assert_eq!(store.add(new("a", vec![]), b"pw").unwrap(), 1000);
-        assert_eq!(store.add(new("b", vec![]), b"pw").unwrap(), 1001);
+        assert_eq!(store.add(new("a", vec![]), Some(b"pw")).unwrap(), 1000);
+        assert_eq!(store.add(new("b", vec![]), Some(b"pw")).unwrap(), 1001);
         // Even after a removal, which the format permits, the counter only
         // advances — a reissued RID inherits the old holder's access.
         store.principals.retain(|p| p.name != "b");
-        assert_eq!(store.add(new("c", vec![]), b"pw").unwrap(), 1002);
+        assert_eq!(store.add(new("c", vec![]), Some(b"pw")).unwrap(), 1002);
     }
 
     #[test]
@@ -1711,7 +2206,7 @@ mod tests {
     fn duplicate_names_are_refused() {
         let mut store = seeded();
         assert!(matches!(
-            store.add(new("JACK", vec![]), b"other"),
+            store.add(new("JACK", vec![]), Some(b"other")),
             Err(StoreError::Invalid(_))
         ));
     }
@@ -1720,7 +2215,7 @@ mod tests {
     fn an_unnamed_principal_is_refused() {
         let mut store = Store::provision().expect("must provision");
         assert!(matches!(
-            store.add(new("   ", vec![]), b"pw"),
+            store.add(new("   ", vec![]), Some(b"pw")),
             Err(StoreError::Invalid(_))
         ));
     }
@@ -1738,7 +2233,7 @@ mod tests {
                     groups: vec![administrators()],
                     ..NewPrincipal::named("standby")
                 },
-                b"pw",
+                Some(b"pw"),
             )
             .expect("must add");
         assert!(!store.record("standby").unwrap().enabled);
@@ -1755,7 +2250,7 @@ mod tests {
         // a Unix ID is the RID and RIDs begin at 1000 — so the property holds
         // by construction rather than by a check somebody has to remember.
         let mut store = Store::provision().expect("must provision");
-        store.add(new("first", vec![]), b"pw").unwrap();
+        store.add(new("first", vec![]), Some(b"pw")).unwrap();
         assert_eq!(store.record("first").unwrap().unix_id, FIRST_RID);
     }
 
@@ -1764,9 +2259,9 @@ mod tests {
         // PSD-004 §12.1: SIDs are one namespace, uid and gid are two, so a
         // number issued to a principal must never be issued to a group.
         let mut store = Store::provision().expect("must provision");
-        store.add(new("a", vec![]), b"pw").unwrap();
+        store.add(new("a", vec![]), Some(b"pw")).unwrap();
         store.create_group("developers").unwrap();
-        store.add(new("b", vec![]), b"pw").unwrap();
+        store.add(new("b", vec![]), Some(b"pw")).unwrap();
 
         let a = store.record("a").unwrap().unix_id;
         let b = store.record("b").unwrap().unix_id;
@@ -1781,20 +2276,20 @@ mod tests {
     #[test]
     fn principals_and_groups_share_one_rid_counter() {
         let mut store = Store::provision().expect("must provision");
-        let a = store.add(new("a", vec![]), b"pw").unwrap();
+        let a = store.add(new("a", vec![]), Some(b"pw")).unwrap();
         let group = store.create_group("developers").unwrap();
-        let b = store.add(new("b", vec![]), b"pw").unwrap();
+        let b = store.add(new("b", vec![]), Some(b"pw")).unwrap();
         assert_eq!((a, group, b), (1000, 1001, 1002));
     }
 
     #[test]
     fn a_unix_id_is_never_reused_after_a_removal() {
         let mut store = Store::provision().expect("must provision");
-        store.add(new("keeper", vec![administrators()]), b"pw").unwrap();
-        store.add(new("doomed", vec![]), b"pw").unwrap();
+        store.add(new("keeper", vec![administrators()]), Some(b"pw")).unwrap();
+        store.add(new("doomed", vec![]), Some(b"pw")).unwrap();
         let doomed = store.record("doomed").unwrap().unix_id;
         store.remove("doomed").unwrap();
-        store.add(new("replacement", vec![]), b"pw").unwrap();
+        store.add(new("replacement", vec![]), Some(b"pw")).unwrap();
         assert!(store.record("replacement").unwrap().unix_id > doomed);
     }
 
@@ -1863,6 +2358,89 @@ mod tests {
         ));
     }
 
+    /// The same reservation, from the other side of the shared RID counter.
+    /// Principals and groups are one object space here, so a principal called
+    /// `Everyone` would be just as unreachable by name as a group would.
+    #[test]
+    fn a_principal_may_not_shadow_a_well_known_group_either() {
+        let mut store = Store::provision().expect("must provision");
+        assert!(matches!(
+            store.add(new("Everyone", vec![]), Some(b"pw")),
+            Err(StoreError::Invalid(_))
+        ));
+        assert!(matches!(
+            store.add(new("authenticated users", vec![]), Some(b"pw")),
+            Err(StoreError::Invalid(_))
+        ));
+    }
+
+    /// Each of these is a separator in something that will one day read a name
+    /// back — the realm syntax, a path, `/etc/passwd`, `/etc/group`. Reserved
+    /// before any account can be created holding one, because the fix
+    /// afterwards is renaming live principals.
+    #[test]
+    fn a_reserved_character_is_refused_in_a_name() {
+        for name in ["jack@local", "PEIOS\\jack", "jack/x", "jack:x", "jack,x"] {
+            let mut store = Store::provision().expect("must provision");
+            assert!(
+                matches!(store.add(new(name, vec![]), Some(b"pw")), Err(StoreError::Invalid(_))),
+                "{name} must not be creatable as a principal"
+            );
+            assert!(
+                matches!(store.create_group(name), Err(StoreError::Invalid(_))),
+                "{name} must not be creatable as a group"
+            );
+        }
+    }
+
+    /// The record separators. A name carrying one could forge a whole line in a
+    /// passwd-format file or in a log.
+    #[test]
+    fn a_control_character_is_refused_in_a_name() {
+        for name in ["jack\nroot", "jack\rroot", "jack\tx", "jack\u{0}x", "jack\u{7f}"] {
+            let mut store = Store::provision().expect("must provision");
+            assert!(
+                matches!(store.add(new(name, vec![]), Some(b"pw")), Err(StoreError::Invalid(_))),
+                "{name:?} must not be creatable"
+            );
+        }
+    }
+
+    /// Confusables and normalisation, refused at the door rather than reasoned
+    /// about. The second name here renders identically to the first.
+    #[test]
+    fn a_non_ascii_name_is_refused() {
+        let mut store = Store::provision().expect("must provision");
+        assert!(matches!(
+            store.add(new("jack\u{301}", vec![]), Some(b"pw")),
+            Err(StoreError::Invalid(_))
+        ));
+        assert!(matches!(
+            store.add(new("j\u{430}ck", vec![]), Some(b"pw")),
+            Err(StoreError::Invalid(_))
+        ));
+    }
+
+    /// The reservation must not have swallowed the ordinary case: well-known
+    /// groups have interior spaces, so local ones must be allowed them too.
+    #[test]
+    fn an_interior_space_is_allowed_in_a_name() {
+        let mut store = Store::provision().expect("must provision");
+        store
+            .create_group("Backup Operators")
+            .expect("an ordinary group name must still be creatable");
+    }
+
+    #[test]
+    fn surrounding_whitespace_is_stripped_rather_than_stored() {
+        let mut store = Store::provision().expect("must provision");
+        store.add(new("  jack  ", vec![]), Some(b"pw")).expect("must add");
+        let identity = store
+            .authenticate(b"jack", b"pw")
+            .expect("the stored name must be the trimmed one");
+        assert_eq!(identity.name, "jack");
+    }
+
     #[test]
     fn duplicate_group_names_are_refused() {
         let mut store = Store::provision().expect("must provision");
@@ -1881,7 +2459,7 @@ mod tests {
         store.create_group("developers").unwrap();
         let developers = store.resolve_group("developers").unwrap();
         store
-            .add(new("jack", vec![developers.clone(), administrators()]), b"pw")
+            .add(new("jack", vec![developers.clone(), administrators()]), Some(b"pw"))
             .unwrap();
 
         let identity = store.authenticate(b"jack", b"pw").unwrap();
@@ -1909,7 +2487,7 @@ mod tests {
     fn a_foreign_sid_is_carried_without_a_name_or_a_number() {
         let mut store = Store::provision().expect("must provision");
         let foreign: Sid = "S-1-5-21-9-9-9-1000".parse().unwrap();
-        store.add(new("jack", vec![foreign.clone()]), b"pw").unwrap();
+        store.add(new("jack", vec![foreign.clone()]), Some(b"pw")).unwrap();
         let identity = store.authenticate(b"jack", b"pw").unwrap();
         assert_eq!(identity.groups[0].sid, foreign);
         assert_eq!(identity.groups[0].name, None);
@@ -1921,7 +2499,7 @@ mod tests {
         let mut store = Store::provision().expect("must provision");
         store.create_group("developers").unwrap();
         let developers = store.resolve_group("developers").unwrap();
-        store.add(new("jack", vec![developers]), b"pw").unwrap();
+        store.add(new("jack", vec![developers]), Some(b"pw")).unwrap();
 
         assert!(matches!(
             store.delete_group("developers"),
@@ -1939,7 +2517,7 @@ mod tests {
         let mut store = Store::provision().expect("must provision");
         store.create_group("developers").unwrap();
         let developers = store.resolve_group("developers").unwrap();
-        store.add(new("jack", vec![]), b"pw").unwrap();
+        store.add(new("jack", vec![]), Some(b"pw")).unwrap();
         store.set_primary_group("jack", developers).unwrap();
 
         assert!(
@@ -1962,9 +2540,9 @@ mod tests {
         let mut store = Store::provision().expect("must provision");
         store.create_group("developers").unwrap();
         let developers = store.resolve_group("developers").unwrap();
-        store.add(new("a", vec![developers.clone()]), b"pw").unwrap();
-        store.add(new("b", vec![developers]), b"pw").unwrap();
-        store.add(new("c", vec![]), b"pw").unwrap();
+        store.add(new("a", vec![developers.clone()]), Some(b"pw")).unwrap();
+        store.add(new("b", vec![developers]), Some(b"pw")).unwrap();
+        store.add(new("c", vec![]), Some(b"pw")).unwrap();
 
         let summaries = store.group_summaries().unwrap();
         assert_eq!(summaries.len(), 1);
@@ -2001,7 +2579,7 @@ mod tests {
                     display_name: Some("Jack Palfrey".into()),
                     ..NewPrincipal::named("jack")
                 },
-                b"pw",
+                Some(b"pw"),
             )
             .unwrap();
 
@@ -2152,7 +2730,7 @@ mod tests {
                     display_name: Some("Jack Palfrey".into()),
                     ..NewPrincipal::named("jack")
                 },
-                b"password",
+                Some(b"password"),
             )
             .unwrap();
         store
@@ -2317,7 +2895,7 @@ mod tests {
 
         let mut second = Store::provision().expect("must provision");
         second
-            .add(new("someone-else", vec![]), b"pw")
+            .add(new("someone-else", vec![]), Some(b"pw"))
             .expect("must add");
         fs.fail_next(crate::fs::Op::Sync);
         second
@@ -2335,9 +2913,9 @@ mod tests {
         let fs = FaultyFs::new();
         let mut store = Store::provision().expect("must provision");
         store
-            .add(new("jack", vec![administrators()]), b"password")
+            .add(new("jack", vec![administrators()]), Some(b"password"))
             .unwrap();
-        store.add(new("guest", vec![]), b"guest").unwrap();
+        store.add(new("guest", vec![]), Some(b"guest")).unwrap();
         store.save(&fs, path()).expect("must save");
 
         let loaded = Store::load(&fs, path()).unwrap().unwrap();
@@ -2401,7 +2979,7 @@ mod tests {
         // One object, one number: the RID reads straight out of the uid rather
         // than needing a mapping table.
         let mut store = Store::provision().expect("must provision");
-        let rid = store.add(new("jack", vec![]), b"pw").unwrap();
+        let rid = store.add(new("jack", vec![]), Some(b"pw")).unwrap();
         let record = store.record("jack").unwrap();
         assert_eq!(record.rid, rid);
         assert_eq!(record.unix_id, rid);
@@ -2444,7 +3022,7 @@ mod tests {
     #[test]
     fn two_objects_sharing_a_unix_id_are_refused() {
         let mut store = Store::provision().expect("must provision");
-        store.add(new("jack", vec![]), b"pw").unwrap();
+        store.add(new("jack", vec![]), Some(b"pw")).unwrap();
         store.create_group("developers").unwrap();
         store.groups[0].unix_id = store.principals[0].unix_id;
         let body = store.encode();
@@ -2460,7 +3038,7 @@ mod tests {
     #[test]
     fn two_objects_sharing_a_rid_are_refused() {
         let mut store = Store::provision().expect("must provision");
-        store.add(new("jack", vec![]), b"pw").unwrap();
+        store.add(new("jack", vec![]), Some(b"pw")).unwrap();
         store.create_group("developers").unwrap();
         store.groups[0].rid = store.principals[0].rid;
         let body = store.encode();
@@ -2527,7 +3105,12 @@ mod tests {
         w.u8(Principal::FLAG_ENABLED);
         w.str("jack");
         let mut inner = Writer::new();
-        store.principals.remove(0).verifier.encode(&mut inner);
+        store
+            .principals
+            .remove(0)
+            .verifier
+            .expect("the fixture principal has a password")
+            .encode(&mut inner);
         w.bytes(&inner.finish());
         w.u32(1);
         w.bytes(b"not a sid");
@@ -2668,7 +3251,7 @@ mod tests {
     #[test]
     fn a_removed_principal_is_gone() {
         let mut store = seeded();
-        store.add(new("guest", vec![]), b"pw").unwrap();
+        store.add(new("guest", vec![]), Some(b"pw")).unwrap();
         store.remove("guest").expect("must remove");
         assert_eq!(store.names().collect::<Vec<_>>(), vec!["jack"]);
         assert!(store.authenticate(b"guest", b"pw").is_none());
@@ -2690,18 +3273,18 @@ mod tests {
         // every access the descriptors on this machine still grant them.
         let mut store = Store::provision().expect("must provision");
         store
-            .add(new("first", vec![administrators()]), b"pw")
+            .add(new("first", vec![administrators()]), Some(b"pw"))
             .unwrap();
-        let doomed = store.add(new("doomed", vec![]), b"pw").unwrap();
+        let doomed = store.add(new("doomed", vec![]), Some(b"pw")).unwrap();
         store.remove("doomed").expect("must remove");
-        let next = store.add(new("replacement", vec![]), b"pw").unwrap();
+        let next = store.add(new("replacement", vec![]), Some(b"pw")).unwrap();
         assert!(next > doomed, "{next} must not reuse {doomed}");
     }
 
     #[test]
     fn disabling_reports_whether_anything_changed() {
         let mut store = seeded();
-        store.add(new("guest", vec![]), b"pw").unwrap();
+        store.add(new("guest", vec![]), Some(b"pw")).unwrap();
         assert!(store.set_enabled("guest", false).expect("must set"));
         assert!(
             !store.set_enabled("guest", false).expect("must set"),
@@ -2713,7 +3296,7 @@ mod tests {
     #[test]
     fn a_disabled_principal_cannot_authenticate_and_an_enabled_one_can_again() {
         let mut store = seeded();
-        store.add(new("guest", vec![]), b"pw").unwrap();
+        store.add(new("guest", vec![]), Some(b"pw")).unwrap();
         store.set_enabled("guest", false).unwrap();
         assert!(store.authenticate(b"guest", b"pw").is_none());
         store.set_enabled("guest", true).unwrap();
@@ -2740,7 +3323,7 @@ mod tests {
     #[test]
     fn memberships_can_be_granted_and_revoked() {
         let mut store = Store::provision().expect("must provision");
-        store.add(new("jack", vec![]), b"pw").unwrap();
+        store.add(new("jack", vec![]), Some(b"pw")).unwrap();
 
         assert!(store.add_membership("jack", administrators()).expect("must add"));
         assert!(
@@ -2752,7 +3335,7 @@ mod tests {
         // Now the only administrator, so revoking is refused — add a second one
         // first. That is the guard doing its job, not an accident of ordering.
         store
-            .add(new("other", vec![administrators()]), b"pw")
+            .add(new("other", vec![administrators()]), Some(b"pw"))
             .unwrap();
         assert!(store
             .remove_membership("jack", administrators().as_ref())
@@ -2857,7 +3440,7 @@ mod tests {
     fn a_second_administrator_makes_the_first_removable() {
         let mut store = seeded();
         store
-            .add(new("root", vec![administrators()]), b"pw")
+            .add(new("root", vec![administrators()]), Some(b"pw"))
             .unwrap();
         store
             .remove("jack")
@@ -2871,7 +3454,7 @@ mod tests {
         // the other really would lock the machine.
         let mut store = seeded();
         store
-            .add(new("standby", vec![administrators()]), b"pw")
+            .add(new("standby", vec![administrators()]), Some(b"pw"))
             .unwrap();
         store.set_enabled("standby", false).unwrap();
         assert!(
@@ -2883,14 +3466,14 @@ mod tests {
     #[test]
     fn an_ordinary_principal_does_not_count_as_a_way_back_in() {
         let mut store = seeded();
-        store.add(new("guest", vec![]), b"pw").unwrap();
+        store.add(new("guest", vec![]), Some(b"pw")).unwrap();
         assert!(matches!(store.remove("jack"), Err(StoreError::Invalid(_))));
     }
 
     #[test]
     fn the_guard_does_not_block_an_ordinary_principal() {
         let mut store = seeded();
-        store.add(new("guest", vec![]), b"pw").unwrap();
+        store.add(new("guest", vec![]), Some(b"pw")).unwrap();
         store
             .remove("guest")
             .expect("a non-administrator is freely removable");

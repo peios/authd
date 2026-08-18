@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["libauthd", "libtty", "authd", "lpsd", "lps", "login"]
+members = ["libauthd", "libtty", "authd", "lpsd", "lps", "login", "nss"]
 
 # authd is its own workspace root, like peios-rs and libpeios.
 #
@@ -11,6 +11,7 @@ members = ["libauthd", "libtty", "authd", "lpsd", "lps", "login"]
 #   lpsd      the local principal source. Owns the local identity bytes.
 #   lps       administers lpsd's store, over a socket. Owns nothing.
 #   login     /bin/login. Runs as LogonService.
+#   nss       libnss_peios.so.2. Loaded into every process on the system.
 #
 # libtty is the exception that proves the rule: not a trust domain but a
 # utility, shared by login and lps because both must read a password from a

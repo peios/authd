@@ -56,6 +56,7 @@ usage: lps <command> [arguments]
       --shell <path>            login shell
       --display-name <text>     a human's name for a human to read
       --disabled                create it disabled
+      --no-password             authenticates with no credential at all
       --no-prompt               fail rather than ask for anything missing
   remove <name>               delete a principal
   enable <name>               allow it to log on

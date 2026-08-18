@@ -72,6 +72,10 @@
 
 use crate::claim::Claim;
 use crate::frame::{self, Framing, Writer};
+// PGSS Logon chapter 6's vocabulary, carried unchanged. A source's answer and
+// the authority's answer describe the same object, so they share the type
+// rather than translating between two spellings of it.
+use crate::ident::{Fields, Kind, Outcome, Value, Withheld};
 use crate::secret::Secret;
 use crate::wire::{
     CredentialRequest, CredentialResponse, Denial, LogonStart, Profile, MAX_REASON_BYTES, WireError,
@@ -109,12 +113,17 @@ pub const MSG_REGISTERED: u16 = 0x0001;
 pub const MSG_AUTHENTICATE: u16 = 0x0002;
 pub const MSG_CREDENTIAL_RESPONSE: u16 = 0x0003;
 pub const MSG_ABANDON: u16 = 0x0004;
+pub const MSG_QUERY: u16 = 0x0005;
+pub const MSG_ENUMERATE_SOURCE: u16 = 0x0006;
 // source -> authd. The high bit marks a message sent by the authority, as in
 // PGSS Logon — here the source is the authority for its own principals.
 pub const MSG_REGISTER: u16 = 0x8001;
 pub const MSG_CREDENTIAL_REQUEST: u16 = 0x8002;
 pub const MSG_ASSERTION: u16 = 0x8003;
 pub const MSG_REFUSAL: u16 = 0x8004;
+pub const MSG_QUERY_RESULT: u16 = 0x8005;
+pub const MSG_ENUMERATE_RESULT: u16 = 0x8006;
+pub const MSG_CHANGED: u16 = 0x8007;
 
 /// Bounded so a source name is usable as a KACS session auth-package name.
 pub const MAX_SOURCE_NAME_BYTES: usize = 32;
@@ -128,12 +137,64 @@ pub const MAX_CANONICAL_NAME_BYTES: usize = 256;
 /// How many groups one assertion may carry.
 pub const MAX_GROUPS: usize = 128;
 
+/// How many keys one [`Query`] may carry.
+pub const MAX_KEYS: usize = 64;
+
+/// How many entries one [`EnumerateResult`] may carry.
+pub const MAX_ENTRIES: usize = 256;
+
+/// How long an enumeration cursor may be.
+pub const MAX_CURSOR_BYTES: usize = 256;
+
 // ---------------------------------------------------------------------------
 // Messages
 // ---------------------------------------------------------------------------
 
+/// What a source can do beyond authenticating, declared at registration.
+///
+/// A declaration of *capability*, not of willingness: a source declaring
+/// [`Self::QUERIES`] may still refuse any particular question, and one declaring
+/// [`Self::ENUMERATES`] may still refuse a cursor it can no longer honour.
+///
+/// Like [`crate::ident::Fields`] and unlike every other enumeration in these
+/// protocols, a bit may be added here without a version bump — because an
+/// authority must not send a message the source did not declare it answers, so
+/// an unset bit is always the safe reading in both directions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Capabilities(pub u32);
+
+impl Capabilities {
+    /// Answers [`Query`].
+    pub const QUERIES: Capabilities = Capabilities(1 << 0);
+    /// Answers [`EnumerateSource`].
+    pub const ENUMERATES: Capabilities = Capabilities(1 << 1);
+    /// Can produce a group's membership.
+    pub const MEMBERS: Capabilities = Capabilities(1 << 2);
+    /// Sends [`Changed`].
+    pub const PUSHES_CHANGES: Capabilities = Capabilities(1 << 3);
+
+    pub const fn empty() -> Capabilities {
+        Capabilities(0)
+    }
+
+    pub const fn contains(self, other: Capabilities) -> bool {
+        self.0 & other.0 == other.0
+    }
+
+    pub const fn union(self, other: Capabilities) -> Capabilities {
+        Capabilities(self.0 | other.0)
+    }
+}
+
+impl core::ops::BitOr for Capabilities {
+    type Output = Capabilities;
+    fn bitor(self, rhs: Capabilities) -> Capabilities {
+        self.union(rhs)
+    }
+}
+
 /// A source announcing itself. Source to authd, on [`CONVERSATION_CONTROL`].
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct Register {
     /// Identifies the source in logs, and becomes the session's auth-package
     /// name — so a token's provenance answers "which source authenticated
@@ -152,6 +213,23 @@ pub struct Register {
     /// field decodes with an empty domain — which authd refuses, since a source
     /// that cannot name its scope cannot be confined to it.
     pub domain: Vec<u8>,
+    /// What this source can do beyond authenticating.
+    ///
+    /// authd MUST NOT send a message a source did not declare it answers, so a
+    /// source predating this field declares nothing, authenticates, and keeps
+    /// working untouched. That is the only reading that does not break every
+    /// source written against the earlier shape.
+    pub capabilities: Capabilities,
+    /// How long, in seconds, authd may hold an answer from this source.
+    ///
+    /// **Zero means do not cache.** A source declaring neither
+    /// [`Capabilities::PUSHES_CHANGES`] nor a non-zero value here has said its
+    /// answers must not be held at all, and that is what silence means too — a
+    /// source written against an older revision would otherwise silently serve
+    /// stale identity, which is the one class of staleness that decides access.
+    pub entry_ttl: u32,
+    /// The most keys this source will accept in one [`Query`]. Zero means one.
+    pub max_batch: u32,
 }
 
 /// authd accepting a registration. authd to source, on [`CONVERSATION_CONTROL`].
@@ -275,6 +353,176 @@ pub struct Refusal {
     pub reason: String,
 }
 
+// ---------------------------------------------------------------------------
+// Identity queries
+//
+// PGSS Logon chapter 6 asks authd who a SID or a number belongs to, outside any
+// logon. These are how authd asks a source. A query is an ordinary conversation:
+// authd allocates the identifier, `Query` opens it, one terminal message closes
+// it.
+// ---------------------------------------------------------------------------
+
+/// What to ask a source about.
+///
+/// **There is no variant carrying an absolute POSIX identifier**, and that is
+/// the load-bearing property. PGSS Logon's lookup accepts one, because that is
+/// what `getpwuid` hands a name resolver — authd locates the range containing
+/// the number, subtracts the base, and asks the owning source by relative
+/// identifier.
+///
+/// So a source is never told an absolute number here, exactly as it is never
+/// told one during a logon. A source that learned its base could assert numbers
+/// outside its range by arithmetic, whatever the protocol said it was allowed
+/// to do.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Key {
+    Name(String),
+    Sid(Vec<u8>),
+    RelativeId(u32),
+}
+
+/// One question, and what kind of object would answer it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QueryKey {
+    pub key: Key,
+    pub kind: Kind,
+}
+
+/// authd asking a source about objects it holds. authd to source, opens a
+/// conversation.
+///
+/// `keys` is an array from the outset. authd may send one and always sending one
+/// is conforming — but adding the array later would have broken every source
+/// written against a single-key message, and a source backed by a remote
+/// directory gains the difference between one query and a hundred.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Query {
+    pub fields: Fields,
+    pub keys: Vec<QueryKey>,
+}
+
+/// One answer. The source's own spelling of the name, and **relative**
+/// identifiers throughout.
+///
+/// A source does not qualify a name: qualification says which source answered,
+/// and a source cannot know what it is called in an authority's search order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QueryEntry {
+    pub outcome: Outcome,
+    pub sid: Vec<u8>,
+    pub canonical_name: String,
+    pub kind: Kind,
+    pub values: Vec<Value>,
+    pub withheld: Vec<Withheld>,
+}
+
+impl Default for QueryEntry {
+    fn default() -> Self {
+        Self {
+            outcome: Outcome::NotFound,
+            sid: Vec::new(),
+            canonical_name: String::new(),
+            kind: Kind::Principal,
+            values: Vec::new(),
+            withheld: Vec::new(),
+        }
+    }
+}
+
+impl QueryEntry {
+    /// The bits this entry answers.
+    pub fn present(&self) -> Fields {
+        self.values
+            .iter()
+            .fold(Fields::empty(), |acc, value| acc.union(value.field()))
+    }
+
+    pub fn value(&self, field: Fields) -> Option<&Value> {
+        self.values.iter().find(|value| value.field() == field)
+    }
+}
+
+/// The source's answers, one per key, in the order the keys were sent.
+///
+/// A source that cannot serve a whole batch refuses the conversation rather than
+/// answering part of it — a short array would silently pair answers with the
+/// wrong questions.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct QueryResult {
+    pub results: Vec<QueryEntry>,
+}
+
+/// authd asking a source to produce objects. authd to source, opens a
+/// conversation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EnumerateSource {
+    /// Never [`Kind::Any`].
+    pub kind: Kind,
+    pub fields: Fields,
+    /// `None` walks everything of `kind`. `Some` names a **group** and walks its
+    /// members — the continuation path for a `MEMBERS` field a source withheld
+    /// as [`WithheldReason::TooLarge`].
+    pub of: Option<Key>,
+    /// Empty on the first request; otherwise the previous reply's `next`.
+    /// **Opaque to authd**, which relays what it was given.
+    pub cursor: Vec<u8>,
+}
+
+/// One page. A source that will not enumerate answers [`Outcome::Refused`] with
+/// both arrays empty.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EnumerateResult {
+    pub outcome: Outcome,
+    pub entries: Vec<QueryEntry>,
+    /// Empty ends the enumeration. Non-empty means there is more **even where
+    /// `entries` is empty**.
+    pub next: Vec<u8>,
+}
+
+/// A source telling authd that something it holds has changed. Source to authd,
+/// on [`CONVERSATION_CONTROL`]. Unsolicited, and never answered.
+///
+/// # Why it carries no new value
+///
+/// It says *that* something changed, not what it changed to. Carrying the value
+/// would make this a second, unsolicited path by which a source could assert
+/// identity — arriving outside any conversation, with no key to check it
+/// against, and no logon in progress to refuse. authd would have accepted an
+/// identity assertion it never asked for.
+///
+/// authd discards what it holds and asks again through [`Query`], where every
+/// scope check applies.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Changed {
+    pub scope: ChangeScope,
+    /// Meaningful only for [`ChangeScope::Object`], and within the source's
+    /// declared domain.
+    pub sid: Vec<u8>,
+}
+
+/// How much of a source's answers an invalidation covers.
+///
+/// A source MAY send [`Self::All`] where it could have sent [`Self::Object`].
+/// Over-invalidation costs a query; under-invalidation costs correctness.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum ChangeScope {
+    All = 1,
+    /// Covers a deletion and a *creation* as well as a change — authd may be
+    /// holding a cached `NotFound` for a name that now exists.
+    Object = 2,
+}
+
+impl ChangeScope {
+    pub fn from_u8(value: u8) -> Option<Self> {
+        Some(match value {
+            1 => Self::All,
+            2 => Self::Object,
+            _ => return None,
+        })
+    }
+}
+
 /// A message's type and the conversation it belongs to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Envelope {
@@ -315,6 +563,9 @@ pub fn encode_register(register: &Register) -> Result<Vec<u8>, WireError> {
     let body = w.open();
     w.string(&register.source_name, MAX_SOURCE_NAME_BYTES)?;
     w.bytes(&register.domain, MAX_SID_BYTES)?;
+    w.u32(register.capabilities.0);
+    w.u32(register.entry_ttl);
+    w.u32(register.max_batch);
     w.close(body);
     w.finish()
 }
@@ -330,9 +581,21 @@ pub fn decode_register(buf: &[u8]) -> Result<Register, WireError> {
     } else {
         b.bytes(MAX_SID_BYTES)?.to_vec()
     };
+    // Appended again, and the default is the load-bearing part: a source that
+    // predates these declares no capability, so authd sends it nothing beyond a
+    // logon and never caches its answers. An older source keeps working exactly
+    // as it did.
+    let (capabilities, entry_ttl, max_batch) = if b.at_end() {
+        (Capabilities::empty(), 0, 0)
+    } else {
+        (Capabilities(b.u32()?), b.u32()?, b.u32()?)
+    };
     Ok(Register {
         source_name,
         domain,
+        capabilities,
+        entry_ttl,
+        max_batch,
     })
 }
 
@@ -549,6 +812,198 @@ pub fn decode_abandon(buf: &[u8]) -> Result<(), WireError> {
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// Identity queries
+// ---------------------------------------------------------------------------
+
+fn write_key(w: &mut Writer, key: Option<&Key>) -> Result<(), WireError> {
+    let (discriminant, name, sid, relative_id) = match key {
+        None => (0, "", &[][..], 0),
+        Some(Key::Name(name)) => (1, name.as_str(), &[][..], 0),
+        Some(Key::Sid(sid)) => (2, "", sid.as_slice(), 0),
+        Some(Key::RelativeId(id)) => (3, "", &[][..], *id),
+    };
+    w.u8(discriminant);
+    w.string(name, MAX_CANONICAL_NAME_BYTES)?;
+    w.bytes(sid, MAX_SID_BYTES)?;
+    w.u32(relative_id);
+    Ok(())
+}
+
+fn read_key(r: &mut frame::Reader<'_>) -> Result<Option<Key>, WireError> {
+    let discriminant = r.u8()?;
+    let name = r.string(MAX_CANONICAL_NAME_BYTES)?.to_owned();
+    let sid = r.bytes(MAX_SID_BYTES)?.to_vec();
+    let relative_id = r.u32()?;
+    // Zero is "no key" — `EnumerateSource.of` meaning *everything* — rather than
+    // a `Key` variant, so it is checked before the conversion.
+    Ok(match discriminant {
+        0 => None,
+        1 => Some(Key::Name(name)),
+        2 => Some(Key::Sid(sid)),
+        3 => Some(Key::RelativeId(relative_id)),
+        _ => return Err(WireError::UnknownValue),
+    })
+}
+
+fn write_entry(w: &mut Writer, entry: &QueryEntry) -> Result<(), WireError> {
+    w.u8(entry.outcome as u8);
+    w.bytes(&entry.sid, MAX_SID_BYTES)?;
+    w.string(&entry.canonical_name, MAX_CANONICAL_NAME_BYTES)?;
+    w.u8(entry.kind as u8);
+    crate::ident::write_attributes(w, &entry.values, &entry.withheld)
+}
+
+fn read_entry(r: &mut frame::Reader<'_>) -> Result<QueryEntry, WireError> {
+    let outcome = Outcome::from_u8(r.u8()?).ok_or(WireError::UnknownValue)?;
+    // A source answers about what it holds, so these two are its to produce and
+    // neither is meaningful for it: `Unavailable` describes a source that did
+    // not answer, and a message a source cannot parse is a `Refusal` for the
+    // whole conversation.
+    if matches!(outcome, Outcome::Unavailable | Outcome::Malformed) {
+        return Err(WireError::UnknownValue);
+    }
+    let sid = r.bytes(MAX_SID_BYTES)?.to_vec();
+    let canonical_name = r.string(MAX_CANONICAL_NAME_BYTES)?.to_owned();
+    let kind = Kind::from_u8(r.u8()?).ok_or(WireError::UnknownValue)?;
+    let (values, withheld) = crate::ident::read_attributes(r)?;
+    Ok(QueryEntry {
+        outcome,
+        sid,
+        canonical_name,
+        kind,
+        values,
+        withheld,
+    })
+}
+
+pub fn encode_query(conversation: u64, query: &Query) -> Result<Vec<u8>, WireError> {
+    let mut w = begin(MSG_QUERY, conversation);
+    let body = w.open();
+    w.u32(query.fields.0);
+    w.count(query.keys.len(), MAX_KEYS)?;
+    for key in &query.keys {
+        let at = w.open();
+        write_key(&mut w, Some(&key.key))?;
+        w.u8(key.kind as u8);
+        w.close(at);
+    }
+    w.close(body);
+    w.finish()
+}
+
+pub fn decode_query(buf: &[u8]) -> Result<Query, WireError> {
+    let mut b = open_body(buf, MSG_QUERY)?;
+    let fields = Fields(b.u32()?);
+    let keys = b.array(MAX_KEYS, |entry| {
+        Ok(QueryKey {
+            key: read_key(entry)?.ok_or(WireError::UnknownValue)?,
+            kind: Kind::from_u8(entry.u8()?).ok_or(WireError::UnknownValue)?,
+        })
+    })?;
+    Ok(Query { fields, keys })
+}
+
+pub fn encode_query_result(
+    conversation: u64,
+    result: &QueryResult,
+) -> Result<Vec<u8>, WireError> {
+    let mut w = begin(MSG_QUERY_RESULT, conversation);
+    let body = w.open();
+    w.count(result.results.len(), MAX_KEYS)?;
+    for entry in &result.results {
+        let at = w.open();
+        write_entry(&mut w, entry)?;
+        w.close(at);
+    }
+    w.close(body);
+    w.finish()
+}
+
+pub fn decode_query_result(buf: &[u8]) -> Result<QueryResult, WireError> {
+    let mut b = open_body(buf, MSG_QUERY_RESULT)?;
+    Ok(QueryResult {
+        results: b.array(MAX_KEYS, read_entry)?,
+    })
+}
+
+pub fn encode_enumerate_source(
+    conversation: u64,
+    request: &EnumerateSource,
+) -> Result<Vec<u8>, WireError> {
+    let mut w = begin(MSG_ENUMERATE_SOURCE, conversation);
+    let body = w.open();
+    w.u8(request.kind as u8);
+    w.u32(request.fields.0);
+    let at = w.open();
+    write_key(&mut w, request.of.as_ref())?;
+    w.close(at);
+    w.bytes(&request.cursor, MAX_CURSOR_BYTES)?;
+    w.close(body);
+    w.finish()
+}
+
+pub fn decode_enumerate_source(buf: &[u8]) -> Result<EnumerateSource, WireError> {
+    let mut b = open_body(buf, MSG_ENUMERATE_SOURCE)?;
+    let kind = Kind::from_u8(b.u8()?).ok_or(WireError::UnknownValue)?;
+    let fields = Fields(b.u32()?);
+    let of = read_key(&mut b.open()?)?;
+    let cursor = b.bytes(MAX_CURSOR_BYTES)?.to_vec();
+    Ok(EnumerateSource {
+        kind,
+        fields,
+        of,
+        cursor,
+    })
+}
+
+pub fn encode_enumerate_result(
+    conversation: u64,
+    result: &EnumerateResult,
+) -> Result<Vec<u8>, WireError> {
+    let mut w = begin(MSG_ENUMERATE_RESULT, conversation);
+    let body = w.open();
+    w.u8(result.outcome as u8);
+    w.count(result.entries.len(), MAX_ENTRIES)?;
+    for entry in &result.entries {
+        let at = w.open();
+        write_entry(&mut w, entry)?;
+        w.close(at);
+    }
+    w.bytes(&result.next, MAX_CURSOR_BYTES)?;
+    w.close(body);
+    w.finish()
+}
+
+pub fn decode_enumerate_result(buf: &[u8]) -> Result<EnumerateResult, WireError> {
+    let mut b = open_body(buf, MSG_ENUMERATE_RESULT)?;
+    let outcome = Outcome::from_u8(b.u8()?).ok_or(WireError::UnknownValue)?;
+    let entries = b.array(MAX_ENTRIES, read_entry)?;
+    let next = b.bytes(MAX_CURSOR_BYTES)?.to_vec();
+    Ok(EnumerateResult {
+        outcome,
+        entries,
+        next,
+    })
+}
+
+pub fn encode_changed(changed: &Changed) -> Result<Vec<u8>, WireError> {
+    let mut w = begin(MSG_CHANGED, CONVERSATION_CONTROL);
+    let body = w.open();
+    w.u8(changed.scope as u8);
+    w.bytes(&changed.sid, MAX_SID_BYTES)?;
+    w.close(body);
+    w.finish()
+}
+
+pub fn decode_changed(buf: &[u8]) -> Result<Changed, WireError> {
+    let mut b = open_body(buf, MSG_CHANGED)?;
+    Ok(Changed {
+        scope: ChangeScope::from_u8(b.u8()?).ok_or(WireError::UnknownValue)?,
+        sid: b.bytes(MAX_SID_BYTES)?.to_vec(),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -581,6 +1036,7 @@ mod tests {
         let bytes = encode_register(&Register {
             source_name: "lpsd".into(),
             domain: domain(),
+            ..Default::default()
         })
         .unwrap();
         let decoded = decode_register(&bytes).unwrap();
@@ -615,6 +1071,7 @@ mod tests {
             encode_register(&Register {
                 source_name: "lpsd".into(),
                 domain: vec![0; MAX_SID_BYTES + 1],
+                ..Default::default()
             })
             .unwrap_err(),
             WireError::TooLong
@@ -990,6 +1447,7 @@ mod tests {
             encode_register(&Register {
                 source_name: long,
                 domain: domain(),
+                ..Default::default()
             })
             .unwrap_err(),
             WireError::TooLong
@@ -1037,6 +1495,7 @@ mod tests {
             encode_register(&Register {
                 source_name: "lpsd".into(),
                 domain: domain(),
+                ..Default::default()
             })
             .unwrap(),
             encode_registered(&Registered {
@@ -1075,6 +1534,312 @@ mod tests {
                 let _ = decode_assertion(prefix);
                 let _ = decode_refusal(prefix);
                 let _ = decode_abandon(prefix);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod query_tests {
+    use super::*;
+    use crate::ident::WithheldReason;
+
+    fn sid(sub: &[u32]) -> Vec<u8> {
+        let mut bytes = vec![1, sub.len() as u8, 0, 0, 0, 0, 0, 5];
+        for value in sub {
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
+        bytes
+    }
+
+    fn entry() -> QueryEntry {
+        QueryEntry {
+            outcome: Outcome::Found,
+            sid: sid(&[21, 1, 2, 3, 1000]),
+            canonical_name: "jack".into(),
+            kind: Kind::Principal,
+            values: vec![
+                // Relative, not rebased — the source counts inside its range and
+                // authd adds the base.
+                Value::UnixId(1000),
+                Value::Home("/home/jack".into()),
+                Value::Shell("/bin/sh".into()),
+            ],
+            withheld: vec![Withheld {
+                field: Fields::MEMBERS,
+                reason: WithheldReason::Absent,
+            }],
+        }
+    }
+
+    #[test]
+    fn a_query_survives_a_round_trip() {
+        let query = Query {
+            fields: Fields::PASSWD,
+            keys: vec![
+                QueryKey {
+                    key: Key::Name("jack".into()),
+                    kind: Kind::Principal,
+                },
+                QueryKey {
+                    key: Key::RelativeId(1000),
+                    kind: Kind::Any,
+                },
+                QueryKey {
+                    key: Key::Sid(sid(&[21, 1, 2, 3, 1001])),
+                    kind: Kind::Group,
+                },
+            ],
+        };
+        assert_eq!(decode_query(&encode_query(7, &query).unwrap()).unwrap(), query);
+    }
+
+    #[test]
+    fn a_query_result_survives_a_round_trip() {
+        let result = QueryResult {
+            results: vec![
+                entry(),
+                QueryEntry {
+                    outcome: Outcome::NotFound,
+                    ..QueryEntry::default()
+                },
+            ],
+        };
+        let decoded = decode_query_result(&encode_query_result(7, &result).unwrap()).unwrap();
+        assert_eq!(decoded, result);
+    }
+
+    /// A source is answering, so nothing was unavailable to *it*. Letting it say
+    /// so would record a working source as a broken one.
+    #[test]
+    fn a_source_may_not_claim_unavailable_or_malformed() {
+        for outcome in [Outcome::Unavailable, Outcome::Malformed] {
+            let result = QueryResult {
+                results: vec![QueryEntry {
+                    outcome,
+                    ..QueryEntry::default()
+                }],
+            };
+            let bytes = encode_query_result(1, &result).unwrap();
+            assert!(
+                matches!(decode_query_result(&bytes), Err(WireError::UnknownValue)),
+                "{outcome:?} must be refused from a source"
+            );
+        }
+    }
+
+    #[test]
+    fn a_source_may_refuse_a_principal_it_holds() {
+        let result = QueryResult {
+            results: vec![QueryEntry {
+                outcome: Outcome::Refused,
+                ..QueryEntry::default()
+            }],
+        };
+        let decoded = decode_query_result(&encode_query_result(1, &result).unwrap()).unwrap();
+        assert_eq!(decoded.results[0].outcome, Outcome::Refused);
+    }
+
+    #[test]
+    fn an_enumeration_request_survives_a_round_trip() {
+        for of in [None, Some(Key::Name("developers".into()))] {
+            let request = EnumerateSource {
+                kind: Kind::Principal,
+                fields: Fields::PASSWD,
+                of: of.clone(),
+                cursor: vec![1, 2, 3],
+            };
+            let decoded =
+                decode_enumerate_source(&encode_enumerate_source(2, &request).unwrap()).unwrap();
+            assert_eq!(decoded, request, "of = {of:?}");
+        }
+    }
+
+    #[test]
+    fn an_enumeration_result_survives_a_round_trip() {
+        let result = EnumerateResult {
+            outcome: Outcome::Found,
+            entries: vec![entry(), entry()],
+            next: vec![7, 7],
+        };
+        let decoded =
+            decode_enumerate_result(&encode_enumerate_result(2, &result).unwrap()).unwrap();
+        assert_eq!(decoded, result);
+    }
+
+    /// A non-empty cursor means there is more even where the page was empty.
+    #[test]
+    fn an_empty_page_with_a_cursor_is_not_the_end() {
+        let result = EnumerateResult {
+            outcome: Outcome::Found,
+            entries: vec![],
+            next: vec![1],
+        };
+        let decoded =
+            decode_enumerate_result(&encode_enumerate_result(2, &result).unwrap()).unwrap();
+        assert!(decoded.entries.is_empty());
+        assert!(!decoded.next.is_empty());
+    }
+
+    #[test]
+    fn a_source_that_will_not_enumerate_refuses() {
+        let result = EnumerateResult {
+            outcome: Outcome::Refused,
+            entries: vec![],
+            next: vec![],
+        };
+        let decoded =
+            decode_enumerate_result(&encode_enumerate_result(2, &result).unwrap()).unwrap();
+        assert_eq!(decoded, result);
+    }
+
+    #[test]
+    fn a_change_notification_survives_a_round_trip() {
+        for changed in [
+            Changed {
+                scope: ChangeScope::All,
+                sid: vec![],
+            },
+            Changed {
+                scope: ChangeScope::Object,
+                sid: sid(&[21, 1, 2, 3, 1000]),
+            },
+        ] {
+            let decoded = decode_changed(&encode_changed(&changed).unwrap()).unwrap();
+            assert_eq!(decoded, changed);
+        }
+    }
+
+    /// Connection-level, like registration — it belongs to no conversation.
+    #[test]
+    fn a_change_notification_rides_the_control_conversation() {
+        let bytes = encode_changed(&Changed {
+            scope: ChangeScope::All,
+            sid: vec![],
+        })
+        .unwrap();
+        assert_eq!(
+            decode_envelope(&bytes).unwrap().conversation,
+            CONVERSATION_CONTROL
+        );
+    }
+
+    /// A source predating capabilities declares none, so authd sends it nothing
+    /// beyond a logon and never caches it. Anything else would break it.
+    #[test]
+    fn a_register_without_capabilities_declares_none() {
+        let mut w = begin(MSG_REGISTER, CONVERSATION_CONTROL);
+        let body = w.open();
+        w.string("lpsd", MAX_SOURCE_NAME_BYTES).unwrap();
+        w.bytes(&sid(&[21, 1, 2, 3]), MAX_SID_BYTES).unwrap();
+        w.close(body);
+        let decoded = decode_register(&w.finish().unwrap()).unwrap();
+        assert_eq!(decoded.capabilities, Capabilities::empty());
+        assert_eq!(decoded.entry_ttl, 0, "and so must not be cached");
+        assert_eq!(decoded.max_batch, 0);
+    }
+
+    #[test]
+    fn capabilities_survive_a_round_trip() {
+        let register = Register {
+            source_name: "lpsd".into(),
+            domain: sid(&[21, 1, 2, 3]),
+            capabilities: Capabilities::QUERIES
+                | Capabilities::ENUMERATES
+                | Capabilities::MEMBERS
+                | Capabilities::PUSHES_CHANGES,
+            entry_ttl: 0,
+            max_batch: 64,
+        };
+        let decoded = decode_register(&encode_register(&register).unwrap()).unwrap();
+        assert_eq!(decoded.capabilities, register.capabilities);
+        assert_eq!(decoded.max_batch, 64);
+        assert!(decoded.capabilities.contains(Capabilities::MEMBERS));
+        assert!(!Capabilities::QUERIES.contains(Capabilities::MEMBERS));
+    }
+
+    /// A source's answer and the authority's describe the same object, so the
+    /// attribute encoding is shared rather than translated between two spellings.
+    #[test]
+    fn psi_and_ident_encode_attributes_identically() {
+        let values = vec![Value::UnixId(1000), Value::Shell("/bin/sh".into())];
+        let withheld = vec![Withheld {
+            field: Fields::MEMBERS,
+            reason: WithheldReason::Declined,
+        }];
+
+        // `begin` writes PSI's conversation id after the common header, which is
+        // what makes `HEADER_BYTES` the right place to cut.
+        let mut psi = begin(MSG_QUERY_RESULT, CONVERSATION_CONTROL);
+        crate::ident::write_attributes(&mut psi, &values, &withheld).unwrap();
+
+        let mut ident = Writer::new(&crate::wire::FRAMING, crate::ident::MSG_LOOKUP_REPLY);
+        crate::ident::write_attributes(&mut ident, &values, &withheld).unwrap();
+
+        let psi = psi.finish().unwrap();
+        let ident = ident.finish().unwrap();
+        assert_eq!(
+            psi[HEADER_BYTES..],
+            ident[crate::wire::HEADER_BYTES..],
+            "the shared body must be byte-identical in both protocols"
+        );
+    }
+
+    #[test]
+    fn every_truncation_errors_rather_than_panics() {
+        let messages: Vec<Vec<u8>> = vec![
+            encode_query(
+                1,
+                &Query {
+                    fields: Fields::PASSWD,
+                    keys: vec![QueryKey {
+                        key: Key::Name("jack".into()),
+                        kind: Kind::Principal,
+                    }],
+                },
+            )
+            .unwrap(),
+            encode_query_result(
+                1,
+                &QueryResult {
+                    results: vec![entry()],
+                },
+            )
+            .unwrap(),
+            encode_enumerate_source(
+                1,
+                &EnumerateSource {
+                    kind: Kind::Principal,
+                    fields: Fields::PASSWD,
+                    of: Some(Key::RelativeId(1000)),
+                    cursor: vec![1],
+                },
+            )
+            .unwrap(),
+            encode_enumerate_result(
+                1,
+                &EnumerateResult {
+                    outcome: Outcome::Found,
+                    entries: vec![entry()],
+                    next: vec![2],
+                },
+            )
+            .unwrap(),
+            encode_changed(&Changed {
+                scope: ChangeScope::Object,
+                sid: sid(&[21, 1, 2, 3, 1000]),
+            })
+            .unwrap(),
+        ];
+        for message in &messages {
+            for cut in 0..message.len() {
+                let prefix = &message[..cut];
+                let _ = decode_envelope(prefix);
+                let _ = decode_query(prefix);
+                let _ = decode_query_result(prefix);
+                let _ = decode_enumerate_source(prefix);
+                let _ = decode_enumerate_result(prefix);
+                let _ = decode_changed(prefix);
             }
         }
     }

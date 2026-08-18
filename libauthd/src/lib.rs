@@ -84,6 +84,7 @@
 
 pub mod claim;
 pub mod frame;
+pub mod ident;
 pub mod lps;
 pub mod psi;
 pub mod secret;
@@ -99,6 +100,14 @@ pub use wire::{
 
 /// The socket a PGSS Logon authority listens on.
 pub const LOGON_SOCKET_PATH: &str = "/run/logon.sock";
+
+/// The socket an authority answers identity lookups on.
+///
+/// Separate from [`LOGON_SOCKET_PATH`] for admission rather than isolation: one
+/// authority answers both, so a second socket buys no fault containment. What it
+/// buys is a second accept queue, so that a filesystem walk issuing millions of
+/// lookups cannot fill the queue an administrator needs in order to sign in.
+pub const IDENT_SOCKET_PATH: &str = "/run/ident.sock";
 
 /// The socket principal sources connect *to*.
 ///

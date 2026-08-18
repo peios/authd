@@ -1,0 +1,1214 @@
+//! The resolver: one place that turns a name, a SID or a POSIX identifier into
+//! a principal.
+//!
+//! Every path into authd that needs to know who somebody is comes through here —
+//! a lookup on `/run/ident.sock`, and eventually a logon on `/run/logon.sock`.
+//! That is the point of it existing rather than each caller doing its own.
+//!
+//! # Why the authority, and only the authority
+//!
+//! A source counts POSIX identifiers relative to a range it is never told the
+//! base of. authd adds the base. So the arithmetic that made a number absolute
+//! exists in exactly one place, and only that place can invert it — no source can
+//! answer "who is uid 1001000", because no source knows what 1001000 means.
+//!
+//! # Why one resolver rather than one per caller
+//!
+//! A bare name may exist in more than one source, and which wins is a property
+//! of the machine rather than of any source in it. If two components resolved
+//! separately they could disagree, and a program acting on one principal's
+//! behalf while checking another's access is a confused deputy, not a cosmetic
+//! inconsistency.
+//!
+//! # No cache
+//!
+//! Every lookup is a live PSI round trip. A cache is invisible on both wires —
+//! authd's own answer and the source's are unchanged by one — so deferring it
+//! costs nothing later, and a cache designed before the real query pattern is
+//! known caches the wrong things.
+//!
+//! The consequence is real and expected: under proxy-only, listing a large
+//! directory is slow. What is *not* deferred is the pair of properties a cache
+//! will need — [`Outcome::Unavailable`] distinguished from [`Outcome::NotFound`]
+//! here, and `Changed` accepted on the PSI side — because retrofitting either
+//! would be a change of behaviour rather than an addition.
+
+use std::sync::Arc;
+use std::time::Duration;
+
+use libauthd::ident::{Fields, Kind, Outcome, Reference, Value, Withheld, WithheldReason};
+use libauthd::psi;
+use peios::security::SidRef;
+
+use crate::log;
+use crate::source::{Inbound, Registry, Slot, Source};
+use crate::unix_id;
+use crate::well_known;
+
+/// How long a source has to answer a lookup.
+///
+/// Shorter than a logon's budget, and deliberately: nothing is waiting on a
+/// human here, and a name resolver is called synchronously from every process on
+/// the system. A lookup that hangs stalls a caller that cannot be told why.
+const QUERY_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// How much of the identity surface a caller may ask for at once.
+///
+/// Every source is asked for exactly the fields the caller wanted, so this
+/// bounds nothing an authority does for itself — it is here to keep an
+/// unrecognised bit from reaching a source that would have to reject it.
+const KNOWN: Fields = Fields::KNOWN;
+
+/// What a lookup produced.
+pub struct Answer {
+    pub outcome: Outcome,
+    pub record: Option<libauthd::ident::Record>,
+}
+
+impl Answer {
+    fn of(outcome: Outcome) -> Self {
+        Self {
+            outcome,
+            record: None,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Lookup
+// ---------------------------------------------------------------------------
+
+/// Resolve one key.
+pub fn lookup(
+    registry: &Registry,
+    key: &libauthd::ident::Key,
+    kind: Kind,
+    fields: Fields,
+) -> Answer {
+    let fields = fields.intersection(KNOWN);
+    match key {
+        libauthd::ident::Key::Name(name) => by_name(registry, name, kind, fields),
+        libauthd::ident::Key::Sid(bytes) => match SidRef::from_bytes(bytes) {
+            Some(sid) => by_sid(registry, sid, kind, fields),
+            None => Answer::of(Outcome::Malformed),
+        },
+        libauthd::ident::Key::UnixId(id) => by_unix_id(registry, *id, kind, fields),
+    }
+}
+
+/// A bare name, resolved in the configured order.
+///
+/// Two rules do the work, and both are about *not* falling through:
+///
+/// - A source that answers `Refused` ends the search. It holds the object and
+///   declined to describe it; consulting the next source would hand back a
+///   *different* principal that happens to share the name.
+/// - A source that could not be reached makes the whole answer `Unavailable`,
+///   even if a later source holds a matching name. Returning the later one would
+///   resolve the name to a different SID than it does when the system is
+///   healthy, so access decisions would be made against the wrong principal
+///   precisely while something is broken.
+fn by_name(registry: &Registry, name: &str, kind: Kind, fields: Fields) -> Answer {
+    if let Some(answer) = well_known_by_name(name, kind, fields) {
+        return answer;
+    }
+    if !name_is_usable(name) {
+        return Answer::of(Outcome::Malformed);
+    }
+
+    for slot in registry.slots() {
+        let source = match slot {
+            Slot::Live(source) => source,
+            // Configured and not here. Everything behind it is unreachable: a
+            // name a later source holds is a *different* principal, so answering
+            // from there would resolve it to a SID this machine does not give
+            // when it is healthy — and access decisions would then be made
+            // against the wrong person, precisely while something is broken.
+            Slot::Absent(name) => {
+                log::warn(format_args!(
+                    "ident: {name} is configured and not registered; a name it \
+                     might hold cannot be resolved from further down the order"
+                ));
+                return Answer::of(Outcome::Unavailable);
+            }
+        };
+        match ask(&source, psi::Key::Name(name.to_string()), kind, fields) {
+            Reply::Found(entry) => return found(&source, &entry, fields),
+            Reply::NotFound => continue,
+            Reply::Refused => return Answer::of(Outcome::Refused),
+            Reply::Unavailable => return Answer::of(Outcome::Unavailable),
+        }
+    }
+    Answer::of(Outcome::NotFound)
+}
+
+/// A SID needs no search: it names its own domain, and identity confinement
+/// makes at most one source authoritative for it.
+fn by_sid(registry: &Registry, sid: &SidRef, kind: Kind, fields: Fields) -> Answer {
+    if let Some(answer) = well_known_by_sid(sid, kind, fields) {
+        return answer;
+    }
+    let Some(source) = registry.owning(sid) else {
+        // No registered source claims this domain. Ordinarily that is an honest
+        // absence — a file may well be owned by a principal of a domain this
+        // machine has never heard of.
+        //
+        // But an unpinned source declares its domain when it registers, so an
+        // absent one's domain is unknowable from configuration. With any source
+        // missing, "nobody owns this" cannot be distinguished from "the source
+        // that owns it is not here", and only the second is safe to cache.
+        return Answer::of(if registry.complete() {
+            Outcome::NotFound
+        } else {
+            Outcome::Unavailable
+        });
+    };
+    match ask(&source, psi::Key::Sid(sid.as_bytes().to_vec()), kind, fields) {
+        Reply::Found(entry) => found(&source, &entry, fields),
+        Reply::NotFound => Answer::of(Outcome::NotFound),
+        Reply::Refused => Answer::of(Outcome::Refused),
+        Reply::Unavailable => Answer::of(Outcome::Unavailable),
+    }
+}
+
+/// The inversion no source can perform for itself.
+fn by_unix_id(registry: &Registry, id: u32, kind: Kind, fields: Fields) -> Answer {
+    if let Some(answer) = well_known_by_unix_id(id, kind, fields) {
+        return answer;
+    }
+    let Some((source, relative)) = registry.rebasing(id) else {
+        // A range is configured rather than declared, so an absent source's is
+        // known exactly — which makes this the precise answer rather than the
+        // conservative one the SID path has to give.
+        return Answer::of(match registry.configured_range(id) {
+            Some(entry) => {
+                log::warn(format_args!(
+                    "ident: {id} belongs to {}, which is configured and not registered",
+                    entry.name
+                ));
+                Outcome::Unavailable
+            }
+            None => Outcome::NotFound,
+        });
+    };
+    match ask(&source, psi::Key::RelativeId(relative), kind, fields) {
+        Reply::Found(entry) => found(&source, &entry, fields),
+        Reply::NotFound => Answer::of(Outcome::NotFound),
+        Reply::Refused => Answer::of(Outcome::Refused),
+        Reply::Unavailable => Answer::of(Outcome::Unavailable),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Well-known principals
+//
+// Numbered below every source's base, in the band authd reserves for its own.
+// No source is authoritative for them, so they are answered here and never
+// asked about — which is also what stops two sources both claiming `Everyone`.
+// ---------------------------------------------------------------------------
+
+fn well_known_by_name(name: &str, kind: Kind, fields: Fields) -> Option<Answer> {
+    let sid = well_known::by_name(name)?;
+    well_known_answer(sid.as_ref(), kind, fields)
+}
+
+fn well_known_by_sid(sid: &SidRef, kind: Kind, fields: Fields) -> Option<Answer> {
+    well_known::name_of(sid)?;
+    well_known_answer(sid, kind, fields)
+}
+
+fn well_known_by_unix_id(id: u32, kind: Kind, fields: Fields) -> Option<Answer> {
+    let sid = well_known::by_unix_id(id)?;
+    well_known_answer(sid.as_ref(), kind, fields)
+}
+
+fn well_known_answer(sid: &SidRef, kind: Kind, fields: Fields) -> Option<Answer> {
+    let name = well_known::name_of(sid)?;
+
+    // Every one of these is a group. `SYSTEM` is the awkward case — it is a
+    // principal that services run as — but nothing looks it up as one, and a
+    // token's uid 0 is projected rather than resolved.
+    if !Kind::Group.satisfies(kind) {
+        return Some(Answer::of(Outcome::NotFound));
+    }
+
+    let mut values = Vec::new();
+    let mut withheld = Vec::new();
+
+    if fields.contains(Fields::UNIX_ID) {
+        match well_known::unix_id(sid) {
+            Some(id) => values.push(Value::UnixId(id)),
+            // A logon SID: `Interactive`, `Network`, and the rest. They are not
+            // groups in the POSIX sense — membership is a property of a session
+            // rather than of an account — so they carry no number.
+            None => withheld.push(Withheld {
+                field: Fields::UNIX_ID,
+                reason: WithheldReason::Absent,
+            }),
+        }
+    }
+    // Nothing records who is in these; authd staples them onto a token at
+    // derivation. Absent rather than declined — declining would suggest an
+    // answer exists somewhere and is being kept back.
+    for field in KNOWN.difference(Fields::UNIX_ID).intersection(fields).iter() {
+        withheld.push(Withheld {
+            field,
+            reason: WithheldReason::Absent,
+        });
+    }
+
+    Some(Answer {
+        outcome: Outcome::Found,
+        record: Some(libauthd::ident::Record {
+            sid: sid.as_bytes().to_vec(),
+            qualified_name: name.to_string(),
+            kind_found: Kind::Group,
+            values,
+            withheld,
+        }),
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Asking a source
+// ---------------------------------------------------------------------------
+
+enum Reply {
+    Found(psi::QueryEntry),
+    NotFound,
+    Refused,
+    /// The source did not answer. Never cacheable, and never a reason to try the
+    /// next source in the order.
+    Unavailable,
+}
+
+fn ask(source: &Arc<Source>, key: psi::Key, kind: Kind, fields: Fields) -> Reply {
+    // A source that did not declare it answers queries is not asked one. That is
+    // what keeps a source written against an earlier PSI working untouched.
+    if !source.capabilities().contains(psi::Capabilities::QUERIES) {
+        return Reply::NotFound;
+    }
+
+    let Some(mut conversation) = source.open() else {
+        return Reply::Unavailable;
+    };
+    let query = psi::Query {
+        fields,
+        keys: vec![psi::QueryKey { key, kind }],
+    };
+    if let Err(error) = conversation.query(&query) {
+        log::warn(format_args!("ident: {}: {error}", source.name()));
+        return Reply::Unavailable;
+    }
+
+    let entry = match conversation.recv(QUERY_TIMEOUT) {
+        Ok(Inbound::Results(result)) => {
+            conversation.finished();
+            match result.results.into_iter().next() {
+                Some(entry) => entry,
+                None => {
+                    log::warn(format_args!(
+                        "ident: {}: answered one key with no results",
+                        source.name()
+                    ));
+                    return Reply::Unavailable;
+                }
+            }
+        }
+        Ok(Inbound::Refuse(_)) => {
+            conversation.finished();
+            return Reply::Refused;
+        }
+        Ok(other) => {
+            log::warn(format_args!(
+                "ident: {}: answered a lookup with {other:?}",
+                source.name()
+            ));
+            return Reply::Unavailable;
+        }
+        Err(stalled) => {
+            log::warn(format_args!("ident: {}: {stalled:?}", source.name()));
+            return Reply::Unavailable;
+        }
+    };
+
+    match entry.outcome {
+        Outcome::Found => Reply::Found(entry),
+        Outcome::NotFound => Reply::NotFound,
+        Outcome::Refused => Reply::Refused,
+        // The decoder refuses these from a source, so reaching here would mean
+        // the codec had changed underneath this match.
+        Outcome::Unavailable | Outcome::Malformed => Reply::Unavailable,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Turning a source's answer into the authority's
+// ---------------------------------------------------------------------------
+
+/// Rebase, qualify and confine what a source said.
+///
+/// Three things happen here that a source cannot do for itself, and one that it
+/// must not be trusted to have done:
+///
+/// - **Rebasing.** Every number a source states is relative; authd adds the base.
+/// - **Qualification.** A source states its own spelling of a name and cannot
+///   know what it is called in this machine's order.
+/// - **Confinement.** A SID outside the source's domain is refused, exactly as
+///   in an assertion. A query is not a weaker channel than a logon: a source
+///   that could name another domain's principals here would have `ls -l` show
+///   them as its own, and be believed the next time something compared that name
+///   to a SID.
+fn found(source: &Arc<Source>, entry: &psi::QueryEntry, fields: Fields) -> Answer {
+    let Some(sid) = SidRef::from_bytes(&entry.sid) else {
+        log::error(format_args!(
+            "ident: {}: answered with bytes that are not a SID",
+            source.name()
+        ));
+        return Answer::of(Outcome::Unavailable);
+    };
+    if !crate::domain::contains(source.domain().as_ref(), sid) {
+        log::error(format_args!(
+            "ident: {}: answered for {sid}, which is outside its domain {}",
+            source.name(),
+            source.domain()
+        ));
+        return Answer::of(Outcome::Unavailable);
+    }
+
+    let range = source.unix_id_range();
+    let mut values = Vec::new();
+
+    for value in &entry.values {
+        values.push(match value {
+            Value::UnixId(relative) => match range.and_then(|r| r.rebase(*relative)) {
+                Some(absolute) => Value::UnixId(absolute),
+                // Out of range, or the source has no range at all. `nobody`
+                // rather than a number nobody agreed to.
+                None => Value::UnixId(unix_id::UNMAPPED),
+            },
+            Value::PrimaryGroup(reference) => Value::PrimaryGroup(rebase_ref(source, reference)),
+            Value::Groups(refs) => {
+                Value::Groups(refs.iter().map(|r| rebase_ref(source, r)).collect())
+            }
+            Value::Members(refs) => {
+                Value::Members(refs.iter().map(|r| rebase_ref(source, r)).collect())
+            }
+            other => other.clone(),
+        });
+    }
+
+    Answer {
+        outcome: Outcome::Found,
+        record: Some(libauthd::ident::Record {
+            sid: entry.sid.clone(),
+            qualified_name: qualify(source, &entry.canonical_name),
+            kind_found: entry.kind,
+            values,
+            withheld: entry
+                .withheld
+                .iter()
+                .filter(|w| fields.contains(w.field))
+                .copied()
+                .collect(),
+        }),
+    }
+}
+
+/// Rebase a reference, or give it authd's own number where authd owns it.
+///
+/// A source sends zero for a group it does not number — a well-known one it is
+/// merely naming a membership in. authd's own table decides those, and applying
+/// the source's base to `BUILTIN\Administrators` would land it inside the
+/// source's range where it does not belong.
+fn rebase_ref(source: &Arc<Source>, reference: &Reference) -> Reference {
+    let unix_id = match SidRef::from_bytes(&reference.sid) {
+        Some(sid) => well_known::unix_id(sid).or_else(|| {
+            source
+                .unix_id_range()
+                .and_then(|range| range.rebase(reference.unix_id))
+        }),
+        None => None,
+    };
+    let name = match (reference.name.is_empty(), SidRef::from_bytes(&reference.sid)) {
+        (true, Some(sid)) => well_known::name_of(sid).unwrap_or_default().to_string(),
+        _ => reference.name.clone(),
+    };
+    Reference {
+        sid: reference.sid.clone(),
+        name,
+        unix_id: unix_id.unwrap_or(unix_id::UNMAPPED),
+    }
+}
+
+/// The name authd hands out, whatever the caller asked with.
+///
+/// Bare today: no realm syntax exists, so there is nothing to qualify a name
+/// with and inventing one now would bake in a spelling before the design that
+/// decides it. What the caller can always rely on is the **SID** alongside it,
+/// which is unambiguous by construction — and when realms arrive this is the one
+/// function that changes.
+fn qualify(_source: &Arc<Source>, canonical: &str) -> String {
+    canonical.to_string()
+}
+
+/// Whether a name could name anything.
+///
+/// The reserved characters of PSD-012 §6.3. Refusing here rather than passing it
+/// on means a source is never asked about a name no source is permitted to hold,
+/// and it makes `jack@local` a clean refusal rather than a mysterious absence
+/// once realms exist.
+fn name_is_usable(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= libauthd::ident::MAX_NAME_BYTES
+        && name.bytes().all(|b| (0x20..=0x7e).contains(&b))
+        && !name.bytes().any(|b| RESERVED_IN_NAME.contains(&b))
+        && name.trim() == name
+}
+
+const RESERVED_IN_NAME: &[u8] = b"@\\/:,";
+
+// ---------------------------------------------------------------------------
+// Enumeration
+// ---------------------------------------------------------------------------
+
+/// One page of every principal or group the machine can name.
+///
+/// The cursor names a source and carries that source's own opaque cursor inside
+/// it, so a walk crosses sources one at a time and each source's paging stays
+/// its own. authd never constructs or parses what a source issued.
+pub struct Page {
+    pub entries: Vec<libauthd::ident::Record>,
+    pub next: Vec<u8>,
+    /// Sources that declined or could not be reached. A short list that looks
+    /// complete is what this exists to prevent.
+    pub incomplete: Vec<String>,
+}
+
+pub fn enumerate(registry: &Registry, kind: Kind, fields: Fields, cursor: &[u8]) -> Page {
+    let fields = fields.intersection(KNOWN);
+    let sources = registry.ordered();
+    let (resume, inner) = split_cursor(cursor);
+
+    let mut entries = Vec::new();
+    let mut incomplete = Vec::new();
+    let mut inner = inner.to_vec();
+    // Everything before the named source was walked on an earlier page. A source
+    // that has appeared since is skipped rather than restarting the walk: its
+    // absence from earlier pages is what `incomplete` is for.
+    let mut reached = resume.is_none();
+
+    for name in registry.absent() {
+        // A source that is configured and not here contributed nothing, and a
+        // listing that did not say so would look complete.
+        incomplete.push(name);
+    }
+
+    for source in &sources {
+        if !reached {
+            if Some(source.name()) == resume.as_deref() {
+                reached = true;
+            } else {
+                continue;
+            }
+        }
+        if !source
+            .capabilities()
+            .contains(psi::Capabilities::ENUMERATES)
+        {
+            incomplete.push(source.name().to_string());
+            continue;
+        }
+        match page_from(source, kind, fields, &inner) {
+            Some(page) => {
+                for entry in &page.entries {
+                    if let Answer {
+                        record: Some(record),
+                        ..
+                    } = found(source, entry, fields)
+                    {
+                        entries.push(record);
+                    }
+                }
+                if !page.next.is_empty() {
+                    // More from this source. Resume here rather than moving on.
+                    return Page {
+                        entries,
+                        next: make_cursor(source.name(), &page.next),
+                        incomplete,
+                    };
+                }
+            }
+            None => incomplete.push(source.name().to_string()),
+        }
+        // Finished with this source; the next one starts from its own beginning.
+        inner.clear();
+    }
+
+    Page {
+        entries,
+        next: Vec::new(),
+        incomplete,
+    }
+}
+
+fn page_from(
+    source: &Arc<Source>,
+    kind: Kind,
+    fields: Fields,
+    cursor: &[u8],
+) -> Option<psi::EnumerateResult> {
+    let mut conversation = source.open()?;
+    let request = psi::EnumerateSource {
+        kind,
+        fields,
+        of: None,
+        cursor: cursor.to_vec(),
+    };
+    if conversation.enumerate(&request).is_err() {
+        return None;
+    }
+    match conversation.recv(QUERY_TIMEOUT) {
+        Ok(Inbound::Page(page)) => {
+            conversation.finished();
+            (page.outcome == Outcome::Found).then_some(page)
+        }
+        Ok(Inbound::Refuse(_)) => {
+            conversation.finished();
+            None
+        }
+        _ => None,
+    }
+}
+
+/// A cursor is a source's *name* and that source's own bytes.
+///
+/// The name rather than a position in the order, because a source that
+/// disconnects between pages shifts every position after it — and resuming the
+/// wrong source with another source's cursor is a silently wrong walk rather
+/// than a loud failure. A name identifies exactly one source or none.
+///
+/// The trailing bytes are the source's and are never looked at.
+fn make_cursor(name: &str, inner: &[u8]) -> Vec<u8> {
+    let mut out = vec![name.len() as u8];
+    out.extend_from_slice(name.as_bytes());
+    out.extend_from_slice(inner);
+    out
+}
+
+fn split_cursor(cursor: &[u8]) -> (Option<String>, &[u8]) {
+    let Some((&len, rest)) = cursor.split_first() else {
+        return (None, &[]);
+    };
+    let len = len as usize;
+    if rest.len() < len {
+        return (None, &[]);
+    }
+    let (name, inner) = rest.split_at(len);
+    // A cursor authd did not issue. Starting over is safe — an enumeration is
+    // not a transaction — and refusing would strand a caller that cannot know
+    // why.
+    match core::str::from_utf8(name) {
+        Ok(name) => (Some(name.to_string()), inner),
+        Err(_) => (None, &[]),
+    }
+}
+
+/// The well-known principals, which belong to no source and so appear in no
+/// source's enumeration.
+///
+/// Emitted by authd itself, and only where a caller asked for groups: every one
+/// of them that carries a number is a group, and `getgrent` would otherwise
+/// never see `Everyone` at all.
+pub fn well_known_page(kind: Kind, fields: Fields) -> Vec<libauthd::ident::Record> {
+    if kind != Kind::Group {
+        return Vec::new();
+    }
+    well_known::numbered()
+        .filter_map(|sid| {
+            well_known_answer(sid.as_ref(), kind, fields.intersection(KNOWN))
+                .and_then(|answer| answer.record)
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::source::pump_for_test;
+    use libauthd::ident::{Key, Value};
+    use libauthd::transport::{recv_message, send_message};
+    use peios::security::Sid;
+    use std::os::unix::net::UnixStream;
+    use std::thread;
+
+    const DOMAIN: &str = "S-1-5-21-1-2-3";
+    const BASE: u32 = 1_000_000;
+
+    fn sid(text: &str) -> Sid {
+        text.parse().expect("a well-formed SID")
+    }
+
+    /// A source that answers every query with one canned entry.
+    ///
+    /// Deliberately dumb: what these tests check is what *authd* does to an
+    /// answer — rebasing, confinement, ordering — not how a source arrives at
+    /// one, which is lpsd's tests.
+    fn range() -> unix_id::Range {
+        unix_id::Range::new(BASE, 1_000_000).expect("a usable range")
+    }
+
+    fn stub(name: &str, domain: &str, order: u32, answer: Option<psi::QueryEntry>) -> Arc<Registry> {
+        let registry = Arc::new(Registry::for_test(&[(name, order, Some(range()))]));
+        add_stub(&registry, name, domain, order, answer);
+        registry
+    }
+
+    fn add_stub(
+        registry: &Arc<Registry>,
+        name: &str,
+        domain: &str,
+        order: u32,
+        answer: Option<psi::QueryEntry>,
+    ) {
+        let (ours, theirs) = UnixStream::pair().expect("socketpair");
+        let source = registry.admit_for_test(
+            name,
+            sid(domain),
+            Some(range()),
+            psi::Capabilities::QUERIES | psi::Capabilities::ENUMERATES,
+            order,
+            ours,
+        );
+        thread::spawn(move || serve_stub(theirs, answer));
+        pump_for_test(&source);
+    }
+
+    /// The other end of the socketpair: read a query, answer it, repeat.
+    fn serve_stub(stream: UnixStream, answer: Option<psi::QueryEntry>) {
+        while let Ok(received) = recv_message(&psi::FRAMING, &stream) {
+            let Ok(envelope) = psi::decode_envelope(received.expose()) else {
+                return;
+            };
+            let reply = match envelope.msg_type {
+                psi::MSG_QUERY => psi::encode_query_result(
+                    envelope.conversation,
+                    &psi::QueryResult {
+                        results: vec![answer.clone().unwrap_or(psi::QueryEntry {
+                            outcome: Outcome::NotFound,
+                            ..psi::QueryEntry::default()
+                        })],
+                    },
+                ),
+                psi::MSG_ENUMERATE_SOURCE => psi::encode_enumerate_result(
+                    envelope.conversation,
+                    &psi::EnumerateResult {
+                        outcome: Outcome::Found,
+                        entries: answer.clone().into_iter().collect(),
+                        next: Vec::new(),
+                    },
+                ),
+                _ => continue,
+            };
+            let Ok(reply) = reply else { return };
+            if send_message(&stream, &reply).is_err() {
+                return;
+            }
+        }
+    }
+
+    fn entry(sid_text: &str, name: &str, relative: u32) -> psi::QueryEntry {
+        psi::QueryEntry {
+            outcome: Outcome::Found,
+            sid: sid(sid_text).as_ref().as_bytes().to_vec(),
+            canonical_name: name.into(),
+            kind: Kind::Principal,
+            values: vec![
+                Value::UnixId(relative),
+                Value::Home(format!("/home/{name}")),
+                Value::Shell("/bin/sh".into()),
+            ],
+            withheld: Vec::new(),
+        }
+    }
+
+    /// The arithmetic no source can do for itself: 1000 relative becomes
+    /// 1,001,000 absolute, and the inverse takes a caller straight back.
+    #[test]
+    fn a_relative_number_is_rebased_on_the_way_out() {
+        let registry = stub(
+            "lpsd",
+            DOMAIN,
+            1000,
+            Some(entry("S-1-5-21-1-2-3-1000", "jack", 1000)),
+        );
+        let answer = lookup(
+            &registry,
+            &Key::Name("jack".into()),
+            Kind::Principal,
+            Fields::PASSWD,
+        );
+        assert_eq!(answer.outcome, Outcome::Found);
+        let record = answer.record.expect("a record");
+        assert_eq!(
+            record.value(Fields::UNIX_ID),
+            Some(&Value::UnixId(BASE + 1000)),
+            "the source counted from its own zero and authd added the base"
+        );
+    }
+
+    /// The inversion, and the reason authd is the only party that can perform it.
+    #[test]
+    fn an_absolute_number_reaches_the_source_that_owns_it() {
+        let registry = stub(
+            "lpsd",
+            DOMAIN,
+            1000,
+            Some(entry("S-1-5-21-1-2-3-1000", "jack", 1000)),
+        );
+        let answer = lookup(
+            &registry,
+            &Key::UnixId(BASE + 1000),
+            Kind::Principal,
+            Fields::UNIX_ID,
+        );
+        assert_eq!(answer.outcome, Outcome::Found);
+        assert_eq!(answer.record.expect("a record").qualified_name, "jack");
+    }
+
+    #[test]
+    fn a_number_in_no_sources_range_is_not_found() {
+        let registry = stub("lpsd", DOMAIN, 1000, None);
+        assert_eq!(
+            lookup(&registry, &Key::UnixId(42), Kind::Principal, Fields::empty()).outcome,
+            Outcome::NotFound
+        );
+    }
+
+    /// A source that named a principal outside its own domain would have `ls -l`
+    /// show another source's people as its own.
+    #[test]
+    fn an_answer_outside_the_sources_domain_is_refused() {
+        let registry = stub(
+            "lpsd",
+            DOMAIN,
+            1000,
+            Some(entry("S-1-5-21-9-9-9-1000", "impostor", 1000)),
+        );
+        let answer = lookup(
+            &registry,
+            &Key::Name("impostor".into()),
+            Kind::Principal,
+            Fields::empty(),
+        );
+        assert_eq!(
+            answer.outcome,
+            Outcome::Unavailable,
+            "a source that broke confinement is not to be believed about anything"
+        );
+    }
+
+    /// Configured order, not registration order — added second, consulted first.
+    #[test]
+    fn a_bare_name_resolves_in_the_configured_order() {
+        let registry = Arc::new(Registry::for_test(&[
+            ("second", 2000, Some(range())),
+            ("first", 10, Some(range())),
+        ]));
+        add_stub(
+            &registry,
+            "second",
+            "S-1-5-21-7-7-7",
+            2000,
+            Some(entry("S-1-5-21-7-7-7-1000", "second-jack", 1000)),
+        );
+        add_stub(
+            &registry,
+            "first",
+            DOMAIN,
+            10,
+            Some(entry("S-1-5-21-1-2-3-1000", "first-jack", 1000)),
+        );
+
+        let answer = lookup(
+            &registry,
+            &Key::Name("jack".into()),
+            Kind::Principal,
+            Fields::empty(),
+        );
+        assert_eq!(
+            answer.record.expect("a record").qualified_name,
+            "first-jack",
+            "the lower SearchOrder wins however the sources registered"
+        );
+    }
+
+    /// A name held by nobody, asked of everybody.
+    #[test]
+    fn a_name_no_source_holds_falls_through_every_source() {
+        let registry = Arc::new(Registry::for_test(&[
+            ("a", 10, Some(range())),
+            ("b", 20, Some(range())),
+        ]));
+        add_stub(&registry, "a", DOMAIN, 10, None);
+        add_stub(&registry, "b", "S-1-5-21-7-7-7", 20, None);
+        assert_eq!(
+            lookup(
+                &registry,
+                &Key::Name("nobody".into()),
+                Kind::Principal,
+                Fields::empty()
+            )
+            .outcome,
+            Outcome::NotFound
+        );
+    }
+
+    /// A SID names its own domain, so exactly one source can be authoritative
+    /// for it and no search is needed.
+    #[test]
+    fn a_sid_goes_straight_to_the_source_that_owns_the_domain() {
+        let registry = Arc::new(Registry::for_test(&[
+            ("wrong", 10, Some(range())),
+            ("right", 20, Some(range())),
+        ]));
+        add_stub(&registry, "wrong", "S-1-5-21-7-7-7", 10, None);
+        add_stub(
+            &registry,
+            "right",
+            DOMAIN,
+            20,
+            Some(entry("S-1-5-21-1-2-3-1000", "jack", 1000)),
+        );
+
+        let answer = lookup(
+            &registry,
+            &Key::Sid(sid("S-1-5-21-1-2-3-1000").as_ref().as_bytes().to_vec()),
+            Kind::Principal,
+            Fields::empty(),
+        );
+        assert_eq!(
+            answer.record.expect("a record").qualified_name,
+            "jack",
+            "the source earlier in the order does not get asked at all"
+        );
+    }
+
+    #[test]
+    fn a_sid_from_an_unknown_domain_is_not_found() {
+        let registry = stub("lpsd", DOMAIN, 1000, None);
+        assert_eq!(
+            lookup(
+                &registry,
+                &Key::Sid(sid("S-1-5-21-8-8-8-1000").as_ref().as_bytes().to_vec()),
+                Kind::Principal,
+                Fields::empty()
+            )
+            .outcome,
+            Outcome::NotFound,
+            "a file owned by a domain this machine never heard of is an ordinary thing"
+        );
+    }
+
+    /// Answered from authd's own table, with no source asked — these numbers are
+    /// below every source's base and belong to nobody else.
+    #[test]
+    fn a_well_known_group_never_reaches_a_source() {
+        let registry = Arc::new(Registry::for_test(&[]));
+        let answer = lookup(
+            &registry,
+            &Key::Name("Administrators".into()),
+            Kind::Group,
+            Fields::UNIX_ID,
+        );
+        assert_eq!(answer.outcome, Outcome::Found);
+        let record = answer.record.expect("a record");
+        assert_eq!(record.kind_found, Kind::Group);
+        assert_eq!(record.value(Fields::UNIX_ID), Some(&Value::UnixId(102)));
+    }
+
+    /// A source that has gone away is `Unavailable`, and the search stops there
+    /// — a later source holding the same name would resolve it to a different
+    /// SID than it does when the system is healthy.
+    #[test]
+    fn a_dead_source_earlier_in_the_order_makes_the_answer_unavailable() {
+        let registry = Arc::new(Registry::for_test(&[
+            ("dead", 10, None),
+            ("live", 20, Some(range())),
+        ]));
+        let (ours, theirs) = UnixStream::pair().expect("socketpair");
+        let dead = registry.admit_for_test(
+            "dead",
+            sid(DOMAIN),
+            None,
+            psi::Capabilities::QUERIES,
+            10,
+            ours,
+        );
+        drop(theirs);
+        pump_for_test(&dead);
+
+        add_stub(
+            &registry,
+            "live",
+            "S-1-5-21-7-7-7",
+            20,
+            Some(entry("S-1-5-21-7-7-7-1000", "jack", 1000)),
+        );
+
+        assert_eq!(
+            lookup(
+                &registry,
+                &Key::Name("jack".into()),
+                Kind::Principal,
+                Fields::empty()
+            )
+            .outcome,
+            Outcome::Unavailable,
+            "the later source's principal is a different person"
+        );
+    }
+
+    /// A source that never declared it answers queries is not asked one, which
+    /// is what keeps a source written against an earlier PSI working untouched.
+    #[test]
+    fn a_source_that_declared_no_capabilities_is_not_queried() {
+        let registry = Arc::new(Registry::for_test(&[("old", 10, None)]));
+        let (ours, theirs) = UnixStream::pair().expect("socketpair");
+        registry.admit_for_test(
+            "old",
+            sid(DOMAIN),
+            None,
+            psi::Capabilities::empty(),
+            10,
+            ours,
+        );
+        // Nothing serves `theirs`, so a query sent here would hang until the
+        // timeout — and the test finishing promptly is the assertion.
+        let answer = lookup(
+            &registry,
+            &Key::Name("jack".into()),
+            Kind::Principal,
+            Fields::empty(),
+        );
+        drop(theirs);
+        assert_eq!(answer.outcome, Outcome::NotFound);
+    }
+
+    #[test]
+    fn a_name_with_a_reserved_character_never_reaches_a_source() {
+        let registry = stub("lpsd", DOMAIN, 1000, None);
+        for name in ["jack@local", "PEIOS\\jack", "a/b", "a:b", "a,b", " jack"] {
+            assert_eq!(
+                lookup(
+                    &registry,
+                    &Key::Name(name.into()),
+                    Kind::Principal,
+                    Fields::empty()
+                )
+                .outcome,
+                Outcome::Malformed,
+                "{name}"
+            );
+        }
+    }
+
+    /// A group the source does not number gets authd's own value rather than
+    /// the source's base, which would land a `BUILTIN` group inside the source's
+    /// range where it does not belong.
+    #[test]
+    fn a_well_known_group_in_a_reply_takes_authds_number() {
+        let mut answer = entry("S-1-5-21-1-2-3-1000", "jack", 1000);
+        answer.values.push(Value::Groups(vec![Reference {
+            sid: sid("S-1-5-32-544").as_ref().as_bytes().to_vec(),
+            name: "Administrators".into(),
+            // Zero: the source names the membership and numbers nothing.
+            unix_id: 0,
+        }]));
+        let registry = stub("lpsd", DOMAIN, 1000, Some(answer));
+
+        let found = lookup(
+            &registry,
+            &Key::Name("jack".into()),
+            Kind::Principal,
+            Fields::GROUPS,
+        );
+        let record = found.record.expect("a record");
+        let Some(Value::Groups(groups)) = record.value(Fields::GROUPS) else {
+            panic!("groups must be present");
+        };
+        assert_eq!(groups[0].unix_id, 102, "authd's table, not the source's base");
+    }
+
+    #[test]
+    fn enumerating_walks_every_source() {
+        let registry = Arc::new(Registry::for_test(&[
+            ("a", 10, Some(range())),
+            ("b", 20, Some(range())),
+        ]));
+        add_stub(
+            &registry,
+            "a",
+            DOMAIN,
+            10,
+            Some(entry("S-1-5-21-1-2-3-1000", "jack", 1000)),
+        );
+        add_stub(
+            &registry,
+            "b",
+            "S-1-5-21-7-7-7",
+            20,
+            Some(entry("S-1-5-21-7-7-7-1000", "ada", 1000)),
+        );
+
+        let page = enumerate(&registry, Kind::Principal, Fields::UNIX_ID, &[]);
+        let names: Vec<&str> = page
+            .entries
+            .iter()
+            .map(|e| e.qualified_name.as_str())
+            .collect();
+        assert_eq!(names, vec!["jack", "ada"]);
+        assert!(page.next.is_empty());
+        assert!(page.incomplete.is_empty());
+    }
+
+    /// A short list that looks complete is what `incomplete` exists to prevent.
+    #[test]
+    fn a_source_that_does_not_enumerate_is_reported() {
+        let registry = Arc::new(Registry::for_test(&[("quiet", 10, None)]));
+        let (ours, theirs) = UnixStream::pair().expect("socketpair");
+        registry.admit_for_test(
+            "quiet",
+            sid(DOMAIN),
+            None,
+            psi::Capabilities::QUERIES,
+            10,
+            ours,
+        );
+        let page = enumerate(&registry, Kind::Principal, Fields::empty(), &[]);
+        drop(theirs);
+        assert!(page.entries.is_empty());
+        assert_eq!(page.incomplete, vec!["quiet".to_string()]);
+    }
+
+    /// A source that disconnects between pages shifts every position after it,
+    /// so a cursor keyed on position would resume the wrong source with another
+    /// source's bytes — a silently wrong walk rather than a loud failure.
+    #[test]
+    fn an_enumeration_cursor_names_its_source() {
+        let registry = Arc::new(Registry::for_test(&[
+            ("a", 10, Some(range())),
+            ("b", 20, Some(range())),
+        ]));
+        add_stub(
+            &registry,
+            "a",
+            DOMAIN,
+            10,
+            Some(entry("S-1-5-21-1-2-3-1000", "jack", 1000)),
+        );
+        add_stub(
+            &registry,
+            "b",
+            "S-1-5-21-7-7-7",
+            20,
+            Some(entry("S-1-5-21-7-7-7-1000", "ada", 1000)),
+        );
+
+        // A cursor naming `b` resumes there, skipping `a` entirely.
+        let mut cursor = vec![1u8];
+        cursor.extend_from_slice(b"b");
+        let page = enumerate(&registry, Kind::Principal, Fields::empty(), &cursor);
+        let names: Vec<&str> = page
+            .entries
+            .iter()
+            .map(|e| e.qualified_name.as_str())
+            .collect();
+        assert_eq!(names, vec!["ada"], "the walk resumes at the named source");
+    }
+
+    /// Whatever a caller sends that authd did not issue, the walk starts over
+    /// rather than stranding it.
+    #[test]
+    fn an_unrecognised_cursor_starts_over() {
+        let registry = stub(
+            "lpsd",
+            DOMAIN,
+            1000,
+            Some(entry("S-1-5-21-1-2-3-1000", "jack", 1000)),
+        );
+        for cursor in [vec![0xff], vec![4, 0xff, 0xff, 0xff, 0xff], vec![9, 1, 2]] {
+            let page = enumerate(&registry, Kind::Principal, Fields::empty(), &cursor);
+            assert!(
+                page.entries.is_empty() || page.entries[0].qualified_name == "jack",
+                "cursor {cursor:?} must not resume somewhere it was never told about"
+            );
+        }
+    }
+
+    /// A configured source that is not here contributed nothing, and a listing
+    /// that did not say so would look complete.
+    #[test]
+    fn an_absent_source_is_reported_in_an_enumeration() {
+        let registry = Arc::new(Registry::for_test(&[
+            ("here", 10, Some(range())),
+            ("gone", 20, Some(range())),
+        ]));
+        add_stub(
+            &registry,
+            "here",
+            DOMAIN,
+            10,
+            Some(entry("S-1-5-21-1-2-3-1000", "jack", 1000)),
+        );
+        let page = enumerate(&registry, Kind::Principal, Fields::empty(), &[]);
+        assert_eq!(page.incomplete, vec!["gone".to_string()]);
+    }
+
+    /// A range is configured rather than declared, so an absent source's is
+    /// known exactly — and a number inside it must not answer as an absence a
+    /// cache could keep.
+    #[test]
+    fn a_number_in_an_absent_sources_range_is_unavailable() {
+        let registry = Arc::new(Registry::for_test(&[("gone", 10, Some(range()))]));
+        assert_eq!(
+            lookup(
+                &registry,
+                &Key::UnixId(BASE + 500),
+                Kind::Principal,
+                Fields::empty()
+            )
+            .outcome,
+            Outcome::Unavailable
+        );
+    }
+
+    /// An unpinned source declares its domain at registration, so an absent
+    /// one's is unknowable — and "nobody owns this" cannot be told apart from
+    /// "the owner is not here".
+    #[test]
+    fn a_sid_is_unavailable_rather_than_absent_while_a_source_is_missing() {
+        let registry = Arc::new(Registry::for_test(&[("gone", 10, None)]));
+        assert_eq!(
+            lookup(
+                &registry,
+                &Key::Sid(sid("S-1-5-21-8-8-8-1000").as_ref().as_bytes().to_vec()),
+                Kind::Principal,
+                Fields::empty()
+            )
+            .outcome,
+            Outcome::Unavailable
+        );
+    }
+
+    #[test]
+    fn the_well_known_groups_are_authds_to_enumerate() {
+        let page = well_known_page(Kind::Group, Fields::UNIX_ID);
+        assert!(page.iter().any(|r| r.qualified_name == "Everyone"));
+        assert!(
+            !page.iter().any(|r| r.qualified_name == "Interactive"),
+            "a session property is not a row in a group table"
+        );
+        assert!(well_known_page(Kind::Principal, Fields::empty()).is_empty());
+    }
+}

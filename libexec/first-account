@@ -1,11 +1,18 @@
 #!/usr/bin/sh
 # Create the development account on a machine that has none.
 #
-# !! THE PASSWORD BELOW SHIPS IN THE IMAGE AND IS THEREFORE PUBLIC. !!
-# Anyone holding the ISO holds this credential. This file belongs on a live or
-# development image and nowhere else; a production image does not enable the
-# service that runs it, provisions an empty store, and has an administrator
-# create the first account with `lps add`.
+# !! THIS ACCOUNT HAS NO CREDENTIAL AND IS AN ADMINISTRATOR. !!
+# Anyone who can reach a logon prompt on this machine can become it, and the
+# console logs in as it automatically. That is the correct posture for a live
+# image -- the medium is unauthenticated, anyone holding the ISO can boot it and
+# read everything on it, and a password here would be theatre rather than a
+# boundary. It is the wrong posture for anything else. A production image does
+# not enable the service that runs this, provisions an empty store, and has an
+# administrator create the first account with `lps add`.
+#
+# Being passwordless is a property of the *account*, not of the console: nothing
+# scopes it to one terminal, so it is reachable from any logon prompt this
+# machine grows. That is the trade this file makes, deliberately.
 #
 # Run by peinit as a oneshot service ordered after lpsd, because `lps` talks to
 # lpsd over /run/lpsd/admin.sock and the daemon has to be listening. That is
@@ -22,8 +29,7 @@
 # when it commits the filesystem to disk.
 set -eu
 
-NAME=jack
-PASSWORD=password
+NAME=peios
 # BUILTIN\Administrators. Without it the account can traverse to files but
 # cannot enumerate a directory -- the tree-wide seed ACL grants administrators
 # and SYSTEM, and nothing else.
@@ -32,14 +38,15 @@ PASSWORD=password
 # script says what it means. A SID would still work.
 GROUP=Administrators
 
-# One line, not two: `lps` reads a single line when stdin is not a terminal,
-# because down a pipe there is nobody to confirm the password with.
+# --no-password, not an empty password. The store refuses the second: an empty
+# password still prompts and still has to be answered, so having both would mean
+# two spellings of "type nothing" that behave differently.
 #
-# --no-prompt is belt and braces. `lps add` already asks for nothing when stdin
-# is not a terminal, and a pipe is not one -- but a prompt appearing here would
-# consume the password line and hang the boot, so the intent is stated rather
-# than inferred.
+# Nothing is piped in, because nothing is asked for. --no-prompt is belt and
+# braces: `lps add` asks for nothing when stdin is not a terminal, but a prompt
+# appearing here would hang the boot, so the intent is stated rather than
+# inferred.
 #
 # An absolute path: a service's environment is not a login shell's and carries
 # no PATH to rely on.
-printf '%s\n' "$PASSWORD" | /usr/bin/lps add "$NAME" --group "$GROUP" --no-prompt
+/usr/bin/lps add "$NAME" --group "$GROUP" --no-password --no-prompt

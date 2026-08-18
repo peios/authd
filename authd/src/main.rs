@@ -18,7 +18,7 @@
 //!   authd does not fork user processes and knows nothing about ttys,
 //!   environments, or session leadership. That is what keeps it auditable.
 //!
-//! # Two sockets
+//! # Three sockets
 //!
 //! ```text
 //!   login, sshd, a greeter …          lpsd, udpsd, adpsd …
@@ -26,13 +26,24 @@
 //!            | PGSS Logon                       | PSI
 //!            v                                  v
 //!     /run/logon.sock  ------ authd ------  /run/psi.sock
-//!       (clients connect)              (sources connect)
+//!       (clients connect)     ^        (sources connect)
+//!                             |
+//!                             | PGSS Logon ch.6
+//!                     /run/ident.sock
+//!                    (everything connects)
 //! ```
 //!
-//! Both are inbound. authd never dials out, which is worth preserving: a
+//! All three are inbound. authd never dials out, which is worth preserving: a
 //! process holding `SeCreateTokenPrivilege` that only ever accepts is a
 //! meaningfully smaller thing than one that connects to paths named in
 //! configuration.
+//!
+//! `/run/ident.sock` answers *who is this SID, this name, this number* — the
+//! surface `getpwuid` reaches through. It is separate from the logon socket for
+//! **admission**, not isolation: one authority answers both, so a second socket
+//! contains no faults, but it does give the two populations of caller separate
+//! accept queues. A filesystem walk issuing millions of lookups must not be able
+//! to fill the queue an administrator needs in order to sign in.
 //!
 //! # Milestone 2
 //!
@@ -45,9 +56,11 @@
 mod conversation;
 mod derive;
 mod domain;
+mod ident;
 mod log;
 mod peer;
 mod policy;
+mod resolve;
 mod service_sid;
 mod source;
 mod unix_id;
@@ -62,7 +75,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
 
-use libauthd::{LOGON_SOCKET_PATH, PSI_SOCKET_PATH};
+use libauthd::{IDENT_SOCKET_PATH, LOGON_SOCKET_PATH, PSI_SOCKET_PATH};
 
 use crate::source::Registry;
 
@@ -84,6 +97,14 @@ const MAX_CONCURRENT_CONVERSATIONS: usize = 64;
 /// Comfortably above the number of sources any real system runs, since a
 /// registered source holds one of these for its whole life.
 const MAX_SOURCE_CONNECTIONS: usize = 32;
+
+/// How many identity lookups may be in flight at once.
+///
+/// Larger than the logon cap, because the callers are: every process that
+/// renders a name holds one of these, where only a handful of things ever
+/// originate a logon. Separate from that cap on purpose — the two populations
+/// having their own budget is the same reason they have their own socket.
+const MAX_IDENT_CONNECTIONS: usize = 256;
 
 fn main() -> ExitCode {
     log::info(format_args!(
@@ -115,7 +136,25 @@ fn main() -> ExitCode {
         }
     };
 
-    let registry = Arc::new(Registry::new());
+    // Deliberately open, and for a different reason than the PSI socket. Here
+    // there is nothing to protect: a principal refused a connection would see
+    // numbers where names should be, while one that can connect learns the same
+    // names either way. Restriction, when authd wants it, goes on fields.
+    let ident = match listen(Path::new(IDENT_SOCKET_PATH), 0o666) {
+        Ok(listener) => listener,
+        Err(error) => {
+            log::error(format_args!(
+                "could not listen on {IDENT_SOCKET_PATH}: {error}"
+            ));
+            return ExitCode::FAILURE;
+        }
+    };
+
+    // Read once, here, rather than per lookup. It is what tells the resolver
+    // which sources *should* be present, so that a name a crashed source holds
+    // answers "unavailable" rather than falling through to a different
+    // principal that happens to share it.
+    let registry = Arc::new(Registry::configured(&policy::sources()));
 
     // Sources must be able to register before the first logon arrives, so this
     // loop starts first — but nothing here waits for one. "No sources means no
@@ -133,11 +172,22 @@ fn main() -> ExitCode {
         }
     }
 
-    // Only once both sockets exist, so a service ordered after us finds
+    {
+        let registry = Arc::clone(&registry);
+        let spawned = thread::Builder::new()
+            .name("ident".into())
+            .spawn(move || accept_lookups(&registry, ident));
+        if let Err(error) = spawned {
+            log::error(format_args!("could not start the ident listener: {error}"));
+            return ExitCode::FAILURE;
+        }
+    }
+
+    // Only once every socket exists, so a service ordered after us finds
     // something to connect to rather than racing us to create it.
     notify_ready();
     log::info(format_args!(
-        "listening on {LOGON_SOCKET_PATH} and {PSI_SOCKET_PATH}"
+        "listening on {LOGON_SOCKET_PATH}, {IDENT_SOCKET_PATH} and {PSI_SOCKET_PATH}"
     ));
 
     accept_logons(&registry, logon);
@@ -195,6 +245,44 @@ fn accept_logons(registry: &Arc<Registry>, listener: UnixListener) {
             // The thread never ran, so nothing will decrement for us.
             live.fetch_sub(1, Ordering::Relaxed);
             log::warn(format_args!("could not spawn a conversation thread: {error}"));
+        }
+    });
+}
+
+/// Accept identity lookups. One thread per connection, for the connection's
+/// lifetime.
+///
+/// A separate cap from the logon socket's, which is the whole reason this is a
+/// separate socket: a name resolver in every process on the system is a very
+/// different population of caller from the handful of things that originate
+/// logons, and neither should be able to exhaust the other.
+fn accept_lookups(registry: &Arc<Registry>, listener: UnixListener) {
+    let live = Arc::new(AtomicUsize::new(0));
+
+    accept_loop(listener, "ident", |stream| {
+        if live.load(Ordering::Relaxed) >= MAX_IDENT_CONNECTIONS {
+            // Dropped rather than queued. A resolver that cannot get an answer
+            // now will ask again, and holding it open would look like a slow
+            // answer rather than a busy system.
+            log::warn(format_args!(
+                "ident: refused a connection: {MAX_IDENT_CONNECTIONS} already in flight"
+            ));
+            return;
+        }
+
+        live.fetch_add(1, Ordering::Relaxed);
+        let held = Arc::clone(&live);
+        let registry = Arc::clone(registry);
+        let spawned = thread::Builder::new()
+            .name("ident".into())
+            .spawn(move || {
+                ident::serve(registry, stream);
+                held.fetch_sub(1, Ordering::Relaxed);
+            });
+
+        if let Err(error) = spawned {
+            live.fetch_sub(1, Ordering::Relaxed);
+            log::warn(format_args!("ident: could not spawn a thread: {error}"));
         }
     });
 }

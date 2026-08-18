@@ -74,6 +74,10 @@ pub enum Inbound {
     Assert(psi::Assertion),
     /// Refused, with a reason to relay.
     Refuse(psi::Refusal),
+    /// Answers to a lookup, one per key, in the order they were asked.
+    Results(psi::QueryResult),
+    /// One page of an enumeration.
+    Page(psi::EnumerateResult),
 }
 
 /// One registered principal source.
@@ -91,6 +95,16 @@ pub struct Source {
     /// `None` when none is configured, in which case its principals project to
     /// `nobody`. The numeric counterpart of `domain`.
     unix_id_range: Option<unix_id::Range>,
+    /// What the source declared it can do beyond authenticating.
+    ///
+    /// authd sends nothing a source did not declare it answers, which is what
+    /// keeps a source written against an earlier PSI working untouched: it
+    /// declares nothing, and is only ever asked to authenticate.
+    capabilities: psi::Capabilities,
+    /// Where this source sits in the resolution order for a bare name. Lower
+    /// first; ties broken by name, so the order never depends on which source
+    /// happened to register first.
+    search_order: u32,
     stream: UnixStream,
     /// Serialises writers. Reads need no lock: there is exactly one reader
     /// thread per connection, and reading and writing a socket are independent.
@@ -108,6 +122,8 @@ impl Source {
         may_assert_foreign_memberships: bool,
         domain: Sid,
         unix_id_range: Option<unix_id::Range>,
+        capabilities: psi::Capabilities,
+        search_order: u32,
         stream: UnixStream,
     ) -> Self {
         Self {
@@ -115,6 +131,8 @@ impl Source {
             may_assert_foreign_memberships,
             domain,
             unix_id_range,
+            capabilities,
+            search_order,
             stream,
             write: Mutex::new(()),
             conversations: Mutex::new(HashMap::new()),
@@ -134,6 +152,16 @@ impl Source {
     /// The domain this source is authoritative for.
     pub fn domain(&self) -> &Sid {
         &self.domain
+    }
+
+    /// What this source declared it can answer.
+    pub fn capabilities(&self) -> psi::Capabilities {
+        self.capabilities
+    }
+
+    /// Where this source sits in the resolution order.
+    pub fn search_order(&self) -> u32 {
+        self.search_order
     }
 
     /// The Unix ID range this source's numbers are rebased into.
@@ -296,6 +324,24 @@ impl Conversation {
         self.source.send(&message)
     }
 
+    /// Ask this source about objects it holds, outside any logon.
+    ///
+    /// A query is a conversation like a logon, and for the same reason: it is
+    /// the mechanism that already demultiplexes concurrent work over one
+    /// long-lived connection.
+    pub fn query(&self, query: &psi::Query) -> io::Result<()> {
+        let message = psi::encode_query(self.id, query)
+            .map_err(|_| io::Error::other("could not encode a query"))?;
+        self.source.send(&message)
+    }
+
+    /// Ask this source to produce a page of objects.
+    pub fn enumerate(&self, request: &psi::EnumerateSource) -> io::Result<()> {
+        let message = psi::encode_enumerate_source(self.id, request)
+            .map_err(|_| io::Error::other("could not encode an enumeration"))?;
+        self.source.send(&message)
+    }
+
     /// Relay the client's answers to the source.
     pub fn credential_response(&self, response: &CredentialResponse) -> io::Result<()> {
         let message = psi::encode_credential_response(self.id, response)
@@ -345,10 +391,41 @@ pub enum Stalled {
 // The registry
 // ---------------------------------------------------------------------------
 
-/// Every source currently registered.
+/// A source this machine is configured to have, whether or not it is here.
+///
+/// Load-bearing for resolution rather than bookkeeping. A configured source that
+/// is *absent* must still occupy its place in the search order: without that, a
+/// crashed `lpsd` would make `jack` silently resolve to a directory's `jack`,
+/// which is a different principal with a different SID — and every descriptor
+/// granting the local one would stop applying to the person signing in under
+/// that name.
+#[derive(Debug, Clone)]
+pub struct Configured {
+    pub name: String,
+    pub search_order: u32,
+    pub unix_id_range: Option<unix_id::Range>,
+}
+
+/// A place in the search order, filled or not.
+pub enum Slot {
+    Live(Arc<Source>),
+    /// Configured, and not currently registered. Everything behind it in the
+    /// order is unreachable, because an answer from further down would be a
+    /// different principal than the one this machine gives when it is healthy.
+    Absent(String),
+}
+
+/// Every source currently registered, and every one that should be.
 #[derive(Default)]
 pub struct Registry {
     sources: Mutex<Vec<Arc<Source>>>,
+    /// Every source the allowlist names, read once at startup.
+    ///
+    /// Not re-read per lookup: a name resolver in every process on the system
+    /// calls this path thousands of times a second, and a registry read apiece
+    /// would be the most expensive thing in it. Changing the allowlist already
+    /// requires restarting authd for other reasons.
+    configured: Vec<Configured>,
     /// The domain each source name was *first* seen to declare, kept for the
     /// lifetime of the process — including across a source disconnecting.
     ///
@@ -396,8 +473,65 @@ impl core::fmt::Display for Rejected {
 }
 
 impl Registry {
+    /// A registry that knows of no configured source.
+    ///
+    /// Only correct where there genuinely is no allowlist. authd itself always
+    /// has one — [`Self::configured`] — because a registry that does not know
+    /// which sources *should* be present cannot tell an absence from an outage.
+    #[cfg(test)]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// A registry that knows what the allowlist names.
+    pub fn configured(entries: &[policy::SourceEntry]) -> Self {
+        Self {
+            configured: entries
+                .iter()
+                .map(|entry| Configured {
+                    name: entry.name.clone(),
+                    search_order: entry.search_order,
+                    unix_id_range: entry.unix_id_range,
+                })
+                .collect(),
+            ..Self::default()
+        }
+    }
+
+    /// The range a configured source was given, whether or not it is here.
+    ///
+    /// The inverse arithmetic has to work for an absent source too, or a
+    /// `getpwuid` for one of its principals would answer `NotFound` — a
+    /// cacheable absence — the moment it went away.
+    pub fn configured_range(&self, unix_id: u32) -> Option<&Configured> {
+        self.configured.iter().find(|entry| {
+            entry.unix_id_range.is_some_and(|range| {
+                unix_id
+                    .checked_sub(range.base)
+                    .is_some_and(|relative| relative != 0 && relative < range.count)
+            })
+        })
+    }
+
+    /// Every configured source that is not currently registered.
+    pub fn absent(&self) -> Vec<String> {
+        let live = self.sources.lock().unwrap_or_else(|e| e.into_inner());
+        self.configured
+            .iter()
+            .filter(|entry| !live.iter().any(|s| s.is_live() && s.name() == entry.name))
+            .map(|entry| entry.name.clone())
+            .collect()
+    }
+
+    /// Whether every configured source is currently registered.
+    ///
+    /// What makes a `NotFound` safe to give: an absence is only authoritative
+    /// when everything that could have contradicted it was asked.
+    pub fn complete(&self) -> bool {
+        let live = self.sources.lock().unwrap_or_else(|e| e.into_inner());
+        self.configured
+            .iter()
+            .all(|entry| live.iter().any(|s| s.is_live() && s.name() == entry.name))
     }
 
     /// Admit a source, or say why not.
@@ -469,14 +603,134 @@ impl Registry {
     /// NSS stacking — hands every source the credentials of every other
     /// source's users, including on typos.
     pub fn route(&self, _identifier: &[u8]) -> Option<Arc<Source>> {
-        self.sources
+        self.ordered().into_iter().next()
+    }
+
+    /// Every live source, in the order a bare name is resolved.
+    ///
+    /// Configured order first, then name. Never registration order: which source
+    /// a name resolves to must not depend on which one happened to finish
+    /// starting first, or a slow disk could change who `jack` is.
+    pub fn ordered(&self) -> Vec<Arc<Source>> {
+        let mut live: Vec<Arc<Source>> = self
+            .sources
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .iter()
-            .find(|source| source.is_live())
+            .filter(|source| source.is_live())
             .map(Arc::clone)
+            .collect();
+        live.sort_by(|a, b| {
+            a.search_order()
+                .cmp(&b.search_order())
+                .then_with(|| a.name().cmp(b.name()))
+        });
+        live
+    }
+
+    /// The search order with its gaps in it.
+    ///
+    /// A configured source that is not registered appears as [`Slot::Absent`]
+    /// rather than being skipped, so a resolver walking this stops where the
+    /// machine would have stopped if the source were here.
+    pub fn slots(&self) -> Vec<Slot> {
+        let live = self.ordered();
+        let mut slots: Vec<(u32, &str, Option<Arc<Source>>)> = Vec::new();
+
+        for source in &live {
+            slots.push((source.search_order(), source.name(), Some(Arc::clone(source))));
+        }
+        for entry in &self.configured {
+            if !live.iter().any(|s| s.name() == entry.name) {
+                slots.push((entry.search_order, &entry.name, None));
+            }
+        }
+        slots.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(b.1)));
+        slots
+            .into_iter()
+            .map(|(_, name, source)| match source {
+                Some(source) => Slot::Live(source),
+                None => Slot::Absent(name.to_string()),
+            })
+            .collect()
+    }
+
+    /// A registry configured with the given sources, none of them registered.
+    ///
+    /// The counterpart of [`Self::admit_for_test`]: what a resolver test needs
+    /// is both halves — which sources *should* be here, and which are.
+    #[cfg(test)]
+    pub fn for_test(configured: &[(&str, u32, Option<unix_id::Range>)]) -> Self {
+        Self {
+            configured: configured
+                .iter()
+                .map(|(name, search_order, unix_id_range)| Configured {
+                    name: (*name).into(),
+                    search_order: *search_order,
+                    unix_id_range: *unix_id_range,
+                })
+                .collect(),
+            ..Self::default()
+        }
+    }
+
+    /// Register a source that never connected, for tests.
+    ///
+    /// A test seam rather than a shortcut: everything registration establishes —
+    /// the peer's service SID, the allowlist, the domain checks — is tested
+    /// where it lives, and what the resolver's tests need is a source that
+    /// *answers*, which no amount of registration machinery provides.
+    #[cfg(test)]
+    pub fn admit_for_test(
+        &self,
+        name: &str,
+        domain: Sid,
+        range: Option<unix_id::Range>,
+        capabilities: psi::Capabilities,
+        search_order: u32,
+        stream: UnixStream,
+    ) -> Arc<Source> {
+        let source = Arc::new(Source::new(
+            name.into(),
+            false,
+            domain,
+            range,
+            capabilities,
+            search_order,
+            stream,
+        ));
+        self.admit(Arc::clone(&source)).expect("must admit");
+        source
+    }
+
+    /// The source authoritative for a SID, if any is.
+    ///
+    /// A SID names its own domain, so this needs no search: at most one source
+    /// can have declared it, and identity confinement is what makes that true.
+    pub fn owning(&self, sid: &SidRef) -> Option<Arc<Source>> {
+        self.ordered()
+            .into_iter()
+            .find(|source| crate::domain::contains(source.domain().as_ref(), sid))
+    }
+
+    /// The source whose Unix ID range contains a number, and the relative
+    /// identifier inside it.
+    ///
+    /// This is the arithmetic no source can do for itself, because no source
+    /// learns its own base — which is what makes authd the only party able to
+    /// answer a `getpwuid` at all.
+    pub fn rebasing(&self, unix_id: u32) -> Option<(Arc<Source>, u32)> {
+        self.ordered().into_iter().find_map(|source| {
+            let range = source.unix_id_range()?;
+            let relative = unix_id.checked_sub(range.base)?;
+            // The exact inverse of `Range::rebase`: zero is not an identifier,
+            // and anything at or past the count is outside the range the source
+            // was given.
+            (relative != 0 && relative < range.count).then_some((source, relative))
+        })
     }
 }
+
 
 // ---------------------------------------------------------------------------
 // Serving a connection
@@ -647,11 +901,21 @@ fn register(stream: UnixStream, entry: &policy::SourceEntry) -> Option<Arc<Sourc
         ));
     }
 
+    if register.capabilities.contains(psi::Capabilities::PUSHES_CHANGES) && register.entry_ttl != 0
+    {
+        log::info(format_args!(
+            "psi: {} pushes changes and bounds an entry at {}s",
+            entry.name, register.entry_ttl
+        ));
+    }
+
     Some(Arc::new(Source::new(
         entry.name.clone(),
         entry.may_assert_foreign_memberships,
         domain,
         entry.unix_id_range,
+        register.capabilities,
+        entry.search_order,
         stream,
     )))
 }
@@ -706,6 +970,20 @@ fn verify_domain(declared: &[u8], entry: &policy::SourceEntry) -> Option<Sid> {
     Some(domain.to_sid())
 }
 
+/// Start the reader thread for a source that never went through [`serve`].
+///
+/// The resolver's tests need a source that answers, and answering means a
+/// demultiplexer. Everything registration establishes is tested where it lives;
+/// this supplies the one part of a live connection those tests actually use.
+#[cfg(test)]
+pub fn pump_for_test(source: &Arc<Source>) {
+    let source = Arc::clone(source);
+    std::thread::spawn(move || {
+        pump(&source);
+        source.shut_down();
+    });
+}
+
 /// Read messages until the connection ends, handing each to its conversation.
 fn pump(source: &Arc<Source>) {
     loop {
@@ -729,6 +1007,22 @@ fn pump(source: &Arc<Source>) {
             }
         };
 
+        // Connection-level, belonging to no conversation. Unsolicited and never
+        // answered — a source telling authd that what it holds has changed.
+        if envelope.msg_type == psi::MSG_CHANGED {
+            match psi::decode_changed(received.expose()) {
+                Ok(changed) => changed_here(source, &changed),
+                Err(_) => {
+                    log::warn(format_args!(
+                        "psi: {}: malformed change notification, dropping the connection",
+                        source.name()
+                    ));
+                    return;
+                }
+            }
+            continue;
+        }
+
         // A framing error is fatal to the connection: the codec cannot know
         // where the next message starts once one has failed to parse.
         let message = match decode(source, &envelope, received.expose()) {
@@ -740,11 +1034,38 @@ fn pump(source: &Arc<Source>) {
     }
 }
 
+/// Act on a source's invalidation.
+///
+/// Nothing to invalidate yet: authd asks a source afresh for every lookup, so
+/// there is no held answer for this to discard. The message is still accepted
+/// and acted on to the extent it can be — a source that declared
+/// `PUSHES_CHANGES` and found authd refusing its notifications would be right to
+/// consider authd broken, and a cache added later plugs in exactly here.
+fn changed_here(source: &Arc<Source>, changed: &psi::Changed) {
+    if !source.capabilities().contains(psi::Capabilities::PUSHES_CHANGES) {
+        log::warn(format_args!(
+            "psi: {}: sent a change notification without declaring PushesChanges",
+            source.name()
+        ));
+        return;
+    }
+    log::info(format_args!(
+        "psi: {}: invalidated {}",
+        source.name(),
+        match changed.scope {
+            psi::ChangeScope::All => "everything it holds".to_string(),
+            psi::ChangeScope::Object => format!("{} bytes of SID", changed.sid.len()),
+        }
+    ));
+}
+
 fn decode(source: &Arc<Source>, envelope: &psi::Envelope, buf: &[u8]) -> Option<Inbound> {
     let decoded = match envelope.msg_type {
         psi::MSG_CREDENTIAL_REQUEST => psi::decode_credential_request(buf).map(Inbound::Request),
         psi::MSG_ASSERTION => psi::decode_assertion(buf).map(Inbound::Assert),
         psi::MSG_REFUSAL => psi::decode_refusal(buf).map(Inbound::Refuse),
+        psi::MSG_QUERY_RESULT => psi::decode_query_result(buf).map(Inbound::Results),
+        psi::MSG_ENUMERATE_RESULT => psi::decode_enumerate_result(buf).map(Inbound::Page),
         other => {
             log::warn(format_args!(
                 "psi: {}: unexpected message type {other:#06x}",
@@ -782,7 +1103,15 @@ mod tests {
     fn named_pair(name: &str, domain: &str) -> (Arc<Source>, UnixStream) {
         let (ours, theirs) = UnixStream::pair().expect("socketpair");
         (
-            Arc::new(Source::new(name.into(), false, sid(domain), None, ours)),
+            Arc::new(Source::new(
+                name.into(),
+                false,
+                sid(domain),
+                None,
+                psi::Capabilities::QUERIES | psi::Capabilities::ENUMERATES,
+                policy::sources::DEFAULT_SEARCH_ORDER,
+                ours,
+            )),
             theirs,
         )
     }
@@ -794,6 +1123,7 @@ mod tests {
             may_assert_foreign_memberships: false,
             pinned_domain: pinned_domain.map(sid),
             unix_id_range: None,
+            search_order: policy::sources::DEFAULT_SEARCH_ORDER,
         }
     }
 
@@ -943,11 +1273,27 @@ mod tests {
     #[test]
     fn the_foreign_membership_permission_is_carried_from_configuration() {
         let (ours, _theirs) = UnixStream::pair().expect("socketpair");
-        let local = Source::new("lpsd".into(), true, sid("S-1-5-21-1-2-3"), None, ours);
+        let local = Source::new(
+            "lpsd".into(),
+            true,
+            sid("S-1-5-21-1-2-3"),
+            None,
+            psi::Capabilities::empty(),
+            policy::sources::DEFAULT_SEARCH_ORDER,
+            ours,
+        );
         assert!(local.may_assert_foreign_memberships());
 
         let (ours, _theirs) = UnixStream::pair().expect("socketpair");
-        let directory = Source::new("udpsd".into(), false, sid("S-1-5-21-4-5-6"), None, ours);
+        let directory = Source::new(
+            "udpsd".into(),
+            false,
+            sid("S-1-5-21-4-5-6"),
+            None,
+            psi::Capabilities::empty(),
+            policy::sources::DEFAULT_SEARCH_ORDER,
+            ours,
+        );
         assert!(!directory.may_assert_foreign_memberships());
     }
 

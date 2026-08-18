@@ -1,0 +1,23 @@
+[package]
+name = "nss_peios"
+version = "0.0.1"
+edition = "2024"
+license = "MIT"
+description = "The NSS shim that resolves Peios principals through the authority."
+publish = false
+
+# A cdylib, because glibc dlopens it by SONAME. The `nss_peios` crate name is
+# what makes the output `libnss_peios.so`, which is the name glibc derives from
+# `peios` in nsswitch.conf.
+[lib]
+name = "nss_peios"
+crate-type = ["cdylib"]
+
+# libauthd and libc, and nothing else. This object is loaded into *every*
+# process on the system, including setuid ones and ones running at Untrusted
+# integrity, so its dependency list is the surface every one of them inherits.
+# Note what is absent: libpeios. The shim never handles a SID as anything but
+# opaque bytes, and never needs to.
+[dependencies]
+libauthd = { path = "../libauthd" }
+libc = "0.2"

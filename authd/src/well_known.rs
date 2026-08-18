@@ -99,16 +99,40 @@ pub fn by_name(name: &str) -> Option<Sid> {
 
 /// What this machine calls a well-known SID.
 ///
-/// Only the tests use this today — nothing renders a principal back to a human
-/// yet. It earns its place by being the inverse [`by_name`] is checked against:
-/// a round trip is the one test that catches a table entry whose name and SID
-/// disagree, which no amount of one-directional testing would.
-#[cfg(test)]
-fn name_of(sid: &SidRef) -> Option<&'static str> {
+/// The inverse of [`by_name`], and checked against it: a round trip is the one
+/// test that catches a table entry whose name and SID disagree, which no amount
+/// of one-directional testing would.
+pub fn name_of(sid: &SidRef) -> Option<&'static str> {
     WELL_KNOWN
         .iter()
         .find(|entry| entry.is(sid))
         .map(|entry| entry.name)
+}
+
+/// Which well-known principal carries a POSIX identifier.
+///
+/// The inverse of [`unix_id`], and the reason a `getgrgid(100)` resolves to
+/// `Everyone` without any source being asked. These numbers are authd's own,
+/// below every source's base, so no source could answer for them and none is
+/// consulted.
+pub fn by_unix_id(id: u32) -> Option<Sid> {
+    WELL_KNOWN
+        .iter()
+        .find(|entry| entry.unix_id == Some(id))
+        .and_then(Entry::sid)
+}
+
+/// Every well-known principal that carries a number, in table order.
+///
+/// What `getgrent` sees for them. The unnumbered entries — `Interactive`,
+/// `Network` and the rest — are deliberately absent: membership in those is a
+/// property of a *session* rather than of an account, so they are not groups in
+/// the POSIX sense and have nothing to appear in a `group` table as.
+pub fn numbered() -> impl Iterator<Item = Sid> {
+    WELL_KNOWN
+        .iter()
+        .filter(|entry| entry.unix_id.is_some())
+        .filter_map(Entry::sid)
 }
 
 #[cfg(test)]
