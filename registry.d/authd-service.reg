@@ -1,0 +1,52 @@
+{
+  "_comment": [
+    "The authd service definition: what peinit starts, and how.",
+    "",
+    "peinit used to carry this compiled-in, injected by `peios.login=1`. It does",
+    "not any more — registryd is the only service peinit still defines itself,",
+    "because it is the only one whose definition cannot live in the registry it",
+    "serves. Everything else, the authority included, is registry data.",
+    "",
+    "Readiness is Notify (0), and it is load-bearing rather than a formality:",
+    "authd signals READY=1 once /run/logon.sock is bound. lpsd requires authd,",
+    "so without a real readiness signal lpsd would race the authority to the",
+    "socket and fail its first connect on a cold boot. 'The process exists' is",
+    "not the same statement as 'the socket is accepting'.",
+    "",
+    "ErrorControl is Critical (1). A boot that was asked for the login path and",
+    "cannot start the authority has not done what it was asked, and should say",
+    "so loudly rather than present a prompt that can never be satisfied. The",
+    "consequence is real -- a failure aborts the boot, reboots, and lands in",
+    "Recovery once the attempt counter trips -- and the escape hatch is",
+    "`peios.recovery=1` on the kernel command line, which reaches a shell",
+    "without starting any of this.",
+    "",
+    "No RuntimeDirectories: authd's three sockets (logon, ident, psi) all sit",
+    "directly in /run, which peinit mounts in Phase 1. lpsd needs one; authd",
+    "does not.",
+    "",
+    "No Requires. The authority depends on nothing -- sources dial in to it,",
+    "which is why the edge lives on lpsd and points here rather than the other",
+    "way round.",
+    "",
+    "Shipped by the authd package into /usr/share/regim/; inert until an image",
+    "names it in [registry] autoapply."
+  ],
+  "keys": [
+    { "path": "Machine\\System" },
+    { "path": "Machine\\System\\Services" },
+    {
+      "path": "Machine\\System\\Services\\authd",
+      "values": [
+        { "name": "ImagePath",     "type": "sz",    "data": "/sbin/authd" },
+        { "name": "Triggers",      "type": "multi", "data": ["boot"] },
+        { "name": "Identity",      "type": "sz",    "data": "SYSTEM" },
+        { "name": "Readiness",     "type": "dword", "data": 0 },
+        { "name": "RestartPolicy", "type": "dword", "data": 1 },
+        { "name": "ErrorControl",  "type": "dword", "data": 1 },
+        { "name": "DisplayName",   "type": "sz",    "data": "Authentication authority" },
+        { "name": "Description",   "type": "sz",    "data": "PGSS Logon authority: mints KACS tokens and logon sessions" }
+      ]
+    }
+  ]
+}

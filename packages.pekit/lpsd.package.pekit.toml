@@ -20,13 +20,28 @@ description = "Peios local principal source daemon - the local identity database
 
 [files]
 ":usr/sbin/lpsd" = "usr/sbin/lpsd"
-# The seed that registers lpsd with authd. Inert on its own: it lands in the
-# vendor seed library, and only an image that names it in `[registry] autoapply`
-# stages it into the queue peinit drains on first boot. Installing lpsd
-# therefore does not grant lpsd anything — the image has to say so.
-":usr/share/regim/lpsd.reg" = "usr/share/regim/lpsd.reg"
+# The service definition: what peinit starts, and the `requires authd` edge that
+# decides when. Inert on its own, like every seed here — installing the package
+# makes the definition available, and only an image that names it in
+# `[registry] autoapply` makes it active.
+#
+# It exists as a seed at all because peinit used to carry a compiled-in lpsd
+# definition and no longer does: registryd is the only service peinit still
+# defines itself, since it is the only one whose definition cannot live in the
+# registry it serves.
+":usr/share/regim/lpsd-service.reg" = "usr/share/regim/lpsd-service.reg"
+# The seed that registers lpsd with authd — the authority's side of the
+# relationship, not peinit's. Renamed from the bare `lpsd.reg` once the service
+# definition above arrived and "the lpsd seed" stopped being unambiguous.
+#
+# Separate from the service definition because they answer different questions:
+# this one says "lpsd may assert identity on this machine", the other says
+# "start lpsd at boot". Installing lpsd therefore grants lpsd nothing — the
+# image has to say so, twice, for two different things.
+":usr/share/regim/lpsd-authd-registration.reg" = "usr/share/regim/lpsd-authd-registration.reg"
 # The development-account service, shipped for the same reason and just as
-# inert. Separate from lpsd.reg so that "lpsd may assert identity" and "this
+# inert. Separate from the registration seed so that "lpsd may assert identity"
+# and "this
 # image ships a known password" are independent choices — an image can take the
 # first without the second, which is what every non-development image should do.
 ":usr/share/regim/lpsd-first-account.reg" = "usr/share/regim/lpsd-first-account.reg"

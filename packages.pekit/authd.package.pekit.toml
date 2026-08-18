@@ -28,3 +28,8 @@ description = "Peios authentication daemon - the PGSS Logon authority"
 # applying this file means adopting these defaults in full. A hardened image
 # ships its own file in place of it rather than editing around it.
 ":usr/share/regim/authd-policy.reg" = "usr/share/regim/authd-policy.reg"
+# The service definition: what peinit starts, and the readiness contract that
+# lets lpsd order after it. Here because peinit no longer carries a compiled-in
+# authd definition — registryd is the only service it still defines itself.
+# Inert like the policy seed above until an image opts in.
+":usr/share/regim/authd-service.reg" = "usr/share/regim/authd-service.reg"
