@@ -13,3 +13,12 @@ description = "Peios login - a PGSS Logon originator for terminal sessions"
 
 [files]
 ":usr/bin/login" = "usr/bin/login"
+# A login prompt on the system console, as registry data. peinit used to carry
+# this compiled-in and inject it from `peios.login=1`; it does not any more, so
+# the definition ships with the program it starts.
+#
+# Named for the pairing, not the program: login is a terminal logon originator,
+# and which terminal is the image's choice. A prompt on another tty is another
+# seed with another TTYPath — which is why TTYPath carries a path rather than a
+# boolean. Inert until an image names it in `[registry] autoapply`.
+":usr/share/regim/login-console.reg" = "usr/share/regim/login-console.reg"

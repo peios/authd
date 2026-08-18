@@ -1,0 +1,62 @@
+{
+  "_comment": [
+    "The lpsd service definition: what peinit starts, and when.",
+    "",
+    "Requires authd, and the direction is deliberate. Sources dial in to the",
+    "authority over /run/psi.sock, so the authority has to be listening first.",
+    "That inverts the more obvious 'the authority depends on its backend', and",
+    "the ordering guarantee moves here rather than being lost -- which is why",
+    "authd does not gate its own readiness on sources having registered. peinit",
+    "already owns dependency ordering; authd re-implementing it would be a",
+    "second, worse copy.",
+    "",
+    "Readiness is Notify (0), and what its READY=1 *means* is the load-bearing",
+    "part: lpsd signals ready once authd has ACKNOWLEDGED its registration, not",
+    "merely once its process exists. So anything ordered after lpsd -- login,",
+    "above all -- finds a system that can actually authenticate, rather than one",
+    "that will fail every attempt with AuthorityUnavailable during the window",
+    "before registration completes.",
+    "",
+    "No RuntimeDirectories, despite lpsd's admin socket living in a",
+    "subdirectory (/run/lpsd/admin.sock, unlike authd's three, which sit",
+    "directly in /run). Declaring it looked right -- peinit would create the",
+    "directory with a proper Peios descriptor rather than whatever lpsd's umask",
+    "produces -- and it does not work: peinit's runtime-directory provisioning",
+    "fails with EINVAL. That path had never run on a real boot (no image has",
+    "ever set RuntimeDirectories or ProvisionedPaths), so this was the first",
+    "attempt and it found a bug rather than a misconfiguration. See the peinit",
+    "task tracking it.",
+    "",
+    "lpsd creates the directory itself in the meantime, ancestors included, so",
+    "nothing is lost but the descriptor. Restore this field once provisioning",
+    "works; the same applies to /var/state/lpsd, which lpsd also creates and",
+    "which RuntimeDirectories could never have covered anyway -- it only makes",
+    "paths under /run.",
+    "",
+    "ErrorControl is Critical (1), for authd's reason one step along: a boot",
+    "with an authority but no principal source can present a prompt and never",
+    "satisfy it.",
+    "",
+    "Shipped by the lpsd package into /usr/share/regim/; inert until an image",
+    "names it in [registry] autoapply. Registering lpsd *with authd* is a",
+    "separate seed (lpsd-authd-registration.reg) and a separate decision."
+  ],
+  "keys": [
+    { "path": "Machine\\System" },
+    { "path": "Machine\\System\\Services" },
+    {
+      "path": "Machine\\System\\Services\\lpsd",
+      "values": [
+        { "name": "ImagePath",          "type": "sz",    "data": "/sbin/lpsd" },
+        { "name": "Triggers",           "type": "multi", "data": ["boot"] },
+        { "name": "Requires",           "type": "multi", "data": ["authd"] },
+        { "name": "Identity",           "type": "sz",    "data": "SYSTEM" },
+        { "name": "Readiness",          "type": "dword", "data": 0 },
+        { "name": "RestartPolicy",      "type": "dword", "data": 1 },
+        { "name": "ErrorControl",       "type": "dword", "data": 1 },
+        { "name": "DisplayName",        "type": "sz",    "data": "Local principal source" },
+        { "name": "Description",        "type": "sz",    "data": "Local identity database and the local half of PSI" }
+      ]
+    }
+  ]
+}
