@@ -59,6 +59,19 @@
     "  SeTcbPrivilege               The trusted computing base. authd and peinit.",
     "  SeAssignPrimaryTokenPrivilege  peinit's, for launching services.",
     "",
+    "SeManageVolumePrivilege IS granted, and it is the most sensitive thing in",
+    "this list. It permits mounting, unmounting and reshaping the mount tree --",
+    "which an administrator plainly needs, and which peios-install requires.",
+    "",
+    "Know what it is worth before widening it. Its holder may mount a filesystem",
+    "whose synthesised security descriptors it chooses (policy=synth-* with",
+    "--synth-sddl) and may mount over an existing path. Together that is enough",
+    "to author policy on a subtree and to shadow a system path, so it is a route",
+    "to authority approaching the TCB's. That is a deliberate, documented",
+    "property of the design rather than an oversight -- see the privileges topic",
+    "-- and it means this belongs beside SeLoadDriverPrivilege in your head, not",
+    "beside SeChangeNotifyPrivilege.",
+    "",
     "WITHHELD BY DEFAULT -- grantable, but you should have to ask:",
     "",
     "  SeDebugPrivilege             Writes to any process regardless of its",
@@ -133,7 +146,8 @@
             "SeImpersonatePrivilege",
             "SeIncreaseQuotaPrivilege",
             "SeIncreaseBasePriorityPrivilege",
-            "SeProfileSingleProcessPrivilege"
+            "SeProfileSingleProcessPrivilege",
+            "SeManageVolumePrivilege"
           ]
         },
         { "name": "Integrity", "type": "sz", "data": "High" }
