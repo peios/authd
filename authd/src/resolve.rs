@@ -108,11 +108,14 @@ pub fn lookup(
 ///   healthy, so access decisions would be made against the wrong principal
 ///   precisely while something is broken.
 fn by_name(registry: &Registry, name: &str, kind: Kind, fields: Fields) -> Answer {
-    if let Some(answer) = well_known_by_name(name, kind, fields) {
-        return answer;
-    }
+    // Before the well-known lookup, not after. `well_known::by_name` trims, so
+    // `" Everyone "` was answered `Found` where obligation 35 requires refusal
+    // for a leading or trailing space.
     if !name_is_usable(name) {
         return Answer::of(Outcome::Malformed);
+    }
+    if let Some(answer) = well_known_by_name(name, kind, fields) {
+        return answer;
     }
 
     for slot in registry.slots() {
@@ -400,6 +403,26 @@ fn found(source: &Arc<Source>, entry: &psi::QueryEntry, wanted: Kind, fields: Fi
         ));
         return Answer::of(Outcome::Unavailable);
     };
+    // Obligation 35: a name is refused "whether created locally, received in a
+    // request, asserted by a source, or carried alongside a SID in a
+    // reference". Only the request side was checked — and the request side is a
+    // string a caller already had, while this one crosses a trust boundary into
+    // a name resolver that renders it into a passwd-format record and into
+    // authd's own log.
+    //
+    // The rationale is that the damage is done by the *reader*: a name carrying
+    // a newline can forge a whole line in a passwd file, an audit record or a
+    // log, and that cannot be prevented at the point the name is displayed. A
+    // source is inside the TCB but is its lowest-trust part, and the thing a
+    // third party is invited to write.
+    if !name_is_usable(&entry.canonical_name) {
+        log::error(format_args!(
+            "ident: {}: answered with a name that is not usable, refusing the answer",
+            source.name()
+        ));
+        return Answer::of(Outcome::Unavailable);
+    }
+
     // Obligation 38: a Principal request is never answered with a group or
     // vice versa, and kind_found is Principal or Group, never Any. The
     // authority establishes that for itself rather than relaying the source's
@@ -540,6 +563,18 @@ fn permitted_refs(
                 ));
                 return false;
             };
+            // Obligation 35 covers a name "carried alongside a SID in a
+            // reference" as much as a canonical one. An empty name is not a
+            // claim — `rebase_ref` fills it from the well-known table — so only
+            // a non-empty one is held to the rule.
+            if !r.name.is_empty() && !name_is_usable(&r.name) {
+                log::error(format_args!(
+                    "ident: {}: reference for {sid} carries a name that is not usable, \
+                     dropping it",
+                    source.name()
+                ));
+                return false;
+            }
             // A reference that fails scope is dropped from the value rather
             // than failing the whole lookup: a name lookup is not a logon, and
             // the caller is better served by a short list than by Unavailable.
@@ -1265,6 +1300,103 @@ mod tests {
             panic!("groups must be present");
         };
         assert_eq!(groups[0].unix_id, 102, "authd's table, not the source's base");
+    }
+
+    /// Obligation 35: a name is refused "whether created locally, received in a
+    /// request, asserted by a source, or carried alongside a SID in a
+    /// reference". Only the request side was checked.
+    ///
+    /// The assertion side is the one that matters: it crosses a trust boundary
+    /// into a resolver that renders the name into a passwd-format record and
+    /// into authd's own log, and a name carrying a newline forges a whole line
+    /// in either. The damage is done by the reader, so it cannot be prevented
+    /// where the name is displayed.
+    #[test]
+    fn a_source_asserting_an_unusable_name_is_refused() {
+        for bad in [
+            "jack\nroot:x:0:0",  // forges a passwd line
+            "jack:x",            // a field separator
+            "corp\\jack",        // a reserved character
+            "jack@local",
+            "jack/../root",
+            " jack",             // leading space
+            "jack ",             // trailing space
+            "ja\u{7f}ck",         // outside 0x20-0x7e
+        ] {
+            let answer = entry("S-1-5-21-1-2-3-1000", bad, 1000);
+            let registry = stub("corp", DOMAIN, 1000, Some(answer));
+            let found = lookup(
+                &registry,
+                &Key::Sid(sid("S-1-5-21-1-2-3-1000").as_ref().as_bytes().to_vec()),
+                Kind::Principal,
+                Fields::empty(),
+            );
+            assert!(
+                found.record.is_none(),
+                "{bad:?} must not be relayed to a caller"
+            );
+        }
+    }
+
+    /// And a name inside a reference, which the rule names explicitly.
+    #[test]
+    fn a_reference_carrying_an_unusable_name_is_dropped() {
+        let mut answer = entry("S-1-5-21-1-2-3-1000", "jack", 1000);
+        answer.values.push(Value::Groups(vec![
+            Reference {
+                sid: sid("S-1-5-21-1-2-3-1001").as_ref().as_bytes().to_vec(),
+                name: "staff\nroot:x:0:".into(),
+                unix_id: 1001,
+            },
+            Reference {
+                sid: sid("S-1-5-21-1-2-3-1002").as_ref().as_bytes().to_vec(),
+                name: "developers".into(),
+                unix_id: 1002,
+            },
+        ]));
+        let registry = stub("corp", DOMAIN, 1000, Some(answer));
+
+        let found = lookup(
+            &registry,
+            &Key::Name("jack".into()),
+            Kind::Principal,
+            Fields::GROUPS,
+        );
+        let record = found.record.expect("a record");
+        let Some(Value::Groups(groups)) = record.value(Fields::GROUPS) else {
+            panic!("groups must be present");
+        };
+        let names: Vec<&str> = groups.iter().map(|g| g.name.as_str()).collect();
+        assert_eq!(names, vec!["developers"]);
+    }
+
+    /// `well_known::by_name` trims, so the well-known lookup had to move behind
+    /// the usability check — otherwise `" Everyone "` answered `Found` where
+    /// the rule requires refusal for a leading or trailing space.
+    #[test]
+    fn a_well_known_name_with_surrounding_space_is_refused() {
+        let registry = stub("corp", DOMAIN, 1000, None);
+        for padded in [" Everyone", "Everyone ", " Everyone "] {
+            let found = lookup(
+                &registry,
+                &Key::Name(padded.into()),
+                Kind::Group,
+                Fields::empty(),
+            );
+            assert_eq!(
+                found.outcome,
+                Outcome::Malformed,
+                "{padded:?} must be refused, not trimmed into a match"
+            );
+        }
+        // The exact name still resolves.
+        let found = lookup(
+            &registry,
+            &Key::Name("Everyone".into()),
+            Kind::Group,
+            Fields::empty(),
+        );
+        assert_eq!(found.outcome, Outcome::Found);
     }
 
     /// Rule 1 / obligation 37: every SID in a result is validated
