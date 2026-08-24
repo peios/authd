@@ -12,10 +12,17 @@ use std::io::{self, BufRead, Read, Write};
 
 use libauthd::Secret;
 
-/// The longest single answer accepted from a terminal. Generous for a password
-/// or a one-time code, and small enough that a stuck client cannot make us
-/// allocate unboundedly.
-const MAX_ANSWER_BYTES: usize = 1024;
+/// The longest single answer accepted from a terminal.
+///
+/// The protocol's own ceiling, so a passphrase this collector accepts is one
+/// the wire accepts. It used to be 1024, which silently truncated anything
+/// longer and sent the prefix: the logon then failed with
+/// `AuthenticationFailed`, indistinguishable from a wrong password, so a
+/// principal with a long passphrase simply could not sign in with nothing
+/// anywhere saying why — and the remainder stayed in the terminal's input
+/// queue to be read by whatever ran next, which after a failed logon is
+/// usually a shell.
+const MAX_ANSWER_BYTES: usize = libauthd::wire::MAX_CREDENTIAL_BYTES;
 
 /// Restores the terminal's echo setting when dropped.
 ///
@@ -80,14 +87,32 @@ pub fn prompt_line(prompt: &str) -> io::Result<String> {
 pub fn prompt_secret(prompt: &str) -> io::Result<Secret> {
     write_prompt(prompt)?;
 
-    // Best effort: if this is not a terminal we still read the answer, we just
-    // cannot stop it being echoed. Failing the logon outright would make
-    // `login` unusable anywhere but a real tty for no security gain — the
-    // echo suppression protects against shoulder-surfing, not against an
-    // attacker who already controls the terminal.
-    let _guard = EchoGuard::suppress(libc::STDIN_FILENO).ok();
+    // A `Password` is defined by its collection method — "a line of text, not
+    // echoed" — and that is the whole content of the credential type. So a
+    // terminal whose echo cannot be suppressed cannot render the prompt, and
+    // §2.8's rule for a prompt a client cannot render applies: fail rather than
+    // guess, precisely because guessing may echo a secret to the screen.
+    //
+    // The old code swallowed the failure with `.ok()`, reasoning that a
+    // non-terminal input has no echo to suppress. That is true for a pipe and
+    // false for a terminal whose `tcsetattr` failed, and an `Err` alone cannot
+    // tell them apart. `isatty` can.
+    let _guard = match EchoGuard::suppress(libc::STDIN_FILENO) {
+        Ok(guard) => Some(guard),
+        Err(error) => {
+            if unsafe { libc::isatty(libc::STDIN_FILENO) } == 1 {
+                return Err(io::Error::other(format!(
+                    "refusing to read a secret from a terminal whose echo could not be \
+                     suppressed: {error}"
+                )));
+            }
+            // Not a terminal — a pipe under test, say. There is no echo to
+            // suppress and nothing to restore.
+            None
+        }
+    };
 
-    let mut buffer = Secret::zeroed(MAX_ANSWER_BYTES);
+    let mut buffer = Secret::zeroed(MAX_ANSWER_BYTES + 1);
     let read = io::stdin().read(buffer.expose_mut())?;
 
     let line = &buffer.expose()[..read];
@@ -95,6 +120,16 @@ pub fn prompt_secret(prompt: &str) -> io::Result<Secret> {
         .iter()
         .position(|byte| *byte == b'\n' || *byte == b'\r')
         .unwrap_or(line.len());
+
+    // One byte of headroom is read beyond the ceiling purely so this can tell
+    // "exactly at the limit" from "over it". A client MUST NOT silently
+    // truncate an answer; one whose collection method admits fewer bytes fails
+    // the conversation instead.
+    if trimmed > MAX_ANSWER_BYTES {
+        return Err(io::Error::other(format!(
+            "the answer is longer than the {MAX_ANSWER_BYTES}-byte maximum"
+        )));
+    }
 
     Ok(Secret::from_slice(&line[..trimmed]))
 }

@@ -413,6 +413,14 @@ pub enum Object {
 pub struct GroupRecord {
     pub sid: Sid,
     pub name: String,
+    /// The RID within lpsd's domain, and the field an enumeration pages on.
+    ///
+    /// `None` for a well-known group, which is not in lpsd's domain and is
+    /// never enumerated from here. Present because [`Store::groups_after`]
+    /// filters on `rid` and the caller building a cursor must use the same
+    /// field — a mismatch silently skips or repeats groups, and neither authd
+    /// nor the client can detect it.
+    pub rid: Option<u32>,
     /// `None` for a well-known group, which lpsd does not number.
     pub unix_id: Option<u32>,
     /// Whether anything records membership edges into it. False for a group the
@@ -756,6 +764,7 @@ impl Store {
         Some(GroupRecord {
             sid: sid.to_owned(),
             name: name.to_string(),
+            rid: None,
             // lpsd does not number what it does not own — applying its base to a
             // `BUILTIN` group would land it inside lpsd's range.
             unix_id: None,
@@ -763,10 +772,26 @@ impl Store {
         })
     }
 
+    /// Give a group a `unix_id` that differs from its RID, for tests.
+    ///
+    /// The store format permits this — `decode` does not check the two agree,
+    /// and [`Store::add`]'s own contract blesses an imported `unix_id` that
+    /// differs — but nothing in the public API can produce it, because
+    /// `create_group` always sets them equal. Which is precisely why the
+    /// paging mismatch survived: every existing test built groups where the
+    /// bug was invisible.
+    #[cfg(test)]
+    pub(crate) fn skew_group_unix_id_for_test(&mut self, name: &str, unix_id: u32) {
+        if let Some(group) = self.groups.iter_mut().find(|g| g.matches(name)) {
+            group.unix_id = unix_id;
+        }
+    }
+
     fn group_record_of(&self, group: &Group) -> Option<GroupRecord> {
         Some(GroupRecord {
             sid: self.sid_of(group.rid).ok()?,
             name: group.name.clone(),
+            rid: Some(group.rid),
             unix_id: Some(group.unix_id),
             enumerable: true,
         })

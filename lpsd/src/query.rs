@@ -384,7 +384,17 @@ fn groups_page(
 ) -> (Vec<psi::QueryEntry>, Option<u32>) {
     page(
         store.groups_after(after),
-        |record| record.unix_id.unwrap_or_default(),
+        // The cursor must be the field `groups_after` filters on. It used to be
+        // `unix_id`, which agrees with `rid` only because `create_group` sets
+        // them equal — the store format does not require it, `decode` does not
+        // check it, and `Store::add` explicitly blesses an imported `unix_id`
+        // that differs. Where they diverged the walk resumed from the wrong
+        // place: groups already returned came back again, or groups between the
+        // two values were silently skipped, under a well-formed `next` that
+        // terminated normally. Neither authd nor the client could detect it,
+        // and `incomplete` — which exists for exactly this class of listing
+        // that looks complete and is not — never fired.
+        |record| record.rid.unwrap_or_default(),
         |record| group_entry(store, record, fields),
     )
 }
@@ -774,6 +784,71 @@ mod tests {
             .collect();
         assert_eq!(names, vec!["ada", "grace"]);
         assert!(page.next.is_empty());
+    }
+
+    /// `groups_page` paged on `unix_id` while `Store::groups_after` filters on
+    /// `rid`. The two agree only because `create_group` sets them equal — the
+    /// store format does not require it, `decode` does not check it, and
+    /// `Store::add` explicitly blesses an imported `unix_id` that differs.
+    ///
+    /// Where they diverge the walk resumes from the wrong place: with
+    /// `unix_id > rid`, every group between the two values is **silently
+    /// skipped**, under a well-formed `next` that terminates normally. Neither
+    /// authd nor the client can detect it.
+    ///
+    /// Every existing test builds groups through `create_group`, where the two
+    /// are equal by construction — which is why this survived.
+    #[test]
+    fn a_group_walk_pages_on_rid_so_a_skewed_unix_id_skips_nothing() {
+        let mut store = seeded();
+        // Enough to force more than one page, so a cursor is actually issued.
+        let mut expected: Vec<String> = Vec::new();
+        for i in 0..(PAGE_ENTRIES + 6) {
+            let name = format!("grp{i:03}");
+            store.create_group(&name).expect("must create");
+            expected.push(name);
+        }
+        // Skew *every* group's unix_id far above its RID, rather than guessing
+        // which one lands on the page boundary — `seeded()` contributes groups
+        // of its own, so the boundary index is not the one this loop counted.
+        // Whichever group ends the first page now issues a cursor around
+        // 900_000, and `groups_after`'s `rid > after` filter returns nothing:
+        // the walk terminates early with a well-formed `next` and the rest of
+        // the groups silently missing.
+        for i in 0..(PAGE_ENTRIES + 6) {
+            store.skew_group_unix_id_for_test(&format!("grp{i:03}"), 900_000 + i as u32);
+        }
+
+        let mut seen: Vec<String> = Vec::new();
+        let mut cursor = Vec::new();
+        for _ in 0..8 {
+            let page = enumerate(
+                &store,
+                &psi::EnumerateSource {
+                    kind: Kind::Group,
+                    fields: Fields::empty(),
+                    of: None,
+                    cursor: cursor.clone(),
+                },
+            );
+            assert_eq!(page.outcome, Outcome::Found);
+            seen.extend(page.entries.iter().map(|e| e.canonical_name.clone()));
+            if page.next.is_empty() {
+                break;
+            }
+            cursor = page.next;
+        }
+
+        for name in &expected {
+            assert!(
+                seen.iter().any(|s| s == name),
+                "{name} was skipped by the walk"
+            );
+        }
+        let mut sorted = seen.clone();
+        sorted.sort();
+        sorted.dedup();
+        assert_eq!(sorted.len(), seen.len(), "the walk returned a group twice");
     }
 
     /// Source obligation 29: a cursor the source cannot honour is refused,
