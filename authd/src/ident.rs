@@ -155,7 +155,12 @@ fn enumerate(registry: &Registry, buf: &[u8]) -> io::Result<Vec<u8>> {
     // Members of one group are a lookup that overflowed, and belong to the
     // source that holds the group rather than to a walk across all of them.
     if request.of.is_some() {
-        return encode_enumerate_refusal(request.tag, Outcome::Refused);
+        // An `of` enumeration is a mode authd has not implemented (PEI-295),
+        // which is a fact about the authority rather than about the caller's
+        // permission. Malformed until it lands; Refused is reserved for a
+        // per-field restriction mechanism authd does not yet have, and §2.18
+        // requires it to stay unsent until then.
+        return encode_enumerate_refusal(request.tag, Outcome::Malformed);
     }
 
     let fields = request.fields;
