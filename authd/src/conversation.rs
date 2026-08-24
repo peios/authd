@@ -38,7 +38,7 @@ use std::io;
 use std::os::fd::AsFd;
 use std::os::unix::net::UnixStream;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use libauthd::transport::{recv_message, send_message, send_message_with_fd};
 use libauthd::wire::{
@@ -69,6 +69,28 @@ const MAX_ROUNDS: u32 = 8;
 /// without ever being rude enough to be disconnected.
 const CLIENT_TIMEOUT: Duration = Duration::from_secs(120);
 
+/// The wall-clock ceiling on one conversation, start to finish.
+///
+/// Obligation 11 bounds both the number of conversations served at once and
+/// **the time a conversation may remain open**. The first exists
+/// (`MAX_CONCURRENT_CONVERSATIONS`); the second did not, because
+/// [`CLIENT_TIMEOUT`] is `SO_RCVTIMEO` and therefore per *read*. A client
+/// sending one byte every 119 seconds reset it indefinitely and held one of 64
+/// slots for as long as it liked — a cheap way to stop anyone signing in, on a
+/// socket whose access control is currently an inherited DACL.
+///
+/// Sized above a well-behaved client's emergent worst case, roughly
+/// `MAX_ROUNDS × (CLIENT_TIMEOUT + SOURCE_TIMEOUT)`, so this bounds the
+/// deliberate case without cutting off a slow but honest one.
+const CONVERSATION_DEADLINE: Duration = Duration::from_secs(25 * 60);
+
+/// How long authd will wait to hand bytes to the client.
+///
+/// The ident and PSI paths both set one; the logon socket did not, so a client
+/// that connected, sent a valid `LogonStart` and then never read blocked a
+/// conversation thread in `send_message` with nothing to time it out.
+const CLIENT_WRITE_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// How long the source has to answer.
 ///
 /// Generous because a directory-backed source may be doing network work, but
@@ -81,14 +103,24 @@ pub fn serve(registry: Arc<Registry>, stream: UnixStream) {
         log::warn(format_args!("could not set read timeout: {error}"));
         return;
     }
+    if let Err(error) = stream.set_write_timeout(Some(CLIENT_WRITE_TIMEOUT)) {
+        log::warn(format_args!("could not set write timeout: {error}"));
+        return;
+    }
 
-    match run(&registry, &stream) {
+    let deadline = Instant::now() + CONVERSATION_DEADLINE;
+    match run(&registry, &stream, deadline) {
         Ok(()) => {}
         Err(error) => log::warn(format_args!("conversation ended: {error}")),
     }
 }
 
-fn run(registry: &Registry, stream: &UnixStream) -> io::Result<()> {
+/// Whether the conversation has outlived its wall-clock bound.
+fn expired(deadline: Instant) -> bool {
+    Instant::now() >= deadline
+}
+
+fn run(registry: &Registry, stream: &UnixStream, deadline: Instant) -> io::Result<()> {
     // Who is actually calling? From the socket, never from the message.
     let peer = match peer::identity(stream) {
         Ok(peer) => peer,
@@ -172,7 +204,7 @@ fn run(registry: &Registry, stream: &UnixStream) -> io::Result<()> {
         );
     }
 
-    relay(stream, &start, &mut conversation)
+    relay(stream, &start, &mut conversation, deadline)
 }
 
 /// Carry messages between the client and the source until one of them finishes.
@@ -180,8 +212,21 @@ fn relay(
     stream: &UnixStream,
     start: &LogonStart,
     conversation: &mut Conversation,
+    deadline: Instant,
 ) -> io::Result<()> {
     for _ in 0..MAX_ROUNDS {
+        // The wall-clock bound, checked once per round. Per-read timeouts
+        // cannot see a client that keeps resetting them.
+        if expired(deadline) {
+            log::warn(format_args!(
+                "conversation exceeded {CONVERSATION_DEADLINE:?}"
+            ));
+            return deny(
+                stream,
+                Denial::ConversationLimit,
+                "The logon took too long.",
+            );
+        }
         let inbound = match conversation.recv(SOURCE_TIMEOUT) {
             Ok(inbound) => inbound,
             Err(Stalled::TimedOut) => {
@@ -819,6 +864,31 @@ mod tests {
             foreign_membership(user.as_ref(), &groups).map(|s| s.to_sid()),
             Some(builtin_admins),
             "a foreign group the source did claim must still be caught"
+        );
+    }
+
+    /// Obligation 11 bounds the *time* a conversation may remain open, not only
+    /// how many run at once. `CLIENT_TIMEOUT` is `SO_RCVTIMEO` and therefore
+    /// per read, so a client sending one byte every 119 seconds reset it
+    /// indefinitely and held one of 64 slots for as long as it liked.
+    #[test]
+    fn a_conversation_deadline_expires() {
+        let past = Instant::now() - Duration::from_secs(1);
+        assert!(expired(past), "a deadline already passed must be expired");
+
+        let future = Instant::now() + Duration::from_secs(60);
+        assert!(!expired(future), "a deadline still ahead must not be");
+    }
+
+    /// The ceiling has to sit above a well-behaved client's emergent worst
+    /// case, or an honest slow logon is cut off — the point is to bound the
+    /// deliberate case, not to tighten the honest one.
+    #[test]
+    fn the_deadline_leaves_room_for_a_well_behaved_client() {
+        let emergent = (CLIENT_TIMEOUT + SOURCE_TIMEOUT) * MAX_ROUNDS;
+        assert!(
+            CONVERSATION_DEADLINE > emergent,
+            "deadline {CONVERSATION_DEADLINE:?} must exceed the honest worst case {emergent:?}"
         );
     }
 
