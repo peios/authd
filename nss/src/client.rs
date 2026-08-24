@@ -49,6 +49,18 @@ pub struct Client {
     tag: u32,
 }
 
+/// What one page of an enumeration produced.
+///
+/// The distinction that matters is that none of these variants means "the walk
+/// is over". Only an empty cursor does.
+pub enum Paged {
+    Page(ident::EnumerateReply),
+    /// Something that could have answered did not.
+    TryAgain,
+    /// The authority cannot be reached, or would not say.
+    Unavailable,
+}
+
 /// What a lookup produced, in the terms an NSS entry point answers in.
 pub enum Found {
     Record(Box<Record>),
@@ -115,26 +127,56 @@ impl Client {
         }
     }
 
-    /// One page of an enumeration. `None` where the authority could not answer.
+    /// One page of an enumeration, or why there is not one.
+    ///
+    /// Flattening every non-`Found` outcome *and* every transport failure into
+    /// `None` made an authority answering `Unavailable` mid-walk, or a socket
+    /// that closed, indistinguishable from having reached the last principal —
+    /// `getpwent_r` then returned `NotFound` and glibc read it as the end of
+    /// the enumeration.
+    ///
+    /// The single-lookup path was already careful about exactly this (see
+    /// [`Found`]); the enumeration path threw it away at a scale where it
+    /// matters more. One lookup failing softly affects one principal; a walk
+    /// failing softly makes `getent passwd` print a short list that looks
+    /// complete, for every principal at once, with nothing recording it.
     pub fn enumerate(
         &mut self,
         kind: Kind,
         fields: Fields,
         cursor: &[u8],
-    ) -> Option<ident::EnumerateReply> {
+    ) -> Paged {
         let tag = self.next_tag();
-        let request = ident::encode_enumerate(&ident::Enumerate {
+        let Ok(request) = ident::encode_enumerate(&ident::Enumerate {
             tag,
             kind,
             fields,
             of: None,
             cursor: cursor.to_vec(),
-        })
-        .ok()?;
-        send_message(&self.stream, &request).ok()?;
+        }) else {
+            return Paged::Unavailable;
+        };
+        if send_message(&self.stream, &request).is_err() {
+            return Paged::Unavailable;
+        }
 
-        let received = recv_message(&libauthd::wire::FRAMING, &self.stream).ok()?;
-        let reply = ident::decode_enumerate_reply(received.expose()).ok()?;
-        (reply.tag == tag && reply.outcome == Outcome::Found).then_some(reply)
+        let Ok(received) = recv_message(&libauthd::wire::FRAMING, &self.stream) else {
+            // A timeout lands here, and as on the lookup path it means the
+            // authority exists and did not answer in time.
+            return Paged::TryAgain;
+        };
+        let Ok(reply) = ident::decode_enumerate_reply(received.expose()) else {
+            return Paged::Unavailable;
+        };
+        if reply.tag != tag {
+            return Paged::Unavailable;
+        }
+        match reply.outcome {
+            Outcome::Found => Paged::Page(reply),
+            Outcome::Unavailable => Paged::TryAgain,
+            // NotFound has no meaning for a walk, so it joins the rest: the
+            // one thing that must never happen is a failure reading as the end.
+            Outcome::NotFound | Outcome::Refused | Outcome::Malformed => Paged::Unavailable,
+        }
     }
 }

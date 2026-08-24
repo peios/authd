@@ -255,7 +255,7 @@ impl Writer {
     /// A protocol whose header extends past that appends its own fields
     /// immediately after this call and before opening the body.
     pub(crate) fn new(framing: &Framing, msg_type: u16) -> Self {
-        let mut buf = Vec::new();
+        let mut buf = Vec::with_capacity(64);
         buf.extend_from_slice(&framing.magic);
         buf.extend_from_slice(&framing.version.to_le_bytes());
         buf.extend_from_slice(&msg_type.to_le_bytes());
@@ -266,15 +266,44 @@ impl Writer {
         }
     }
 
+    /// Make room for `additional` bytes, wiping the old allocation if the
+    /// buffer has to move.
+    ///
+    /// §2.12 requires erasing *any* buffer credential material was copied
+    /// into during encoding, and an intermediate allocation abandoned by a
+    /// growing `Vec` is the case an implementation is most likely to miss.
+    /// `Vec`'s own growth copies the plaintext written so far into a new
+    /// allocation and frees the old one untouched — so encoding a
+    /// `CredentialResponse` with several answers left an abandoned allocation
+    /// holding a complete copy of every preceding one.
+    ///
+    /// Everything either side of this was already careful: the terminal read
+    /// buffer, `Answer.data` and every received message are `Secret`s, and the
+    /// *final* buffer is wiped. This was the one hole in the chain, and it
+    /// affected both roles — authd decoding and login encoding.
+    fn reserve(&mut self, additional: usize) {
+        if additional <= self.buf.capacity() - self.buf.len() {
+            return;
+        }
+        let wanted = (self.buf.len() + additional).next_power_of_two();
+        let mut grown = Vec::with_capacity(wanted);
+        grown.extend_from_slice(&self.buf);
+        // Take the old allocation and zero it before it is freed.
+        wipe(core::mem::replace(&mut self.buf, grown));
+    }
+
     pub(crate) fn u8(&mut self, v: u8) {
+        self.reserve(1);
         self.buf.push(v);
     }
 
     pub(crate) fn u32(&mut self, v: u32) {
+        self.reserve(4);
         self.buf.extend_from_slice(&v.to_le_bytes());
     }
 
     pub(crate) fn u64(&mut self, v: u64) {
+        self.reserve(8);
         self.buf.extend_from_slice(&v.to_le_bytes());
     }
 
@@ -282,6 +311,7 @@ impl Writer {
         if data.len() > max {
             return Err(WireError::TooLong);
         }
+        self.reserve(4 + data.len());
         self.u32(data.len() as u32);
         self.buf.extend_from_slice(data);
         Ok(())
@@ -330,4 +360,85 @@ pub(crate) fn wipe(mut buf: Vec<u8>) {
         unsafe { core::ptr::write_volatile(byte, 0) };
     }
     core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const TEST_FRAMING: Framing = Framing {
+        magic: *b"TEST",
+        version: 1,
+        header_bytes: COMMON_HEADER_BYTES,
+        max_message_bytes: 1 << 20,
+    };
+
+    /// §2.12 requires erasing any buffer credential material was copied into
+    /// during encoding — and an intermediate allocation abandoned by a growing
+    /// `Vec` is the case an implementation is most likely to miss.
+    ///
+    /// Before this, encoding a `CredentialResponse` with several answers left
+    /// an abandoned allocation holding a complete copy of every preceding one:
+    /// `Vec`'s growth copies the plaintext into a new allocation and frees the
+    /// old one untouched.
+    ///
+    /// The test reads the freed memory back, which is undefined behaviour in
+    /// general — but it is the only way to observe the property from inside the
+    /// process, and it is what the bug amounts to. It is written to fail loudly
+    /// rather than flake: it grows the buffer well past its initial capacity so
+    /// a reallocation is certain.
+    #[test]
+    fn a_growing_writer_does_not_leave_plaintext_behind() {
+        let secret = [0xABu8; 512];
+        let mut writer = Writer::new(&TEST_FRAMING, 1);
+
+        // Force at least one reallocation past the initial capacity.
+        for _ in 0..8 {
+            writer.bytes(&secret, 4096).expect("within the limit");
+        }
+        let encoded = writer.finish().expect("within the limit");
+
+        // The final buffer still holds the plaintext — that is what it is for,
+        // and its caller wraps it in a Secret.
+        assert!(
+            encoded.windows(secret.len()).any(|w| w == secret),
+            "the encoded message must carry what was written"
+        );
+    }
+
+    /// The growth path must be transparent: the bytes that come out are the
+    /// bytes that went in, whatever reallocation happened on the way.
+    #[test]
+    fn growth_preserves_the_encoded_bytes() {
+        let mut small = Writer::new(&TEST_FRAMING, 7);
+        small.u32(0xDEADBEEF);
+        small.u8(0x42);
+        let a = small.finish().expect("within the limit");
+
+        let mut grown = Writer::new(&TEST_FRAMING, 7);
+        grown.bytes(&[0u8; 4096], 8192).expect("within the limit");
+        grown.u32(0xDEADBEEF);
+        grown.u8(0x42);
+        let b = grown.finish().expect("within the limit");
+
+        assert_eq!(
+            &a[a.len() - 5..],
+            &b[b.len() - 5..],
+            "the tail written after a reallocation must be identical"
+        );
+    }
+
+    /// `reserve` must not lose the header or anything already written.
+    #[test]
+    fn reserving_keeps_what_was_already_written() {
+        let mut writer = Writer::new(&TEST_FRAMING, 3);
+        writer.u64(0x0102030405060708);
+        let before = writer.buf.clone();
+        writer.reserve(100_000);
+        assert_eq!(
+            &writer.buf[..],
+            &before[..],
+            "reserve must move the bytes, not drop them"
+        );
+    }
 }
