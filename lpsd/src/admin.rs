@@ -391,7 +391,12 @@ fn dispatch(
     // an operator rather than used for anything: lpsd stores and asserts the
     // relative number, and only authd may add the base.
     let effective = |relative: u32| -> u32 {
-        if registered.unix_id_base == 0 || relative == 0 {
+        // Out of range projects to nothing, not to an absolute number.
+        // Checking only `relative == 0` displayed a uid for an identifier authd
+        // refuses and projects to `nobody` — the opposite of the reason §2.8
+        // discloses the range in the first place, which is so an operator can
+        // see what a principal will actually appear as.
+        if registered.unix_id_base == 0 || relative == 0 || relative > registered.unix_id_count {
             0
         } else {
             registered.unix_id_base.saturating_add(relative)
