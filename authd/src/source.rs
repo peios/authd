@@ -1076,13 +1076,41 @@ fn changed_here(source: &Arc<Source>, changed: &psi::Changed) {
         ));
         return;
     }
-    log::info(format_args!(
-        "psi: {}: invalidated {}",
-        source.name(),
-        match changed.scope {
-            psi::ChangeScope::All => "everything it holds".to_string(),
-            psi::ChangeScope::Object => format!("{} bytes of SID", changed.sid.len()),
+    // Obligation 24: identity confinement applies to the `sid` of a Changed as
+    // much as to an Assertion. Logging the byte length and acting anyway is not
+    // that.
+    //
+    // No consequence today, because nothing is invalidated — but it becomes
+    // live the moment a cache lands, and at that point an unchecked sid is a
+    // source able to invalidate *another* source's entries: a cheap way to
+    // force repeated queries against a source that is not answering, and, once
+    // NotFound is cacheable, a way to keep somebody's account looking absent.
+    // Enforcing it now means the cache plugs into a checked path.
+    let scope = match changed.scope {
+        psi::ChangeScope::All => "everything it holds".to_string(),
+        psi::ChangeScope::Object => {
+            let Some(sid) = SidRef::from_bytes(&changed.sid) else {
+                log::error(format_args!(
+                    "psi: {}: change notification carries {} bytes that are not a SID",
+                    source.name(),
+                    changed.sid.len()
+                ));
+                return;
+            };
+            if !crate::domain::contains(source.domain().as_ref(), sid) {
+                log::error(format_args!(
+                    "psi: {}: tried to invalidate {sid}, which is outside its domain {}",
+                    source.name(),
+                    source.domain()
+                ));
+                return;
+            }
+            format!("{sid}")
         }
+    };
+    log::info(format_args!(
+        "psi: {}: invalidated {scope}",
+        source.name()
     ));
 }
 
