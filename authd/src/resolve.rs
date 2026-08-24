@@ -519,27 +519,40 @@ fn permitted_refs(
     subject: &SidRef,
     refs: &[Reference],
 ) -> Vec<Reference> {
-    if source.may_assert_foreign_memberships() {
-        return refs.iter().map(|r| rebase_ref(source, r)).collect();
-    }
+    let scoped = !source.may_assert_foreign_memberships();
     refs.iter()
-        .filter(|r| match SidRef::from_bytes(&r.sid) {
+        .filter(|r| {
+            // Rule 1 / obligation 37: every SID in a result is validated
+            // structurally, including those inside a PRIMARY_GROUP, GROUPS or
+            // MEMBERS reference — not only the `sid` of the result itself. The
+            // logon path already did this; the lookup path validated the outer
+            // SID and relayed whatever the references carried, so bytes that do
+            // not parse as a SID went out to the caller.
+            //
+            // This runs for every source, permitted or not: the foreign-
+            // membership permission says which *domains* a source may name, not
+            // whether its bytes have to be a SID.
+            let Some(sid) = SidRef::from_bytes(&r.sid) else {
+                log::error(format_args!(
+                    "ident: {}: reference of {} bytes is not a SID, dropping it",
+                    source.name(),
+                    r.sid.len()
+                ));
+                return false;
+            };
             // A reference that fails scope is dropped from the value rather
             // than failing the whole lookup: a name lookup is not a logon, and
             // the caller is better served by a short list than by Unavailable.
             // It must not be relayed either way.
-            Some(sid) => {
-                let ok = crate::domain::siblings(subject, sid);
-                if !ok {
-                    log::error(format_args!(
-                        "ident: {}: reported {sid} for {subject}, outside that principal's \
-                         domain, and it may not assert foreign memberships",
-                        source.name()
-                    ));
-                }
-                ok
+            if scoped && !crate::domain::siblings(subject, sid) {
+                log::error(format_args!(
+                    "ident: {}: reported {sid} for {subject}, outside that principal's \
+                     domain, and it may not assert foreign memberships",
+                    source.name()
+                ));
+                return false;
             }
-            None => false,
+            true
         })
         .map(|r| rebase_ref(source, r))
         .collect()
@@ -1252,6 +1265,51 @@ mod tests {
             panic!("groups must be present");
         };
         assert_eq!(groups[0].unix_id, 102, "authd's table, not the source's base");
+    }
+
+    /// Rule 1 / obligation 37: every SID in a result is validated
+    /// structurally, including those inside a reference. The logon path did
+    /// this; the lookup path validated only the outer `sid`, so bytes that do
+    /// not parse as a SID were relayed to the caller.
+    ///
+    /// The check runs regardless of the foreign-membership permission — that
+    /// permission says which *domains* a source may name, not whether its bytes
+    /// have to be a SID.
+    #[test]
+    fn a_reference_whose_sid_does_not_parse_is_dropped() {
+        let mut answer = entry("S-1-5-21-1-2-3-1000", "jack", 1000);
+        answer.values.push(Value::Groups(vec![
+            Reference {
+                sid: vec![0xFF, 0x00, 0x13],
+                name: "garbage".into(),
+                unix_id: 7,
+            },
+            Reference {
+                sid: sid("S-1-5-21-1-2-3-1001").as_ref().as_bytes().to_vec(),
+                name: "staff".into(),
+                unix_id: 1001,
+            },
+        ]));
+        // A source that *may* assert foreign memberships, so the drop cannot be
+        // attributed to the scope check.
+        let registry = stub_with_foreign("lpsd", DOMAIN, 1000, Some(answer));
+
+        let found = lookup(
+            &registry,
+            &Key::Name("jack".into()),
+            Kind::Principal,
+            Fields::GROUPS,
+        );
+        let record = found.record.expect("a record");
+        let Some(Value::Groups(groups)) = record.value(Fields::GROUPS) else {
+            panic!("groups must be present");
+        };
+        let names: Vec<&str> = groups.iter().map(|g| g.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["staff"],
+            "unparsed bytes must be dropped, and the valid reference kept"
+        );
     }
 
     /// §2.18 reserves `Refused` for "the caller may not make this request", and
