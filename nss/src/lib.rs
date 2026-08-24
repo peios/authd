@@ -102,6 +102,21 @@ unsafe fn status_of(found: &Found, errnop: *mut c_int) -> NssStatus {
     }
 }
 
+/// Something that could have answered did not.
+///
+/// `EAGAIN` rather than `ERANGE`: the caller's buffer is fine and enlarging it
+/// will not help. The single-lookup path already made this distinction; the
+/// enumeration path needs it too, so that an authority answering `Unavailable`
+/// mid-walk is never mistaken for the end of the list.
+///
+/// # Safety
+///
+/// `errnop` must be a valid pointer.
+pub(crate) unsafe fn try_again(errnop: *mut c_int) -> NssStatus {
+    unsafe { errnop.write(libc::EAGAIN) };
+    NssStatus::TryAgain
+}
+
 /// The buffer was too small. glibc calls again with a larger one.
 ///
 /// # Safety

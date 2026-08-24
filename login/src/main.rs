@@ -53,6 +53,21 @@ use peios::token::Token;
 /// The shell handed to a successful logon.
 const DEFAULT_SHELL: &str = "/bin/sh";
 
+/// A profile path, or the default when it is absent or not absolute.
+///
+/// `field` names the value on the terminal when it is rejected, so a principal
+/// dropped into `/bin/sh` at `/` can tell why.
+fn absolute_or_default<'a>(value: &'a str, default: &'a str, field: &str) -> &'a str {
+    if value.is_empty() {
+        return default;
+    }
+    if !value.starts_with('/') {
+        eprintln!("login: {field} {value:?} is not an absolute path; using {default}");
+        return default;
+    }
+    value
+}
+
 /// Credential types this build can render. An authority must not prompt for
 /// anything outside this list, which is what lets new types be added without
 /// breaking older clients like this one.
@@ -571,16 +586,21 @@ fn exec_shell(
     profile: &Profile,
     preserve_environment: bool,
 ) -> Result<(), String> {
-    let shell = if profile.shell.is_empty() {
-        DEFAULT_SHELL
-    } else {
-        profile.shell.as_str()
-    };
-    let home = if profile.home.is_empty() {
-        "/"
-    } else {
-        profile.home.as_str()
-    };
+    // Client obligation 16: a relative `shell` is never executed and a relative
+    // `home` is never resolved against login's own working directory. A `shell`
+    // containing no separator is relative too, and must not be resolved against
+    // a search path.
+    //
+    // Without this, `Command::new("sh")` reaches `execvp` and gets a PATH
+    // search — performed by a process that has just installed the principal's
+    // token. §2.9's reasoning that a wrong `profile` "would produce an
+    // inconvenient session rather than an unsafe one" holds only because the
+    // client refuses a relative path; it was not refusing.
+    //
+    // A rejected value falls back exactly as an empty one does, and says so,
+    // matching how an unreachable home is already reported.
+    let shell = absolute_or_default(&profile.shell, DEFAULT_SHELL, "shell");
+    let home = absolute_or_default(&profile.home, "/", "home directory");
 
     if std::env::set_current_dir(home).is_err() {
         eprintln!("login: {home} is not reachable; starting in /");
@@ -614,6 +634,39 @@ fn exec_shell(
 
 #[cfg(test)]
 mod tests {
+
+    /// Client obligation 16: a relative `shell` is never executed and a
+    /// relative `home` is never resolved against login's own cwd. A `shell`
+    /// containing no separator is relative too — `Command::new("sh")` reaches
+    /// `execvp` and gets a PATH search, performed by a process that has just
+    /// installed the principal's token.
+    #[test]
+    fn a_relative_shell_or_home_falls_back_to_the_default() {
+        for relative in ["sh", "bin/sh", "./sh", "../bin/sh", "~/bin/sh"] {
+            assert_eq!(
+                absolute_or_default(relative, "/bin/sh", "shell"),
+                "/bin/sh",
+                "{relative} is relative and must not be executed"
+            );
+        }
+        assert_eq!(absolute_or_default("home/jack", "/", "home directory"), "/");
+    }
+
+    /// An empty field already fell back; that must not change.
+    #[test]
+    fn an_empty_field_still_falls_back() {
+        assert_eq!(absolute_or_default("", "/bin/sh", "shell"), "/bin/sh");
+        assert_eq!(absolute_or_default("", "/", "home directory"), "/");
+    }
+
+    /// And an absolute one is used as given, or the check would be a rewrite.
+    #[test]
+    fn an_absolute_path_is_used_unchanged() {
+        assert_eq!(absolute_or_default("/bin/bash", "/bin/sh", "shell"), "/bin/bash");
+        assert_eq!(absolute_or_default("/home/jack", "/", "home directory"), "/home/jack");
+        // A path with a space or an odd name is still absolute.
+        assert_eq!(absolute_or_default("/opt/my shell", "/bin/sh", "shell"), "/opt/my shell");
+    }
     use super::*;
 
     fn parse(arguments: &[&str]) -> Result<Options, String> {
