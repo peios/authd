@@ -21,7 +21,7 @@
 //! across a store that changed underneath it: a deleted principal is simply
 //! absent, and one added during the walk lands past the end. So lpsd holds no
 //! per-cursor state, and never has to refuse a cursor it issued — which is the
-//! failure PSD-013 §5.6 permits a source precisely because most sources cannot
+//! failure PSPU §2.16 permits a source precisely because most sources cannot
 //! avoid it.
 
 use libauthd::ident::{Fields, Kind, Outcome, Reference, Value, Withheld, WithheldReason};

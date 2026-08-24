@@ -330,7 +330,7 @@ pub struct CredentialResponse {
 /// That is also the limit of the claim being made. `getpwuid` must answer for
 /// principals who are not the caller and who never logged on, which this cannot
 /// do; a directory query interface is the answer to that and this does not
-/// replace it. See PSD-004 §12.2.
+/// replace it. See PGSS §2.13.
 ///
 /// Every field may be empty, meaning "the authority did not say". A client must
 /// have a fallback for each rather than treating an empty value as an error: an
@@ -637,7 +637,7 @@ mod tests {
     /// The decoder defaults a **missing** field to `[Password]`, for clients
     /// that predate it. An explicitly empty list is a different statement — "I
     /// can complete a logon that requires no interaction, and nothing else"
-    /// (PSD-012 §4.1) — and it is the entire mechanism behind
+    /// (PGSS §2.7) — and it is the entire mechanism behind
     /// `login --try-no-password`. If the two ever collapsed together, that flag
     /// would quietly start prompting instead of falling back, and the failure
     /// would look like a UX quirk rather than a wire bug.

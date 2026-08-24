@@ -711,7 +711,7 @@ impl Store {
     // -----------------------------------------------------------------------
     // Lookup: answering about principals outside a logon
     //
-    // PSI's `Query` (PSD-013 §5.5) asks about objects by name, by SID, or by
+    // PSI's `Query` (PSPU §2.15) asks about objects by name, by SID, or by
     // *relative* identifier — never by an absolute Unix ID, because lpsd does
     // not know its base and must not be able to act on one.
     // -----------------------------------------------------------------------
@@ -821,7 +821,7 @@ impl Store {
                 .filter(|p| after.is_none_or(|rid| p.rid > rid))
                 .filter(|p| {
                     p.groups.iter().any(|g| g.as_ref().as_bytes() == sid.as_ref().as_bytes())
-                        // A primary group is a membership claim (PSD-013 §5.3),
+                        // A primary group is a membership claim (PSPU §2.13),
                         // but only where lpsd owns the group. Every principal
                         // defaults to `Authenticated Users`, and listing them
                         // all as its members would be an answer this machine is
@@ -1316,7 +1316,7 @@ impl Store {
     /// they could have logged in as anyway, so there is nothing left to protect.
     ///
     /// Existence on its own is a question for the identity-lookup channel
-    /// (PSD-012 §6), which answers it plainly and by design.
+    /// (PGSS §2), which answers it plainly and by design.
     pub fn credential_requirement(&self, identifier: &[u8]) -> CredentialRequirement {
         let Some(principal) = self.principals.iter().find(|p| p.matches(identifier)) else {
             return CredentialRequirement::Password;

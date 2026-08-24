@@ -1,7 +1,7 @@
 //! PGSS Logon chapter 6 — identity lookup, on `/run/ident.sock`.
 //!
 //! Same standard as [`crate::wire`], same framing, same magic, disjoint message
-//! types. The separation is a *socket*, not a protocol: PSD-012 §6.2 is explicit
+//! types. The separation is a *socket*, not a protocol: PGSS §2.14 is explicit
 //! that it buys no isolation, since one authority answers both and a defect in
 //! either reaches the other regardless.
 //!
@@ -40,7 +40,7 @@
 //! nothing stores them, and an authority computes them from local policy at the
 //! moment it derives a token.
 //!
-//! They are reserved rather than excluded. PSD-012 §6.1 names the shape a future
+//! They are reserved rather than excluded. PGSS §2.13 names the shape a future
 //! revision is expected to take (`Evaluate { key, logon_type }`, a token derived
 //! and discarded) and forbids adding them as fields here, because a field of a
 //! record describes something a source holds and this does not.
@@ -137,7 +137,7 @@ pub enum Outcome {
     /// No such object, and **every** source that could have said so was asked.
     NotFound = 2,
     /// A source that could have answered did not. Never cacheable — see the
-    /// module docs of [`crate::ident`] and PSD-012 §6.6.
+    /// module docs of [`crate::ident`] and PGSS §2.18.
     Unavailable = 3,
     /// The caller may not make this request at all. A caller refused a single
     /// *field* gets [`WithheldReason::Restricted`] instead.

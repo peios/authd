@@ -45,13 +45,18 @@
 //! accept queues. A filesystem walk issuing millions of lookups must not be able
 //! to fill the queue an administrator needs in order to sign in.
 //!
-//! # Milestone 2
+//! # What a token carries
 //!
 //! Authentication is real: a principal source verifies the credential and
 //! asserts an identity, and the token carries that identity rather than SYSTEM.
-//! What is not yet real is *scope* — nothing constrains which principals a
-//! source may assert, because with a single source there is nothing to
-//! constrain against — and privileges, which are empty for everyone.
+//! Privileges, integrity level, owner and default DACL are decided per logon
+//! from `Machine\Generic\Authn\Policy` (see [`policy::principal`]) rather
+//! than taken from a flat default.
+//!
+//! Scope is enforced: identity confinement, membership scope and numeric scope
+//! all apply, to a query result as much as to an assertion. What is *not* yet
+//! real is routing — [`source::Registry::route`] ignores the identifier, so
+//! more than one configured source sends every logon to the first (PEI-304).
 
 mod conversation;
 mod derive;

@@ -371,7 +371,7 @@ fn pump(
                         // failed save rolls the store back and there is then
                         // nothing to invalidate.
                         //
-                        // The ordering PSD-013 §5.7 requires — the notification
+                        // The ordering PSPU §2.17 requires — the notification
                         // before the new answer is observable — is structural
                         // rather than careful: one thread serves both
                         // descriptors, so no query can be answered until this
