@@ -275,26 +275,36 @@ fn encoded_size(value: &Value) -> usize {
 
 /// Walk principals or groups, one page at a time.
 pub fn enumerate(store: &Store, request: &psi::EnumerateSource) -> psi::EnumerateResult {
-    let after = cursor_of(&request.cursor);
+    let Ok(after) = cursor_of(&request.cursor) else {
+        return refused();
+    };
 
     let (entries, last) = match &request.of {
+        // `Found` with an empty page says *there are none*. `Refused` says
+        // *this source is not answering*. These four cases are the second, and
+        // reporting them as the first told the authority a falsehood it had no
+        // way to detect — so the non-retry contract had nothing to attach to
+        // and authd kept the source in the walk and kept asking:
+        //
+        //   - a stapled group whose membership is a rule rather than a record,
+        //     such as Everyone or Authenticated Users;
+        //   - a key naming a principal where a group was required;
+        //   - a group SID from another domain;
+        //   - a key that resolves to nothing at all.
+        //
+        // The empty `Found` is reserved for a group that genuinely has no
+        // recorded members. lpsd already draws the equivalent distinction on
+        // the Query path, where it emits Withheld{MEMBERS, Absent} rather than
+        // Value::Members([]); the enumeration path was the one that lost it.
         Some(key) => match group_members_page(store, key, after, request.fields) {
             Some(page) => page,
-            // Not a group this machine records edges into. An empty result
-            // rather than a refusal: nothing is being withheld.
-            None => return complete(Vec::new()),
+            None => return refused(),
         },
         None => match request.kind {
             Kind::Principal => principals_page(store, after, request.fields),
             Kind::Group => groups_page(store, after, request.fields),
             // authd is required not to send this. Refusing is the honest reply.
-            Kind::Any => {
-                return psi::EnumerateResult {
-                    outcome: Outcome::Refused,
-                    entries: Vec::new(),
-                    next: Vec::new(),
-                };
-            }
+            Kind::Any => return refused(),
         },
     };
 
@@ -319,11 +329,40 @@ fn complete(entries: Vec<psi::QueryEntry>) -> psi::EnumerateResult {
     }
 }
 
-fn cursor_of(bytes: &[u8]) -> Option<u32> {
-    // lpsd issues four bytes and nothing else, so anything of another length
-    // came from somewhere it should not have. Starting over is safe — the walk
-    // is idempotent — and refusing would strand a caller that cannot know why.
-    <[u8; 4]>::try_from(bytes).ok().map(u32::from_le_bytes)
+/// `Ok(None)` begins a walk; `Ok(Some(rid))` resumes after one; `Err` is a
+/// cursor lpsd cannot honour.
+///
+/// Source obligation 29: a source refuses a cursor it can no longer honour
+/// rather than restarting or answering from a changed store. Restarting was
+/// deliberate here — "refusing would strand a caller" — and it does strand one,
+/// which is the honest outcome: the caller believes it is continuing and
+/// receives a second copy of the beginning appended to what it already
+/// collected, with a well-formed `Found` and a fresh `next` saying nothing is
+/// wrong. Left alone, a store edit during a `getent passwd` becomes an
+/// unbounded loop over a source that never finishes.
+///
+/// The refusal path is cheap to be strict about: lpsd's cursors are bare RIDs
+/// and RIDs are never reused, so every cursor lpsd issued is honourable and
+/// only a malformed one reaches the error.
+fn cursor_of(bytes: &[u8]) -> Result<Option<u32>, ()> {
+    if bytes.is_empty() {
+        return Ok(None);
+    }
+    match <[u8; 4]>::try_from(bytes) {
+        Ok(four) => Ok(Some(u32::from_le_bytes(four))),
+        Err(_) => Err(()),
+    }
+}
+
+/// A reply that declines to answer: `entries` and `next` empty, per
+/// obligation 28. An authority records the source as not having contributed
+/// and does not retry it for the rest of the enumeration.
+fn refused() -> psi::EnumerateResult {
+    psi::EnumerateResult {
+        outcome: Outcome::Refused,
+        entries: Vec::new(),
+        next: Vec::new(),
+    }
 }
 
 fn principals_page(
@@ -735,6 +774,104 @@ mod tests {
             .collect();
         assert_eq!(names, vec!["ada", "grace"]);
         assert!(page.next.is_empty());
+    }
+
+    /// Source obligation 29: a cursor the source cannot honour is refused,
+    /// not silently restarted. Restarting hands the caller a second copy of
+    /// the beginning appended to what it already has, under a well-formed
+    /// `Found` with a fresh `next` — and a store edit during a `getent passwd`
+    /// then becomes an unbounded loop over a source that never finishes.
+    #[test]
+    fn a_cursor_lpsd_did_not_issue_is_refused() {
+        let store = seeded();
+        for cursor in [vec![1u8], vec![1, 2, 3], vec![1, 2, 3, 4, 5]] {
+            let page = enumerate(
+                &store,
+                &psi::EnumerateSource {
+                    kind: Kind::Principal,
+                    fields: Fields::empty(),
+                    of: None,
+                    cursor: cursor.clone(),
+                },
+            );
+            assert_eq!(
+                page.outcome,
+                Outcome::Refused,
+                "cursor {cursor:?} must be refused, not restarted"
+            );
+            assert!(page.entries.is_empty(), "a refusal carries no entries");
+            assert!(page.next.is_empty(), "a refusal carries no next");
+        }
+    }
+
+    /// An empty cursor begins a walk, and a four-byte one lpsd issued resumes
+    /// it — the refusal must not swallow the honourable cases.
+    #[test]
+    fn an_issued_cursor_is_still_honoured() {
+        let store = seeded();
+        for cursor in [Vec::new(), 0u32.to_le_bytes().to_vec()] {
+            let page = enumerate(
+                &store,
+                &psi::EnumerateSource {
+                    kind: Kind::Principal,
+                    fields: Fields::empty(),
+                    of: None,
+                    cursor,
+                },
+            );
+            assert_eq!(page.outcome, Outcome::Found);
+        }
+    }
+
+    /// Obligation 28: "will not enumerate" is `Refused`, not an empty `Found`.
+    ///
+    /// `Found` with an empty page says *there are none*. Reporting a refusal as
+    /// one told the authority a falsehood it had no way to detect, and left the
+    /// non-retry contract with nothing to attach to.
+    #[test]
+    fn a_membership_lpsd_will_not_produce_is_refused_not_reported_empty() {
+        let store = seeded();
+        for key in [
+            // A stapled group: its membership is a rule, not a record.
+            psi::Key::Name("Everyone".into()),
+            // A principal where a group was required.
+            psi::Key::Name("jack".into()),
+            // A key that resolves to nothing at all.
+            psi::Key::Name("no-such-thing".into()),
+        ] {
+            let page = enumerate(
+                &store,
+                &psi::EnumerateSource {
+                    kind: Kind::Principal,
+                    fields: Fields::empty(),
+                    of: Some(key.clone()),
+                    cursor: Vec::new(),
+                },
+            );
+            assert_eq!(
+                page.outcome,
+                Outcome::Refused,
+                "{key:?} must be refused, not reported as an empty membership"
+            );
+        }
+    }
+
+    /// And the empty `Found` stays reserved for what it means: a group that
+    /// genuinely has no recorded members.
+    #[test]
+    fn a_group_with_no_members_is_found_and_empty() {
+        let store = seeded();
+        let page = enumerate(
+            &store,
+            &psi::EnumerateSource {
+                kind: Kind::Principal,
+                fields: Fields::empty(),
+                of: Some(psi::Key::Name("developers".into())),
+                cursor: Vec::new(),
+            },
+        );
+        assert_eq!(page.outcome, Outcome::Found);
+        assert!(page.entries.is_empty());
     }
 
     #[test]
