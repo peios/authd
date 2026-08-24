@@ -1490,6 +1490,14 @@ impl Store {
                         "the store contains a group with an unusable name".into(),
                     ));
                 }
+                // Source obligation 16 is on what a source *asserts*, not on
+                // what it creates. check_name ran on the two creation paths and
+                // nowhere else, so a store file lpsd did not write — one
+                // carrying `jack@corp`, a control byte or a leading space —
+                // loaded cleanly and was asserted verbatim into a passwd record,
+                // an audit line and authd's log. Failing the load says so at
+                // start-up rather than at the first `getent`.
+                check_name(name, "group")?;
                 groups.push(Group {
                     rid,
                     unix_id: if version == 2 { rid } else { stored },
@@ -1523,6 +1531,10 @@ impl Store {
                     "the store contains a principal with an unusable name".into(),
                 ));
             }
+            // See the note on the group name above: the obligation is on what
+            // is asserted, and this is the only place a name that reached the
+            // store by some route other than `lps` can be caught.
+            check_name(name, "principal")?;
 
             let verifier_frame = r.bytes()?;
             let verifier = if verifier_frame.is_empty() {
@@ -1557,9 +1569,12 @@ impl Store {
                         ))
                     })?
                     .to_sid();
-                let home = r.str()?.to_string();
-                let shell = r.str()?.to_string();
-                let display_name = r.str()?.to_string();
+                // home, shell and display name came off disk unvalidated too.
+                // A relative shell here is the source half of the same rule
+                // login now enforces on the client side.
+                let home = check_path(r.str()?, "home directory")?;
+                let shell = check_path(r.str()?, "shell")?;
+                let display_name = check_display_name(r.str()?)?;
 
                 let claim_count = bounded(r.u32()?, claim::MAX_CLAIMS, "claims")?;
                 let mut claims = Vec::with_capacity(claim_count);
@@ -2983,6 +2998,79 @@ mod tests {
             Store::decode(codec::VERSION, &body),
             Err(StoreError::Invalid(_))
         ));
+    }
+
+    /// Source obligation 16 is on what a source **asserts**, not on what it
+    /// creates. `check_name` ran on the two creation paths and nowhere else, so
+    /// a store file lpsd did not write loaded cleanly and asserted its names
+    /// verbatim — into a passwd-format record, an audit line and authd's log.
+    ///
+    /// Not reachable through `add` or `create_group`; reachable by editing the
+    /// file, which is the whole point.
+    #[test]
+    fn a_stored_name_that_breaks_the_rules_is_refused_on_load() {
+        for bad in [
+            "jack@corp",          // a reserved character
+            "corp\\jack",
+            "a/b",
+            "jack:x",
+            "jack,other",
+            "ja\u{7f}ck",          // outside 0x20-0x7e
+            "jack\nroot:x:0:0",   // the forged-passwd-line case
+        ] {
+            let mut store = seeded();
+            store.principals[0].name = bad.to_string();
+            let body = store.encode();
+            assert!(
+                matches!(
+                    Store::decode(codec::VERSION, &body),
+                    Err(StoreError::Invalid(_))
+                ),
+                "a stored principal named {bad:?} must fail the load"
+            );
+        }
+    }
+
+    /// The same for a group, which loads through a separate branch.
+    #[test]
+    fn a_stored_group_name_that_breaks_the_rules_is_refused_on_load() {
+        let mut store = seeded();
+        store.create_group("developers").expect("must create");
+        let last = store.groups.len() - 1;
+        store.groups[last].name = "dev@corp".to_string();
+        let body = store.encode();
+        assert!(matches!(
+            Store::decode(codec::VERSION, &body),
+            Err(StoreError::Invalid(_))
+        ));
+    }
+
+    /// home, shell and display name came off disk unvalidated too. A relative
+    /// shell here is the source half of the rule `login` enforces client-side.
+    #[test]
+    fn a_stored_profile_path_that_is_not_absolute_is_refused_on_load() {
+        for (home, shell) in [("home/jack", "/bin/sh"), ("/home/jack", "sh")] {
+            let mut store = seeded();
+            store.principals[0].home = home.to_string();
+            store.principals[0].shell = shell.to_string();
+            let body = store.encode();
+            assert!(
+                matches!(
+                    Store::decode(codec::VERSION, &body),
+                    Err(StoreError::Invalid(_))
+                ),
+                "home {home:?} shell {shell:?} must fail the load"
+            );
+        }
+    }
+
+    /// And a store lpsd *can* vouch for must still load, or the check would be
+    /// a refusal to start.
+    #[test]
+    fn a_well_formed_store_still_loads() {
+        let store = seeded();
+        let body = store.encode();
+        Store::decode(codec::VERSION, &body).expect("a conforming store must load");
     }
 
     #[test]
