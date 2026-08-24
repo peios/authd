@@ -690,9 +690,36 @@ impl Registry {
         search_order: u32,
         stream: UnixStream,
     ) -> Arc<Source> {
+        self.admit_for_test_with_foreign(
+            name,
+            domain,
+            range,
+            capabilities,
+            search_order,
+            stream,
+            false,
+        )
+    }
+
+    /// [`admit_for_test`](Self::admit_for_test) with control over
+    /// `MayAssertForeignMemberships` — the permission that lets a source name a
+    /// group outside the principal's own domain, which lpsd ships with and a
+    /// directory-backed source must not.
+    #[cfg(test)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn admit_for_test_with_foreign(
+        &self,
+        name: &str,
+        domain: Sid,
+        range: Option<unix_id::Range>,
+        capabilities: psi::Capabilities,
+        search_order: u32,
+        stream: UnixStream,
+        may_assert_foreign_memberships: bool,
+    ) -> Arc<Source> {
         let source = Arc::new(Source::new(
             name.into(),
-            false,
+            may_assert_foreign_memberships,
             domain,
             range,
             capabilities,

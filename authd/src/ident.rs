@@ -159,7 +159,13 @@ fn enumerate(registry: &Registry, buf: &[u8]) -> io::Result<Vec<u8>> {
     }
 
     let fields = request.fields;
-    let page = resolve::enumerate(registry, request.kind, fields, &request.cursor);
+    let page = match resolve::enumerate(registry, request.kind, fields, &request.cursor) {
+        Ok(page) => page,
+        // A cursor authd did not issue, or can no longer honour. Saying so lets
+        // the client restart deliberately, which is what enumerate.rs's begin()
+        // already does.
+        Err(outcome) => return encode_enumerate_refusal(request.tag, outcome),
+    };
 
     // The well-known principals belong to no source, so they appear in no
     // source's enumeration and are added here — on the first page only, since a
