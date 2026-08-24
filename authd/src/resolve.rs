@@ -7,10 +7,11 @@
 //!
 //! # Why the authority, and only the authority
 //!
-//! A source counts POSIX identifiers relative to a range it is never told the
-//! base of. authd adds the base. So the arithmetic that made a number absolute
-//! exists in exactly one place, and only that place can invert it — no source can
-//! answer "who is uid 1001000", because no source knows what 1001000 means.
+//! A source counts POSIX identifiers relative to a range whose base it must not
+//! apply. authd adds the base. So the arithmetic that made a number absolute
+//! exists in exactly one place, and only that place can invert it — a source
+//! answering "who is uid 1001000" would be applying a base it was told to
+//! leave alone.
 //!
 //! # Why one resolver rather than one per caller
 //!
@@ -606,7 +607,7 @@ fn qualify(_source: &Arc<Source>, canonical: &str) -> String {
 
 /// Whether a name could name anything.
 ///
-/// The reserved characters of PSD-012 §6.3. Refusing here rather than passing it
+/// The reserved characters of PGSS §2.15. Refusing here rather than passing it
 /// on means a source is never asked about a name no source is permitted to hold,
 /// and it makes `jack@local` a clean refusal rather than a mysterious absence
 /// once realms exist.

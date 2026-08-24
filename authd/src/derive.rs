@@ -25,12 +25,13 @@
 //! decision about building a token, so PSI carries SIDs and numbers and no
 //! attributes at all.
 //!
-//! # Still to come
+//! # Where the last two fields come from
 //!
-//! Privileges and the integrity level are the last two fields taken from a flat
-//! default rather than decided. Both are **local policy** — a statement about
+//! Privileges and the integrity level are **local policy** — a statement about
 //! how much this machine trusts a principal, keyed on the SIDs it ends up
-//! carrying — and neither will ever come from a source. See PEI-179.
+//! carrying — and neither will ever come from a source. Both are read per logon
+//! from `Machine\Generic\Authn\Policy`, alongside the owner and the default
+//! DACL; see [`crate::policy::principal`].
 
 use peios::security::{GroupAttributes, Sid, SidRef};
 use peios::token::{
