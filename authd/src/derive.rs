@@ -139,7 +139,7 @@ fn add_unique(groups: &mut Vec<(Sid, u32)>, sid: Sid, attributes: u32) {
 /// Tested on the binary form: revision, count, then a six-byte big-endian
 /// authority, then little-endian sub-authorities. NT Authority (5) with a first
 /// sub-authority of 5 is the logon-SID namespace, whatever follows.
-fn is_logon_sid(sid: &SidRef) -> bool {
+pub(crate) fn is_logon_sid(sid: &SidRef) -> bool {
     let bytes = sid.as_bytes();
     bytes.len() >= 12
         && bytes[2..8] == [0, 0, 0, 0, 0, 5]

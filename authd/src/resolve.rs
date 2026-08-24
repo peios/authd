@@ -281,18 +281,43 @@ enum Reply {
     Unavailable,
 }
 
+/// The fields a source has declared it can answer.
+fn gated_fields(source: &Arc<Source>, fields: Fields) -> Fields {
+    if source.capabilities().contains(psi::Capabilities::MEMBERS) {
+        fields
+    } else {
+        fields.difference(Fields::MEMBERS)
+    }
+}
+
 fn ask(source: &Arc<Source>, key: psi::Key, kind: Kind, fields: Fields) -> Reply {
     // A source that did not declare it answers queries is not asked one. That is
     // what keeps a source written against an earlier PSI working untouched.
+    //
+    // It must not be recorded as having answered, though. Returning NotFound
+    // let a source that was **never consulted** contribute a "no" to an
+    // authoritative, cacheable absence — which obligation 41 forbids outright:
+    // a source that was never consulted is not evidence that an object does not
+    // exist. The enumeration path already gets the equivalent case right, by
+    // appending such a source to `incomplete`.
+    //
+    // Declining is permanent rather than an outage, so `Unavailable` is not
+    // comfortable either — it implies "try again" for something that will never
+    // succeed. It is still the honest answer of the two, and the condition is
+    // warned about at registration where an administrator can see it.
     if !source.capabilities().contains(psi::Capabilities::QUERIES) {
-        return Reply::NotFound;
+        return Reply::Unavailable;
     }
 
     let Some(mut conversation) = source.open() else {
         return Reply::Unavailable;
     };
     let query = psi::Query {
-        fields,
+        // Obligation 34: an authority MUST NOT set a field bit gating a
+        // capability the source did not declare. MEMBERS was defined, declared
+        // by lpsd, and read by nothing — so it was set against every source
+        // regardless.
+        fields: gated_fields(source, fields),
         keys: vec![psi::QueryKey { key, kind }],
     };
     if let Err(error) = conversation.query(&query) {
@@ -1114,7 +1139,7 @@ mod tests {
             ours,
         );
         // Nothing serves `theirs`, so a query sent here would hang until the
-        // timeout — and the test finishing promptly is the assertion.
+        // timeout — the test finishing promptly is half the assertion.
         let answer = lookup(
             &registry,
             &Key::Name("jack".into()),
@@ -1122,7 +1147,55 @@ mod tests {
             Fields::empty(),
         );
         drop(theirs);
-        assert_eq!(answer.outcome, Outcome::NotFound);
+        // The other half, and the one this ticket is about: a source that was
+        // never consulted must not contribute a "no" to an authoritative,
+        // cacheable absence. NotFound here would be that source answering a
+        // question it was never asked.
+        assert_eq!(
+            answer.outcome,
+            Outcome::Unavailable,
+            "a source that declined to be asked has not answered NotFound"
+        );
+    }
+
+    /// Obligation 34: an authority never sets a field bit gating a capability
+    /// the source did not declare. MEMBERS was defined, declared by lpsd, and
+    /// read by nothing — so it went out against every source.
+    #[test]
+    fn members_is_not_asked_of_a_source_that_did_not_declare_it() {
+        let registry = Arc::new(Registry::for_test(&[("plain", 10, Some(range()))]));
+        let (ours, _theirs) = UnixStream::pair().expect("socketpair");
+        let plain = registry.admit_for_test(
+            "plain",
+            sid(DOMAIN),
+            Some(range()),
+            psi::Capabilities::QUERIES,
+            10,
+            ours,
+        );
+        assert!(
+            !gated_fields(&plain, Fields::MEMBERS | Fields::GROUPS).contains(Fields::MEMBERS),
+            "MEMBERS must be dropped for a source that did not declare it"
+        );
+        assert!(
+            gated_fields(&plain, Fields::MEMBERS | Fields::GROUPS).contains(Fields::GROUPS),
+            "an ungated field must survive"
+        );
+
+        let registry2 = Arc::new(Registry::for_test(&[("full", 10, Some(range()))]));
+        let (ours2, _theirs2) = UnixStream::pair().expect("socketpair");
+        let full = registry2.admit_for_test(
+            "full",
+            sid(DOMAIN),
+            Some(range()),
+            psi::Capabilities::QUERIES | psi::Capabilities::MEMBERS,
+            10,
+            ours2,
+        );
+        assert!(
+            gated_fields(&full, Fields::MEMBERS).contains(Fields::MEMBERS),
+            "a source that declared MEMBERS must still be asked for it"
+        );
     }
 
     #[test]

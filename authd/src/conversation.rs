@@ -291,6 +291,37 @@ fn relay(
     )
 }
 
+/// PSI rules 4 and 5, applied before rule 2.
+///
+/// Rule 4: an asserted logon SID is **dropped**, loudly, rather than refusing
+/// the assertion — the token still ends up correct, and refusing would punish a
+/// principal for a source's defect without making anything safer. Rule 5 drops
+/// a duplicate.
+///
+/// Obligation 23 puts both *before* membership scope, and the ordering is
+/// load-bearing rather than tidy. A logon SID is `S-1-5-5-X-Y`, by construction
+/// never a sibling of an `S-1-5-21` principal, so a scope check running first
+/// caught it and refused the very logon rule 4 says to survive by dropping. The
+/// two rules gave opposite answers for the same input, and rule 4's outcome was
+/// unreachable for any source without `MayAssertForeignMemberships`.
+fn drop_unassertable(memberships: Vec<(Sid, u32)>, source_name: &str) -> Vec<(Sid, u32)> {
+    let mut kept: Vec<(Sid, u32)> = Vec::with_capacity(memberships.len());
+    for (sid, unix_id) in memberships {
+        if crate::derive::is_logon_sid(sid.as_ref()) {
+            log::error(format_args!(
+                "source {source_name} asserted logon SID {sid}: logon SIDs are the kernel's \
+                 to mint, dropping it"
+            ));
+            continue;
+        }
+        if kept.iter().any(|(seen, _)| *seen == sid) {
+            continue;
+        }
+        kept.push((sid, unix_id));
+    }
+    kept
+}
+
 /// The memberships membership scope applies to.
 ///
 /// Every group the source claimed, including a primary group it named — but
@@ -459,6 +490,7 @@ fn grant(
         };
         memberships.push((sid.to_sid(), group.unix_id));
     }
+    let mut memberships = drop_unassertable(memberships, &source_name);
 
     // The primary group. Empty means the source did not say, and Authenticated
     // Users is the answer: it is a membership authd derives for every principal
@@ -788,6 +820,44 @@ mod tests {
             Some(builtin_admins),
             "a foreign group the source did claim must still be caught"
         );
+    }
+
+    /// Obligation 23: rules 4 and 5 run before rule 2.
+    ///
+    /// A logon SID is `S-1-5-5-X-Y` and a principal is `S-1-5-21-A-B-C-RID`, so
+    /// membership scope can never accept one. Running scope first therefore
+    /// refused the logon that rule 4 says to survive by dropping — the two
+    /// rules gave opposite answers for the same input.
+    #[test]
+    fn an_asserted_logon_sid_is_dropped_before_the_scope_check_sees_it() {
+        let user = sid_of("S-1-5-21-1-2-3-1000");
+        let logon = sid_of("S-1-5-5-7-7");
+        let staff = sid_of("S-1-5-21-1-2-3-1001");
+
+        // The scope check would have caught the logon SID and refused.
+        assert!(
+            !crate::domain::siblings(user.as_ref(), logon.as_ref()),
+            "the premise: a logon SID is never a sibling of its principal"
+        );
+
+        let kept = drop_unassertable(vec![(staff, 0), (logon, 0)], "corp");
+        let groups = scoped_groups(&kept, staff.as_ref(), true);
+        assert!(
+            foreign_membership(user.as_ref(), &groups).is_none(),
+            "the logon SID must be gone before scope runs, not refused by it"
+        );
+        assert_eq!(kept.len(), 1, "and the real membership must survive");
+    }
+
+    /// Rule 5. Harmless either way — a duplicate of a legitimate group passes
+    /// scope anyway — but dropping it keeps what reaches the check equal to
+    /// what the source is actually claiming.
+    #[test]
+    fn a_duplicate_membership_is_dropped() {
+        let staff = sid_of("S-1-5-21-1-2-3-1001");
+        let kept = drop_unassertable(vec![(staff, 0), (staff, 99)], "corp");
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].1, 0, "the first occurrence wins");
     }
 
     /// A client that ran out of answering time is a policy limit, not a
