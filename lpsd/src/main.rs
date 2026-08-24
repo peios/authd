@@ -401,6 +401,20 @@ fn pump(
             Err(_) => return Err(io::Error::other("malformed message header")),
         };
 
+        // Source obligation 9: conversation 0 is reserved for Register,
+        // Registered and Changed. An Authenticate, Query or EnumerateSource
+        // arriving on it was served normally and answered on 0, which the
+        // protocol does not permit — and an authority that opened one has
+        // misunderstood the reserved identifier, so continuing is not a
+        // kindness.
+        if envelope.conversation == psi::CONVERSATION_CONTROL
+            && !matches!(envelope.msg_type, psi::MSG_CHANGED)
+        {
+            return Err(io::Error::other(
+                "the authority used the reserved conversation 0 for an ordinary message",
+            ));
+        }
+
         match envelope.msg_type {
             psi::MSG_AUTHENTICATE => begin(
                 stream,
@@ -501,10 +515,19 @@ fn notify_changed(stream: &UnixStream) {
         return;
     };
     if let Err(error) = send_message(stream, &message) {
-        // Not fatal. authd treats a lost connection as an invalidation of
-        // everything this source holds, so the failure this could cause is the
-        // one it already handles.
-        log::warn(format_args!("could not notify the authority of a change: {error}"));
+        // §2.6 makes a failed write fatal to the connection: a partial write
+        // desynchronises the stream exactly as a bad frame does, and the
+        // reasoning that authd treats a lost connection as a whole-source
+        // invalidation only holds if the connection actually goes.
+        //
+        // Tearing it down is what makes that true. Logging and carrying on left
+        // a stream that may have half a message in it, and a lost invalidation
+        // with nothing to fall back on — lpsd declares entry_ttl = 0, so there
+        // is no backstop.
+        log::error(format_args!(
+            "could not notify the authority of a change: {error}; dropping the connection"
+        ));
+        let _ = stream.shutdown(std::net::Shutdown::Both);
     }
 }
 
@@ -588,6 +611,17 @@ fn begin(
                 );
             }
 
+            // §2.7: an authority may not open a conversation with an
+            // identifier already in use, and a source rejects one that does.
+            // `insert` replaced the existing state and a second
+            // CredentialRequest went out — obligation 13 survived, because
+            // `answer` removes the entry before acting so only one terminal is
+            // ever sent, but the first conversation was silently abandoned.
+            if pending.contains_key(&conversation) {
+                return Err(io::Error::other(
+                    "the authority reused a conversation identifier that is still live",
+                ));
+            }
             let identifier = request.start.identifier.clone();
             pending.insert(conversation, Pending { identifier });
 
