@@ -232,6 +232,16 @@ fn relay(
                     Err(ClientFailed::Protocol(denial, reason)) => {
                         return deny(stream, denial, reason);
                     }
+                    Err(ClientFailed::Io(error)) if is_read_timeout(&error) => {
+                        log::warn(format_args!(
+                            "client did not answer within {CLIENT_TIMEOUT:?}"
+                        ));
+                        return deny(
+                            stream,
+                            Denial::ConversationLimit,
+                            "The logon took too long to answer.",
+                        );
+                    }
                     Err(ClientFailed::Io(error)) => return Err(error),
                 };
 
@@ -281,6 +291,31 @@ fn relay(
     )
 }
 
+/// The memberships membership scope applies to.
+///
+/// Every group the source claimed, including a primary group it named — but
+/// **not** a primary group authd substituted for an empty field. PSI authority
+/// obligation 26: never apply membership scope to a `primary_group` the
+/// authority chose itself, because it needs no permission from anybody to
+/// apply its own default.
+///
+/// Conflating the two cancelled two correct rules against each other. The
+/// default is `Authenticated Users`, `S-1-5-11` — two sub-authorities — and a
+/// principal is `S-1-5-21-A-B-C-RID`, so [`crate::domain::siblings`] can never
+/// hold between them. Every source that omitted `primary_group` therefore had
+/// every logon denied, naming the source for a claim it never made.
+fn scoped_groups<'a>(
+    memberships: &'a [(Sid, u32)],
+    primary_group: &SidRef,
+    primary_group_asserted: bool,
+) -> Vec<&'a SidRef> {
+    memberships
+        .iter()
+        .map(|(sid, _)| sid.as_ref())
+        .filter(|sid| primary_group_asserted || *sid != primary_group)
+        .collect()
+}
+
 /// The first group a source may not assert for this principal, if any.
 ///
 /// An ordinary source vouches for its own users and its own groups, and nothing
@@ -309,6 +344,27 @@ fn unrenderable_prompt(
 enum ClientFailed {
     Protocol(Denial, &'static str),
     Io(io::Error),
+}
+
+/// Whether an I/O error is the client running out of answering time.
+///
+/// `CLIENT_TIMEOUT` is installed as `SO_RCVTIMEO`, so a client that sits at the
+/// prompt too long surfaces here as `WouldBlock` (or `TimedOut` on some
+/// platforms) rather than as a broken connection. PGSS authority obligation 11
+/// requires that case to end in a terminal `AccessDenied` carrying
+/// `ConversationLimit` rather than a silent close, so a client can distinguish
+/// a policy limit from a crash.
+///
+/// It matters because client obligation 4 requires an abnormal close to be
+/// treated as a failed logon and **not** retried automatically. A principal who
+/// simply took too long at the prompt was getting the treatment reserved for
+/// "something is broken and we do not know what", and a greeter that would have
+/// re-prompted on `ConversationLimit` did not.
+fn is_read_timeout(error: &io::Error) -> bool {
+    matches!(
+        error.kind(),
+        io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+    )
 }
 
 /// Put a request to the client and read back its answers.
@@ -411,6 +467,20 @@ fn grant(
     // Peios deliberately has no per-user group. That Linux convention exists so
     // a file's *group ownership* means something, and under KACS it means
     // nothing — every managed credential carries `CAP_DAC_OVERRIDE`.
+    // Whether the primary group is the source's claim or authd's own default.
+    // The distinction decides whether membership scope applies to it: PSI
+    // authority obligation 26 says never to apply scope to a primary_group the
+    // authority substituted itself for an empty field.
+    //
+    // Conflating the two cancelled two correct rules against each other. The
+    // default is Authenticated Users, S-1-5-11 — a two-sub-authority NT SID —
+    // and a principal is S-1-5-21-A-B-C-RID, so domain::siblings can never hold
+    // between them. Every source that omitted primary_group therefore had every
+    // logon denied, naming the source for a claim it never made. lpsd escaped
+    // only because it always sets one *and* ships with
+    // MayAssertForeignMemberships; a directory-backed source — exactly the case
+    // that should not have that permission — hit it on its first logon.
+    let primary_group_asserted = !assertion.primary_group.is_empty();
     let primary_group = if assertion.primary_group.is_empty() {
         Sid::well_known(peios::security::WellKnown::AuthenticatedUsers)
     } else {
@@ -441,7 +511,7 @@ fn grant(
         memberships.push((primary_group.clone(), 0));
     }
 
-    let groups: Vec<&SidRef> = memberships.iter().map(|(sid, _)| sid.as_ref()).collect();
+    let groups = scoped_groups(&memberships, primary_group.as_ref(), primary_group_asserted);
 
     // A source vouches for its own users and its own groups. Asserting a group
     // from another domain — a BUILTIN alias, or another directory's — is the
@@ -587,8 +657,21 @@ fn deny(stream: &UnixStream, denial: Denial, reason: &str) -> io::Result<()> {
 
 /// Read and validate the opening message.
 fn read_logon_start(stream: &UnixStream) -> Result<LogonStart, (Denial, &'static str)> {
-    let received = recv_message(&wire::FRAMING, stream)
-        .map_err(|_| (Denial::MalformedRequest, "Could not read the opening message."))?;
+    let received = recv_message(&wire::FRAMING, stream).map_err(|error| {
+        // A client slow to send LogonStart was told its message was malformed,
+        // which is both wrong and unactionable. A timeout is a policy limit.
+        if is_read_timeout(&error) {
+            (
+                Denial::ConversationLimit,
+                "The logon did not begin in time.",
+            )
+        } else {
+            (
+                Denial::MalformedRequest,
+                "Could not read the opening message.",
+            )
+        }
+    })?;
 
     let (msg_type, _) = decode_header(received.expose())
         .map_err(|_| (Denial::MalformedRequest, "Malformed message header."))?;
@@ -652,6 +735,75 @@ mod tests {
                     credential_name: "Password".into(),
                 })
                 .collect(),
+        }
+    }
+
+    fn sid_of(text: &str) -> Sid {
+        text.parse().expect("a well-formed SID")
+    }
+
+    /// PSI obligation 26: membership scope never applies to a `primary_group`
+    /// the authority substituted for an empty field.
+    ///
+    /// Before this, a source that omitted `primary_group` had *every* logon
+    /// denied: authd substituted `S-1-5-11`, pushed it into the membership set
+    /// so it could not bypass the scope check, and then failed its own check
+    /// against it — because a two-sub-authority NT SID is never a sibling of an
+    /// `S-1-5-21-A-B-C-RID` principal. lpsd escaped it only by always setting
+    /// one *and* shipping with MayAssertForeignMemberships. A directory-backed
+    /// source, which should not have that permission, hit it on first logon.
+    #[test]
+    fn an_authority_substituted_primary_group_is_not_scope_checked() {
+        let user = sid_of("S-1-5-21-1-2-3-1000");
+        let authenticated_users = sid_of("S-1-5-11");
+        let memberships = vec![(authenticated_users, 0u32)];
+
+        let substituted = scoped_groups(&memberships, authenticated_users.as_ref(), false);
+        assert!(
+            foreign_membership(user.as_ref(), &substituted).is_none(),
+            "authd's own default must not be held against the source"
+        );
+
+        // Asserted by the source, the same SID *is* checked — otherwise the
+        // exemption would be a bypass.
+        let asserted = scoped_groups(&memberships, authenticated_users.as_ref(), true);
+        assert!(
+            foreign_membership(user.as_ref(), &asserted).is_some(),
+            "a source-asserted foreign primary group must still be caught"
+        );
+    }
+
+    /// The exemption covers only the substituted SID. Any other membership the
+    /// source claimed is still checked.
+    #[test]
+    fn the_exemption_does_not_extend_to_other_memberships() {
+        let user = sid_of("S-1-5-21-1-2-3-1000");
+        let authenticated_users = sid_of("S-1-5-11");
+        let builtin_admins = sid_of("S-1-5-32-544");
+        let memberships = vec![(authenticated_users, 0u32), (builtin_admins, 0u32)];
+
+        let groups = scoped_groups(&memberships, authenticated_users.as_ref(), false);
+        assert_eq!(
+            foreign_membership(user.as_ref(), &groups).map(|s| s.to_sid()),
+            Some(builtin_admins),
+            "a foreign group the source did claim must still be caught"
+        );
+    }
+
+    /// A client that ran out of answering time is a policy limit, not a
+    /// transport failure — PGSS obligation 11 requires it to end in a terminal
+    /// ConversationLimit rather than a silent close.
+    #[test]
+    fn a_read_timeout_is_distinguished_from_a_transport_failure() {
+        for kind in [io::ErrorKind::WouldBlock, io::ErrorKind::TimedOut] {
+            assert!(is_read_timeout(&io::Error::from(kind)), "{kind:?}");
+        }
+        for kind in [
+            io::ErrorKind::BrokenPipe,
+            io::ErrorKind::ConnectionReset,
+            io::ErrorKind::UnexpectedEof,
+        ] {
+            assert!(!is_read_timeout(&io::Error::from(kind)), "{kind:?}");
         }
     }
 

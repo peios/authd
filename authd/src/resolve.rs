@@ -42,7 +42,6 @@ use peios::security::SidRef;
 
 use crate::log;
 use crate::source::{Inbound, Registry, Slot, Source};
-use crate::unix_id;
 use crate::well_known;
 
 /// How long a source has to answer a lookup.
@@ -133,7 +132,7 @@ fn by_name(registry: &Registry, name: &str, kind: Kind, fields: Fields) -> Answe
             }
         };
         match ask(&source, psi::Key::Name(name.to_string()), kind, fields) {
-            Reply::Found(entry) => return found(&source, &entry, fields),
+            Reply::Found(entry) => return found(&source, &entry, kind, fields),
             Reply::NotFound => continue,
             Reply::Refused => return Answer::of(Outcome::Refused),
             Reply::Unavailable => return Answer::of(Outcome::Unavailable),
@@ -164,7 +163,7 @@ fn by_sid(registry: &Registry, sid: &SidRef, kind: Kind, fields: Fields) -> Answ
         });
     };
     match ask(&source, psi::Key::Sid(sid.as_bytes().to_vec()), kind, fields) {
-        Reply::Found(entry) => found(&source, &entry, fields),
+        Reply::Found(entry) => found(&source, &entry, kind, fields),
         Reply::NotFound => Answer::of(Outcome::NotFound),
         Reply::Refused => Answer::of(Outcome::Refused),
         Reply::Unavailable => Answer::of(Outcome::Unavailable),
@@ -192,7 +191,7 @@ fn by_unix_id(registry: &Registry, id: u32, kind: Kind, fields: Fields) -> Answe
         });
     };
     match ask(&source, psi::Key::RelativeId(relative), kind, fields) {
-        Reply::Found(entry) => found(&source, &entry, fields),
+        Reply::Found(entry) => found(&source, &entry, kind, fields),
         Reply::NotFound => Answer::of(Outcome::NotFound),
         Reply::Refused => Answer::of(Outcome::Refused),
         Reply::Unavailable => Answer::of(Outcome::Unavailable),
@@ -359,7 +358,7 @@ fn ask(source: &Arc<Source>, key: psi::Key, kind: Kind, fields: Fields) -> Reply
 ///   that could name another domain's principals here would have `ls -l` show
 ///   them as its own, and be believed the next time something compared that name
 ///   to a SID.
-fn found(source: &Arc<Source>, entry: &psi::QueryEntry, fields: Fields) -> Answer {
+fn found(source: &Arc<Source>, entry: &psi::QueryEntry, wanted: Kind, fields: Fields) -> Answer {
     let Some(sid) = SidRef::from_bytes(&entry.sid) else {
         log::error(format_args!(
             "ident: {}: answered with bytes that are not a SID",
@@ -367,6 +366,31 @@ fn found(source: &Arc<Source>, entry: &psi::QueryEntry, fields: Fields) -> Answe
         ));
         return Answer::of(Outcome::Unavailable);
     };
+    // Obligation 38: a Principal request is never answered with a group or
+    // vice versa, and kind_found is Principal or Group, never Any. The
+    // authority establishes that for itself rather than relaying the source's
+    // answer and letting the client discover the mismatch.
+    //
+    // POSIX keeps users and groups in separate namespaces, which is why kind is
+    // on the request at all: getpwnam and getgrnam can be asked the same string
+    // and must get different objects. Relaying the wrong kind made
+    // getpwnam("staff") return a group rendered as a struct passwd, with the
+    // group's identifier in pw_uid.
+    if entry.kind == Kind::Any {
+        log::error(format_args!(
+            "ident: {}: answered with kind Any, which is a valid question and not a valid answer",
+            source.name()
+        ));
+        return Answer::of(Outcome::Unavailable);
+    }
+    if !entry.kind.satisfies(wanted) {
+        log::warn(format_args!(
+            "ident: {}: answered a {wanted:?} request with a {:?}",
+            source.name(),
+            entry.kind
+        ));
+        return Answer::of(Outcome::NotFound);
+    }
     if !crate::domain::contains(source.domain().as_ref(), sid) {
         log::error(format_args!(
             "ident: {}: answered for {sid}, which is outside its domain {}",
@@ -383,17 +407,18 @@ fn found(source: &Arc<Source>, entry: &psi::QueryEntry, fields: Fields) -> Answe
         values.push(match value {
             Value::UnixId(relative) => match range.and_then(|r| r.rebase(*relative)) {
                 Some(absolute) => Value::UnixId(absolute),
-                // Out of range, or the source has no range at all. `nobody`
-                // rather than a number nobody agreed to.
-                None => Value::UnixId(unix_id::UNMAPPED),
+                // Out of range, or the source has no range at all. Zero is the
+                // protocol's only encoding of "no number for this SID"
+                // (obligation 43), and substituting 65534 here destroyed that:
+                // a client reads nobody/nogroup as a real identifier and cannot
+                // tell "no source numbers this SID" from "genuinely numbered
+                // 65534". Rendering the sentinel as `nobody` is a display
+                // decision and belongs to nss, which already makes it.
+                None => Value::UnixId(0),
             },
             Value::PrimaryGroup(reference) => Value::PrimaryGroup(rebase_ref(source, reference)),
-            Value::Groups(refs) => {
-                Value::Groups(refs.iter().map(|r| rebase_ref(source, r)).collect())
-            }
-            Value::Members(refs) => {
-                Value::Members(refs.iter().map(|r| rebase_ref(source, r)).collect())
-            }
+            Value::Groups(refs) => Value::Groups(permitted_refs(source, sid, refs)),
+            Value::Members(refs) => Value::Members(permitted_refs(source, sid, refs)),
             other => other.clone(),
         });
     }
@@ -437,8 +462,53 @@ fn rebase_ref(source: &Arc<Source>, reference: &Reference) -> Reference {
     Reference {
         sid: reference.sid.clone(),
         name,
-        unix_id: unix_id.unwrap_or(unix_id::UNMAPPED),
+        // Zero, not UNMAPPED: see the note on Value::UnixId above.
+        unix_id: unix_id.unwrap_or(0),
     }
+}
+
+/// A reference the source is not permitted to report, if any.
+///
+/// PSI authority obligation 37 requires identity confinement, membership scope
+/// and numeric scope to be applied to a `QueryResult` exactly as to an
+/// `Assertion`. Membership scope was applied on the logon path and nowhere
+/// else, so a source with no foreign-membership permission could report
+/// `BUILTIN\Administrators` in a group list over `/run/ident.sock` and have
+/// authd relay it — confined on the channel that mints tokens and unconfined on
+/// the channel that describes them.
+///
+/// That is worse than the inconsistency suggests. A POSIX-shaped tool reads
+/// group membership from the name-resolution path and treats it as an
+/// access-control input, because on other systems that path *is* the authority.
+fn permitted_refs(
+    source: &Arc<Source>,
+    subject: &SidRef,
+    refs: &[Reference],
+) -> Vec<Reference> {
+    if source.may_assert_foreign_memberships() {
+        return refs.iter().map(|r| rebase_ref(source, r)).collect();
+    }
+    refs.iter()
+        .filter(|r| match SidRef::from_bytes(&r.sid) {
+            // A reference that fails scope is dropped from the value rather
+            // than failing the whole lookup: a name lookup is not a logon, and
+            // the caller is better served by a short list than by Unavailable.
+            // It must not be relayed either way.
+            Some(sid) => {
+                let ok = crate::domain::siblings(subject, sid);
+                if !ok {
+                    log::error(format_args!(
+                        "ident: {}: reported {sid} for {subject}, outside that principal's \
+                         domain, and it may not assert foreign memberships",
+                        source.name()
+                    ));
+                }
+                ok
+            }
+            None => false,
+        })
+        .map(|r| rebase_ref(source, r))
+        .collect()
 }
 
 /// The name authd hands out, whatever the caller asked with.
@@ -485,10 +555,31 @@ pub struct Page {
     pub incomplete: Vec<String>,
 }
 
-pub fn enumerate(registry: &Registry, kind: Kind, fields: Fields, cursor: &[u8]) -> Page {
+/// Enumerate one page, or report that the cursor cannot be honoured.
+///
+/// `Err(Outcome::Malformed)` is obligation 49: an authority rejects a cursor it
+/// did not issue, or can no longer honour, with `Malformed` — and specifically
+/// must not silently restart the walk, nor answer with an empty page and an
+/// empty `next` that reads as completion.
+///
+/// The code here used to do both, reasoning that "refusing would strand a
+/// caller". It would, and that is the correct outcome: a client presenting a
+/// cursor the authority cannot honour has already lost its place, and the only
+/// honest answers are to say so or to start again *knowingly*. Restarting
+/// silently hands back a second copy of the beginning appended to what the
+/// caller already has, with no way to detect it.
+pub fn enumerate(
+    registry: &Registry,
+    kind: Kind,
+    fields: Fields,
+    cursor: &[u8],
+) -> Result<Page, Outcome> {
     let fields = fields.intersection(KNOWN);
     let sources = registry.ordered();
-    let (resume, inner) = split_cursor(cursor);
+    let (resume, inner) = match split_cursor(cursor) {
+        Some(split) => split,
+        None => return Err(Outcome::Malformed),
+    };
 
     let mut entries = Vec::new();
     let mut incomplete = Vec::new();
@@ -525,18 +616,18 @@ pub fn enumerate(registry: &Registry, kind: Kind, fields: Fields, cursor: &[u8])
                     if let Answer {
                         record: Some(record),
                         ..
-                    } = found(source, entry, fields)
+                    } = found(source, entry, kind, fields)
                     {
                         entries.push(record);
                     }
                 }
                 if !page.next.is_empty() {
                     // More from this source. Resume here rather than moving on.
-                    return Page {
+                    return Ok(Page {
                         entries,
                         next: make_cursor(source.name(), &page.next),
                         incomplete,
-                    };
+                    });
                 }
             }
             None => incomplete.push(source.name().to_string()),
@@ -545,11 +636,24 @@ pub fn enumerate(registry: &Registry, kind: Kind, fields: Fields, cursor: &[u8])
         inner.clear();
     }
 
-    Page {
+    // A cursor naming a source that is no longer in the order. The walk never
+    // reached it, so every remaining source was skipped and the reply would be
+    // an empty page with an empty `next` — which a client is required to read
+    // as "the enumeration is complete". A truncated walk reported as a whole
+    // one is exactly what obligation 49 exists to prevent.
+    if !reached {
+        log::warn(format_args!(
+            "ident: enumeration cursor names {:?}, which is not in the source order",
+            resume
+        ));
+        return Err(Outcome::Malformed);
+    }
+
+    Ok(Page {
         entries,
         next: Vec::new(),
         incomplete,
-    }
+    })
 }
 
 fn page_from(
@@ -596,22 +700,20 @@ fn make_cursor(name: &str, inner: &[u8]) -> Vec<u8> {
     out
 }
 
-fn split_cursor(cursor: &[u8]) -> (Option<String>, &[u8]) {
-    let Some((&len, rest)) = cursor.split_first() else {
-        return (None, &[]);
-    };
+/// `None` for a cursor that does not parse; `Some((None, _))` for an empty one,
+/// which begins a walk.
+fn split_cursor(cursor: &[u8]) -> Option<(Option<String>, &[u8])> {
+    if cursor.is_empty() {
+        return Some((None, &[]));
+    }
+    let (&len, rest) = cursor.split_first()?;
     let len = len as usize;
     if rest.len() < len {
-        return (None, &[]);
+        return None;
     }
     let (name, inner) = rest.split_at(len);
-    // A cursor authd did not issue. Starting over is safe — an enumeration is
-    // not a transaction — and refusing would strand a caller that cannot know
-    // why.
-    match core::str::from_utf8(name) {
-        Ok(name) => (Some(name.to_string()), inner),
-        Err(_) => (None, &[]),
-    }
+    let name = core::str::from_utf8(name).ok()?;
+    Some((Some(name.to_string()), inner))
 }
 
 /// The well-known principals, which belong to no source and so appear in no
@@ -635,6 +737,7 @@ pub fn well_known_page(kind: Kind, fields: Fields) -> Vec<libauthd::ident::Recor
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::unix_id;
     use crate::source::pump_for_test;
     use libauthd::ident::{Key, Value};
     use libauthd::transport::{recv_message, send_message};
@@ -671,17 +774,44 @@ mod tests {
         order: u32,
         answer: Option<psi::QueryEntry>,
     ) {
+        add_stub_with_foreign(registry, name, domain, order, answer, false);
+    }
+
+    /// A stub permitted to name groups outside the principal's domain, as lpsd
+    /// is. Without it, membership scope drops a BUILTIN reference on the
+    /// lookup path exactly as it does on the logon path.
+    fn add_stub_with_foreign(
+        registry: &Arc<Registry>,
+        name: &str,
+        domain: &str,
+        order: u32,
+        answer: Option<psi::QueryEntry>,
+        foreign: bool,
+    ) {
         let (ours, theirs) = UnixStream::pair().expect("socketpair");
-        let source = registry.admit_for_test(
+        let source = registry.admit_for_test_with_foreign(
             name,
             sid(domain),
             Some(range()),
             psi::Capabilities::QUERIES | psi::Capabilities::ENUMERATES,
             order,
             ours,
+            foreign,
         );
         thread::spawn(move || serve_stub(theirs, answer));
         pump_for_test(&source);
+    }
+
+    /// [`stub`] whose source may assert foreign memberships.
+    fn stub_with_foreign(
+        name: &str,
+        domain: &str,
+        order: u32,
+        answer: Option<psi::QueryEntry>,
+    ) -> Arc<Registry> {
+        let registry = Arc::new(Registry::for_test(&[(name, order, Some(range()))]));
+        add_stub_with_foreign(&registry, name, domain, order, answer, true);
+        registry
     }
 
     /// The other end of the socketpair: read a query, answer it, repeat.
@@ -1025,7 +1155,9 @@ mod tests {
             // Zero: the source names the membership and numbers nothing.
             unix_id: 0,
         }]));
-        let registry = stub("lpsd", DOMAIN, 1000, Some(answer));
+        // lpsd ships with MayAssertForeignMemberships, which is what lets it
+        // name a BUILTIN alias for a principal of another domain at all.
+        let registry = stub_with_foreign("lpsd", DOMAIN, 1000, Some(answer));
 
         let found = lookup(
             &registry,
@@ -1038,6 +1170,124 @@ mod tests {
             panic!("groups must be present");
         };
         assert_eq!(groups[0].unix_id, 102, "authd's table, not the source's base");
+    }
+
+    /// Obligation 43: a `unix_id` of zero means the authority has no number
+    /// for that SID, and zero is the *only* encoding of it. Substituting
+    /// `UNMAPPED` (65534) put nobody/nogroup on the wire, which a client reads
+    /// as a real identifier — so it could not tell "no source numbers this SID"
+    /// from "genuinely numbered 65534".
+    ///
+    /// Rendering the sentinel as `nobody` is a display decision and belongs to
+    /// nss, which already makes it from its own copy of the constant.
+    #[test]
+    fn an_unnumbered_reference_goes_on_the_wire_as_zero() {
+        let mut answer = entry("S-1-5-21-1-2-3-1000", "jack", 1000);
+        answer.values.push(Value::Groups(vec![Reference {
+            // A group of the principal's own domain, so membership scope is
+            // satisfied — but outside the source's range, so it has no number.
+            sid: sid("S-1-5-21-1-2-3-999999").as_ref().as_bytes().to_vec(),
+            name: "unnumbered".into(),
+            unix_id: u32::MAX,
+        }]));
+        let registry = stub("lpsd", DOMAIN, 1000, Some(answer));
+
+        let found = lookup(
+            &registry,
+            &Key::Name("jack".into()),
+            Kind::Principal,
+            Fields::GROUPS,
+        );
+        let record = found.record.expect("a record");
+        let Some(Value::Groups(groups)) = record.value(Fields::GROUPS) else {
+            panic!("groups must be present");
+        };
+        assert_eq!(
+            groups[0].unix_id, 0,
+            "an unnumbered reference must be zero, never 65534"
+        );
+    }
+
+    /// Obligation 37: identity confinement, membership scope and numeric scope
+    /// apply to a `QueryResult` exactly as to an `Assertion`.
+    ///
+    /// Membership scope was applied on the logon path and nowhere else, so a
+    /// source with no foreign-membership permission could report
+    /// `BUILTIN\Administrators` over `/run/ident.sock` and have authd relay
+    /// it — confined on the channel that mints tokens and unconfined on the
+    /// channel that describes them. A POSIX-shaped tool reads group membership
+    /// from the name-resolution path and treats it as an access-control input.
+    #[test]
+    fn a_foreign_group_is_dropped_from_a_lookup_when_the_source_may_not_assert_it() {
+        let mut answer = entry("S-1-5-21-1-2-3-1000", "jack", 1000);
+        answer.values.push(Value::Groups(vec![
+            Reference {
+                sid: sid("S-1-5-32-544").as_ref().as_bytes().to_vec(),
+                name: "Administrators".into(),
+                unix_id: 0,
+            },
+            Reference {
+                sid: sid("S-1-5-21-1-2-3-1001").as_ref().as_bytes().to_vec(),
+                name: "staff".into(),
+                unix_id: 1001,
+            },
+        ]));
+        // A source *without* the permission — a directory-backed one.
+        let registry = stub("corp", DOMAIN, 1000, Some(answer));
+
+        let found = lookup(
+            &registry,
+            &Key::Name("jack".into()),
+            Kind::Principal,
+            Fields::GROUPS,
+        );
+        let record = found.record.expect("a record");
+        let Some(Value::Groups(groups)) = record.value(Fields::GROUPS) else {
+            panic!("groups must be present");
+        };
+        let names: Vec<&str> = groups.iter().map(|g| g.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["staff"],
+            "the foreign group must be dropped, and the sibling kept"
+        );
+    }
+
+    /// Obligation 38: a Principal request is never answered with a group, and
+    /// vice versa. POSIX keeps the two in separate namespaces, which is why
+    /// `kind` is on the request: getpwnam and getgrnam can be asked the same
+    /// string and must get different objects.
+    #[test]
+    fn a_principal_request_is_not_answered_with_a_group() {
+        let mut answer = entry("S-1-5-21-1-2-3-1000", "staff", 1000);
+        answer.kind = Kind::Group;
+        let registry = stub("lpsd", DOMAIN, 1000, Some(answer));
+
+        let found = lookup(
+            &registry,
+            &Key::Name("staff".into()),
+            Kind::Principal,
+            Fields::empty(),
+        );
+        assert_eq!(found.outcome, Outcome::NotFound);
+        assert!(found.record.is_none(), "no record may be relayed");
+    }
+
+    /// `Any` is a valid question and not a valid answer: the protocol forbids
+    /// it in `kind_found` outright.
+    #[test]
+    fn a_source_answering_any_is_refused() {
+        let mut answer = entry("S-1-5-21-1-2-3-1000", "jack", 1000);
+        answer.kind = Kind::Any;
+        let registry = stub("lpsd", DOMAIN, 1000, Some(answer));
+
+        let found = lookup(
+            &registry,
+            &Key::Name("jack".into()),
+            Kind::Principal,
+            Fields::empty(),
+        );
+        assert_eq!(found.outcome, Outcome::Unavailable);
     }
 
     #[test]
@@ -1061,7 +1311,7 @@ mod tests {
             Some(entry("S-1-5-21-7-7-7-1000", "ada", 1000)),
         );
 
-        let page = enumerate(&registry, Kind::Principal, Fields::UNIX_ID, &[]);
+        let page = enumerate(&registry, Kind::Principal, Fields::UNIX_ID, &[]).expect("an honourable cursor");
         let names: Vec<&str> = page
             .entries
             .iter()
@@ -1085,7 +1335,7 @@ mod tests {
             10,
             ours,
         );
-        let page = enumerate(&registry, Kind::Principal, Fields::empty(), &[]);
+        let page = enumerate(&registry, Kind::Principal, Fields::empty(), &[]).expect("an honourable cursor");
         drop(theirs);
         assert!(page.entries.is_empty());
         assert_eq!(page.incomplete, vec!["quiet".to_string()]);
@@ -1118,7 +1368,7 @@ mod tests {
         // A cursor naming `b` resumes there, skipping `a` entirely.
         let mut cursor = vec![1u8];
         cursor.extend_from_slice(b"b");
-        let page = enumerate(&registry, Kind::Principal, Fields::empty(), &cursor);
+        let page = enumerate(&registry, Kind::Principal, Fields::empty(), &cursor).expect("an honourable cursor");
         let names: Vec<&str> = page
             .entries
             .iter()
@@ -1127,23 +1377,52 @@ mod tests {
         assert_eq!(names, vec!["ada"], "the walk resumes at the named source");
     }
 
-    /// Whatever a caller sends that authd did not issue, the walk starts over
-    /// rather than stranding it.
+    /// Obligation 49: a cursor the authority did not issue, or can no longer
+    /// honour, is rejected with `Malformed`.
+    ///
+    /// The old behaviour was to start the walk over, reasoning that refusing
+    /// would strand the caller. It would — and that is the honest outcome. A
+    /// silent restart hands back a second copy of the beginning appended to
+    /// what the caller already has, and nothing in the reply says so.
     #[test]
-    fn an_unrecognised_cursor_starts_over() {
+    fn an_unrecognised_cursor_is_malformed() {
         let registry = stub(
             "lpsd",
             DOMAIN,
             1000,
             Some(entry("S-1-5-21-1-2-3-1000", "jack", 1000)),
         );
-        for cursor in [vec![0xff], vec![4, 0xff, 0xff, 0xff, 0xff], vec![9, 1, 2]] {
-            let page = enumerate(&registry, Kind::Principal, Fields::empty(), &cursor);
-            assert!(
-                page.entries.is_empty() || page.entries[0].qualified_name == "jack",
-                "cursor {cursor:?} must not resume somewhere it was never told about"
+        for cursor in [
+            vec![0xff],                    // a length longer than the cursor
+            vec![4, 0xff, 0xff, 0xff, 0xff], // a name that is not UTF-8
+            vec![9, 1, 2],                 // truncated
+        ] {
+            assert_eq!(
+                enumerate(&registry, Kind::Principal, Fields::empty(), &cursor).err(),
+                Some(Outcome::Malformed),
+                "cursor {cursor:?} must be refused, not silently restarted"
             );
         }
+    }
+
+    /// A cursor naming a source that has since gone away is equally
+    /// unhonourable. Left to run, the walk skips every source and returns an
+    /// empty page with an empty `next` — which a client is required to read as
+    /// completion, so a truncated walk reports as a whole one.
+    #[test]
+    fn a_cursor_naming_a_departed_source_is_malformed() {
+        let registry = stub(
+            "lpsd",
+            DOMAIN,
+            1000,
+            Some(entry("S-1-5-21-1-2-3-1000", "jack", 1000)),
+        );
+        let mut cursor = vec![5u8];
+        cursor.extend_from_slice(b"gone!");
+        assert_eq!(
+            enumerate(&registry, Kind::Principal, Fields::empty(), &cursor).err(),
+            Some(Outcome::Malformed),
+        );
     }
 
     /// A configured source that is not here contributed nothing, and a listing
@@ -1161,7 +1440,7 @@ mod tests {
             10,
             Some(entry("S-1-5-21-1-2-3-1000", "jack", 1000)),
         );
-        let page = enumerate(&registry, Kind::Principal, Fields::empty(), &[]);
+        let page = enumerate(&registry, Kind::Principal, Fields::empty(), &[]).expect("an honourable cursor");
         assert_eq!(page.incomplete, vec!["gone".to_string()]);
     }
 
