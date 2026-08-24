@@ -134,7 +134,9 @@ fn by_name(registry: &Registry, name: &str, kind: Kind, fields: Fields) -> Answe
         match ask(&source, psi::Key::Name(name.to_string()), kind, fields) {
             Reply::Found(entry) => return found(&source, &entry, kind, fields),
             Reply::NotFound => continue,
-            Reply::Refused => return Answer::of(Outcome::Refused),
+            // A source refused. That is a fact about the source, identical for
+            // every caller, so it is Unavailable — see the note on Reply.
+            Reply::Refused => return Answer::of(Outcome::Unavailable),
             Reply::Unavailable => return Answer::of(Outcome::Unavailable),
         }
     }
@@ -165,7 +167,7 @@ fn by_sid(registry: &Registry, sid: &SidRef, kind: Kind, fields: Fields) -> Answ
     match ask(&source, psi::Key::Sid(sid.as_bytes().to_vec()), kind, fields) {
         Reply::Found(entry) => found(&source, &entry, kind, fields),
         Reply::NotFound => Answer::of(Outcome::NotFound),
-        Reply::Refused => Answer::of(Outcome::Refused),
+        Reply::Refused => Answer::of(Outcome::Unavailable),
         Reply::Unavailable => Answer::of(Outcome::Unavailable),
     }
 }
@@ -193,7 +195,7 @@ fn by_unix_id(registry: &Registry, id: u32, kind: Kind, fields: Fields) -> Answe
     match ask(&source, psi::Key::RelativeId(relative), kind, fields) {
         Reply::Found(entry) => found(&source, &entry, kind, fields),
         Reply::NotFound => Answer::of(Outcome::NotFound),
-        Reply::Refused => Answer::of(Outcome::Refused),
+        Reply::Refused => Answer::of(Outcome::Unavailable),
         Reply::Unavailable => Answer::of(Outcome::Unavailable),
     }
 }
@@ -359,6 +361,13 @@ fn ask(source: &Arc<Source>, key: psi::Key, kind: Kind, fields: Fields) -> Reply
     match entry.outcome {
         Outcome::Found => Reply::Found(entry),
         Outcome::NotFound => Reply::NotFound,
+        // §2.18 reserves Refused for "the caller may not make this request".
+        // A source refusing is not that: it is a fact about the source,
+        // identical for every caller, and the honest answer to the caller is
+        // that a party which could have answered did not. Relaying it as
+        // Refused let a client conclude that asking again on this principal's
+        // behalf was pointless — the same damage as reporting it NotFound,
+        // aimed at one caller instead of all of them.
         Outcome::Refused => Reply::Refused,
         // The decoder refuses these from a source, so reaching here would mean
         // the codec had changed underneath this match.
@@ -1243,6 +1252,35 @@ mod tests {
             panic!("groups must be present");
         };
         assert_eq!(groups[0].unix_id, 102, "authd's table, not the source's base");
+    }
+
+    /// §2.18 reserves `Refused` for "the caller may not make this request", and
+    /// requires it to stay unsent until an authority has a per-field
+    /// restriction mechanism. authd has none.
+    ///
+    /// A source refusing is a fact about the source, identical for every
+    /// caller. Relaying it as `Refused` let a client correctly conclude that
+    /// asking again on this principal's behalf was pointless — the same damage
+    /// as reporting `NotFound`, aimed at one caller instead of all of them.
+    #[test]
+    fn a_source_refusal_is_reported_as_unavailable_not_refused() {
+        let mut answer = entry("S-1-5-21-1-2-3-1000", "jack", 1000);
+        answer.outcome = Outcome::Refused;
+        let registry = stub("corp", DOMAIN, 1000, Some(answer));
+
+        for key in [
+            Key::Name("jack".into()),
+            Key::Sid(sid("S-1-5-21-1-2-3-1000").as_ref().as_bytes().to_vec()),
+            Key::UnixId(BASE + 1000),
+        ] {
+            let found = lookup(&registry, &key, Kind::Principal, Fields::empty());
+            assert_ne!(
+                found.outcome,
+                Outcome::Refused,
+                "{key:?}: Refused is reserved for the caller lacking permission"
+            );
+            assert_eq!(found.outcome, Outcome::Unavailable, "{key:?}");
+        }
     }
 
     /// Obligation 43: a `unix_id` of zero means the authority has no number
