@@ -271,6 +271,17 @@ fn relay(
                         "The authority asked for something this client cannot provide.",
                     );
                 }
+                if let Some(repeated) = duplicate_credential_ref(&request) {
+                    log::error(format_args!(
+                        "source {} repeated credential_ref {repeated}; refusing to relay",
+                        conversation.source_name()
+                    ));
+                    return deny(
+                        stream,
+                        Denial::Internal,
+                        "The authority asked an ambiguous question.",
+                    );
+                }
 
                 let answers = match ask_client(stream, &request) {
                     Ok(answers) => answers,
@@ -415,6 +426,26 @@ fn unrenderable_prompt(
         .iter()
         .map(|prompt| prompt.credential_type)
         .find(|wanted| !start.supported_credential_types.contains(wanted))
+}
+
+/// Whether a request repeats a `credential_ref`.
+///
+/// Obligation 20: the refs in one request are unique. Nothing checked, so a
+/// source sending duplicates was relayed verbatim and the client's answers
+/// became ambiguous — two prompts asking for different things, one ref to
+/// carry both answers back under.
+///
+/// Vacuous against lpsd, which only ever sends one prompt. It is a source
+/// obligation, and a source is the thing a third party is invited to write.
+fn duplicate_credential_ref(request: &CredentialRequest) -> Option<u32> {
+    let mut seen = Vec::with_capacity(request.prompts.len());
+    for prompt in &request.prompts {
+        if seen.contains(&prompt.credential_ref) {
+            return Some(prompt.credential_ref);
+        }
+        seen.push(prompt.credential_ref);
+    }
+    None
 }
 
 enum ClientFailed {
@@ -687,12 +718,36 @@ fn grant(
         }
     };
 
-    // The profile is relayed exactly as the source gave it. It is not identity
-    // and decides no access — a home directory appears in no ACL — so there is
-    // nothing here for authd to check that the client should not check itself.
+    // The profile is not identity and decides no access — a home directory
+    // appears in no ACL — but obligation 23 still requires the authority to
+    // hold `home` and `shell` to the absolute-path rule. The client half is the
+    // more serious one (a relative shell reaching execvp gets a PATH search),
+    // and it is enforced in `login`; this is the other end of the same rule, so
+    // a source that asserts a relative path is corrected here rather than
+    // relied upon to be caught downstream.
+    //
+    // Cleared to empty rather than refused: an empty field already means "the
+    // authority did not say", and every client already falls back for it. A
+    // logon is not worth failing over a home directory.
+    let mut profile = assertion.profile.clone();
+    if !profile.home.is_empty() && !profile.home.starts_with('/') {
+        log::warn(format_args!(
+            "source {source_name} asserted a relative home {:?}; clearing it",
+            profile.home
+        ));
+        profile.home.clear();
+    }
+    if !profile.shell.is_empty() && !profile.shell.starts_with('/') {
+        log::warn(format_args!(
+            "source {source_name} asserted a relative shell {:?}; clearing it",
+            profile.shell
+        ));
+        profile.shell.clear();
+    }
+
     let message = encode_access_granted(&AccessGranted {
         session_id: granted.session.0,
-        profile: assertion.profile.clone(),
+        profile,
     })
     .map_err(|_| io::Error::other("could not encode grant"))?;
 
@@ -750,8 +805,18 @@ fn read_logon_start(stream: &UnixStream) -> Result<LogonStart, (Denial, &'static
         }
     })?;
 
-    let (msg_type, _) = decode_header(received.expose())
-        .map_err(|_| (Denial::MalformedRequest, "Malformed message header."))?;
+    // Obligation 6: a client speaking a version this build does not implement
+    // is told so. `Denial::UnsupportedVersion` was defined and never sent,
+    // because every WireError — that one included — was flattened into
+    // MalformedRequest, so a future client was told its message was malformed
+    // rather than that its version is not implemented.
+    let (msg_type, _) = decode_header(received.expose()).map_err(|error| match error {
+        wire::WireError::UnsupportedVersion(_) => (
+            Denial::UnsupportedVersion,
+            "This authority does not implement that protocol version.",
+        ),
+        _ => (Denial::MalformedRequest, "Malformed message header."),
+    })?;
     if msg_type != MSG_LOGON_START {
         return Err((
             Denial::MalformedRequest,
@@ -865,6 +930,34 @@ mod tests {
             Some(builtin_admins),
             "a foreign group the source did claim must still be caught"
         );
+    }
+
+    /// Obligation 20: the `credential_ref`s in one request are unique. Nothing
+    /// checked, so a source sending duplicates was relayed verbatim and the
+    /// client's answers became ambiguous — two prompts asking for different
+    /// things, one ref to carry both answers back under.
+    #[test]
+    fn a_repeated_credential_ref_is_caught() {
+        let mut request = requesting(&[CredentialType::Password, CredentialType::Password]);
+        assert_eq!(
+            duplicate_credential_ref(&request),
+            None,
+            "distinct refs are the ordinary case"
+        );
+        request.prompts[1].credential_ref = request.prompts[0].credential_ref;
+        assert_eq!(
+            duplicate_credential_ref(&request),
+            Some(request.prompts[0].credential_ref)
+        );
+    }
+
+    #[test]
+    fn a_single_prompt_and_an_empty_request_are_never_duplicates() {
+        assert_eq!(
+            duplicate_credential_ref(&requesting(&[CredentialType::Password])),
+            None
+        );
+        assert_eq!(duplicate_credential_ref(&requesting(&[])), None);
     }
 
     /// Obligation 11 bounds the *time* a conversation may remain open, not only

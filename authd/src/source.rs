@@ -255,6 +255,19 @@ impl Source {
 
     fn deliver(&self, id: u64, message: Inbound) {
         let table = self.conversations.lock().unwrap_or_else(|e| e.into_inner());
+        if id == psi::CONVERSATION_CONTROL {
+            // §2.7 reserves conversation 0 for Register, Registered and
+            // Changed. A source using it for anything else has misunderstood
+            // the reserved identifier, which is malformed — and §2.6 makes
+            // malformed fatal to the connection. Logging and carrying on left
+            // it running.
+            log::error(format_args!(
+                "{}: used the reserved conversation 0 for an ordinary message",
+                self.name
+            ));
+            self.shut_down();
+            return;
+        }
         match table.get(&id) {
             // The receiver having hung up is ordinary: the client may have
             // disconnected between the source answering and us delivering.

@@ -417,12 +417,20 @@ pub struct QueryEntry {
 }
 
 impl Default for QueryEntry {
+    /// A non-`Found` entry: §2.15 requires that where `outcome` is not `Found`,
+    /// everything after it is empty or zero.
+    ///
+    /// `kind` was `Principal` (1) rather than `Any` (0). Harmless in practice —
+    /// an authority is forbidden from reading the field at all in that case —
+    /// but it is a decoder-visible violation of a rule that exists precisely so
+    /// a decoder need not think about it, and a stricter third-party authority
+    /// would be within its rights to reject the message.
     fn default() -> Self {
         Self {
             outcome: Outcome::NotFound,
             sid: Vec::new(),
             canonical_name: String::new(),
-            kind: Kind::Principal,
+            kind: Kind::Any,
             values: Vec::new(),
             withheld: Vec::new(),
         }
