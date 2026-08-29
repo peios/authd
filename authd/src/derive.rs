@@ -383,7 +383,11 @@ pub fn mint(minting: Minting<'_>) -> peios::Result<Grant> {
 
     builder
         .primary_group_index(primary_group_index)
-        .token_type(TokenType::Primary, ImpersonationLevel::Anonymous)
+        // The impersonation level is a ratchet on every token: nothing captured
+        // from, conveyed by, or duplicated out of this token can act above it.
+        // A logon token starts at the top; a client lowers it per connection
+        // with KACS_SO_IMPERSONATION_LEVEL. (Kernel TRM §3.5.1)
+        .token_type(TokenType::Primary, ImpersonationLevel::Delegation)
         // Both from local policy, keyed on the SIDs this token ends up
         // carrying. A principal source has no way to influence either and
         // should not: how much this machine trusts someone is not a fact about
