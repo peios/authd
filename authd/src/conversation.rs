@@ -142,7 +142,9 @@ fn run(registry: &Registry, stream: &UnixStream, deadline: Instant) -> io::Resul
         // rather than earlier because everything up to this point -- the
         // timeouts, and establishing who the peer actually is -- is identical
         // and must not be duplicated into a second path that could drift.
-        Ok(Opening::Attest(attest)) => return crate::attest::serve(stream, &peer, &attest),
+        Ok(Opening::Attest(attest)) => {
+            return crate::attest::serve(registry, stream, &peer, &attest);
+        }
         Err(denial) => return deny(stream, denial.0, denial.1),
     };
 
@@ -528,6 +530,34 @@ fn grant(
             "The authority returned an unusable identity.",
         );
     };
+
+    // **Logon type restrictions.** The principal's own record says which kinds
+    // of sign-on it may be used for, and the authority enforces it — a source
+    // states the property and has no business acting on it.
+    //
+    // Checked here, after the credential held, rather than before asking. The
+    // authority does not know which principal it is dealing with until the
+    // source says so, and asking first would cost a lookup on every logon to
+    // answer a question that almost never refuses.
+    //
+    // A source that predates the field says nothing, and nothing means the
+    // authority's default rather than "nothing permitted": everything a person
+    // could use, and never `Service`. So no existing principal changes
+    // behaviour, and none becomes usable for a credential-free service logon
+    // by an upgrade.
+    if !assertion.permitted_logon_types.permits(start.logon_type) {
+        log::warn(format_args!(
+            "refused {:?} logon for {}: the principal permits {:#x}",
+            start.logon_type,
+            assertion.canonical_name,
+            assertion.permitted_logon_types.effective().bits()
+        ));
+        return deny(
+            stream,
+            Denial::AccountRestricted,
+            "That account may not be used for this kind of sign-on.",
+        );
+    }
 
     // **Identity confinement.** A source is authoritative for its own domain and
     // no other, whatever else it is permitted. This is not the same restriction

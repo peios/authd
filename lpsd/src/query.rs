@@ -138,6 +138,13 @@ fn principal_entry(store: &Store, record: &Record, fields: Fields) -> psi::Query
     if fields.contains(Fields::ENABLED) {
         values.push(Value::Enabled(record.enabled));
     }
+    if fields.contains(Fields::LOGON_TYPES) {
+        // Reported as stored, including "not stated". Substituting the default
+        // here would be lpsd answering a question that is the authority's: what
+        // silence means is a policy reading, and a source that pre-empted it
+        // would make two components' defaults able to disagree.
+        values.push(Value::LogonTypes(record.permitted_logon_types));
+    }
     // A principal is not a group, so its membership list is not absent for a
     // reason worth explaining — it is a question that does not apply.
     if fields.contains(Fields::MEMBERS) {

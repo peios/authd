@@ -468,6 +468,7 @@ fn dispatch(
             // last-administrator guard and leave a half-made account behind.
             let rid = store.add(
                 NewPrincipal {
+                    permitted_logon_types: add.permitted_logon_types,
                     enabled: add.enabled,
                     groups,
                     ..NewPrincipal::named(&add.name)

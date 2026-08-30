@@ -765,6 +765,10 @@ fn assert_identity(
                 .collect(),
             // Relative. authd adds the base.
             unix_id: identity.unix_id,
+            // Stated, not enforced. lpsd holds the property because it holds
+            // the principal; deciding what to do about it is the authority's,
+            // which is the same division as every other field here.
+            permitted_logon_types: identity.permitted_logon_types,
             primary_group: identity.primary_group.sid.as_ref().as_bytes().to_vec(),
             profile: libauthd::wire::Profile {
                 home: identity.home.clone(),

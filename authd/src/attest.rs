@@ -58,13 +58,17 @@ use std::os::unix::net::UnixStream;
 
 use libauthd::transport::{send_message, send_message_with_fd};
 use libauthd::wire::{
-    AccessDenied, AccessGranted, Denial, LogonType, Profile, ServiceAttest, encode_access_denied,
+    AccessDenied, AccessGranted, Denial, Profile, ServiceAttest, encode_access_denied,
     encode_access_granted,
 };
 use peios::security::{Sid, SidRef};
 
+use libauthd::ident::{Fields, Key, Kind, Outcome};
+use libauthd::wire::{LogonType, LogonTypes};
+
+use crate::source::Registry;
 use crate::unix_id::Projection;
-use crate::{derive, log, peer, policy, service_sid};
+use crate::{derive, log, peer, policy, resolve, service_sid};
 
 /// The identities the authority mints without consulting any source.
 ///
@@ -91,7 +95,12 @@ pub fn may_attest(peer: &Sid, peer_is_init: bool) -> bool {
 }
 
 /// Serve one `ServiceAttest`, having already established the peer's identity.
-pub fn serve(stream: &UnixStream, peer: &Sid, attest: &ServiceAttest) -> io::Result<()> {
+pub fn serve(
+    registry: &Registry,
+    stream: &UnixStream,
+    peer: &Sid,
+    attest: &ServiceAttest,
+) -> io::Result<()> {
     if !may_attest(peer, peer::is_init(stream)) {
         log::warn(format_args!(
             "refused attestation from {peer}: not the service manager"
@@ -126,15 +135,20 @@ pub fn serve(stream: &UnixStream, peer: &Sid, attest: &ServiceAttest) -> io::Res
         );
     };
 
-    let Some(user) = well_known_identity(&attest.identity) else {
-        // Everything that is not a well-known service identity — a principal
-        // name, a literal SID — needs the principal's own record to say it may
-        // be used for a service logon, and that field does not exist yet. Until
-        // it does, the honest answer is no: accepting a bare name here would
-        // make the service manager an oracle that mints a token for any
-        // principal on the machine with no credential.
+    // The authority's own service identities need no lookup: nothing holds
+    // them, no credential could exist for them, and they are designated by
+    // construction.
+    if let Some(user) = well_known_identity(&attest.identity) {
+        return mint_and_send(stream, user.as_ref(), &[], &service, &attest.service);
+    }
+
+    // Anything else is a principal somebody holds, so it is resolved and its
+    // record consulted. This is the `svc$` path, and the check below is the
+    // only thing standing between the service manager and a credential-free
+    // token for any principal on the machine.
+    let Some(resolved) = resolve_service_principal(registry, &attest.identity) else {
         log::warn(format_args!(
-            "refused attestation of {:?} for service {:?}: not a well-known service identity",
+            "refused attestation of {:?} for service {:?}",
             attest.identity, attest.service
         ));
         return deny(
@@ -144,7 +158,81 @@ pub fn serve(stream: &UnixStream, peer: &Sid, attest: &ServiceAttest) -> io::Res
         );
     };
 
-    mint_and_send(stream, user.as_ref(), &service, &attest.service)
+    mint_and_send(
+        stream,
+        resolved.user.as_ref(),
+        &resolved.groups,
+        &service,
+        &attest.service,
+    )
+}
+
+/// A principal the authority is willing to attest.
+struct Resolved {
+    user: Sid,
+    groups: Vec<Sid>,
+}
+
+/// Resolve a principal and decide whether it may be used for a service logon.
+///
+/// `None` for every refusal, with no distinction between them. "No such
+/// principal" and "not designated for service logon" are one answer here for
+/// the same reason they are one answer on the logon path: the difference is an
+/// account-existence oracle, and it belongs in this authority's log rather than
+/// in a reply. The caller is peinit, which has no business enumerating
+/// principals either way.
+fn resolve_service_principal(registry: &Registry, identity: &str) -> Option<Resolved> {
+    let answer = resolve::lookup(
+        registry,
+        &Key::Name(identity.to_string()),
+        Kind::Principal,
+        Fields::LOGON_TYPES | Fields::GROUPS,
+    );
+    if answer.outcome != Outcome::Found {
+        log::warn(format_args!(
+            "attestation lookup of {identity:?} answered {:?}",
+            answer.outcome
+        ));
+        return None;
+    }
+    let record = answer.record?;
+
+    // A record that does not answer the field is not a record that permits a
+    // service logon. The authority's default is the same one it applies on the
+    // logon path -- everything a person could use, and never Service -- so a
+    // source too old to hold the property refuses here rather than defaulting
+    // its way into the dangerous answer.
+    let permitted = match record.values.iter().find_map(|value| match value {
+        libauthd::ident::Value::LogonTypes(types) => Some(*types),
+        _ => None,
+    }) {
+        Some(types) => types,
+        None => LogonTypes::UNSTATED,
+    };
+    if !permitted.permits(LogonType::Service) {
+        log::warn(format_args!(
+            "{identity:?} is not designated for service logon (permits {:#x})",
+            permitted.effective().bits()
+        ));
+        return None;
+    }
+
+    let user = SidRef::from_bytes(&record.sid)?.to_sid();
+    let groups = record
+        .values
+        .iter()
+        .find_map(|value| match value {
+            libauthd::ident::Value::Groups(refs) => Some(refs),
+            _ => None,
+        })
+        .map(|refs| {
+            refs.iter()
+                .filter_map(|reference| Some(SidRef::from_bytes(&reference.sid)?.to_sid()))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    Some(Resolved { user, groups })
 }
 
 /// Resolve one of the authority's own service identities, or `None`.
@@ -160,6 +248,7 @@ fn well_known_identity(identity: &str) -> Option<Sid> {
 fn mint_and_send(
     stream: &UnixStream,
     user: &SidRef,
+    memberships: &[Sid],
     service: &Sid,
     service_name: &str,
 ) -> io::Result<()> {
@@ -168,7 +257,8 @@ fn mint_and_send(
     // It is what keeps two services running as the same identity
     // distinguishable in an ACL, which is the whole reason a virtual account is
     // usually enough and a real one usually is not.
-    let asserted: Vec<&SidRef> = vec![service.as_ref()];
+    let mut asserted: Vec<&SidRef> = vec![service.as_ref()];
+    asserted.extend(memberships.iter().map(Sid::as_ref));
     let token_groups = derive::token_groups(user, &asserted, LogonType::Service);
     let token_sids: Vec<&SidRef> = token_groups.iter().map(|(sid, _)| sid.as_ref()).collect();
 

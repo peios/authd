@@ -86,6 +86,7 @@ use std::io;
 use std::path::Path;
 
 use libauthd::claim::{self, Claim, Values};
+use libauthd::wire::LogonTypes;
 use peios::security::{Sid, SidRef, WellKnown};
 
 use crate::codec::{self, CodecError, Reader, Writer};
@@ -318,6 +319,15 @@ struct Principal {
     /// credential is asked for, and only ever separates "passwordless" from
     /// everything else — never "exists" from "does not exist".
     verifier: Option<Verifier>,
+    /// Which kinds of sign-on this principal may be used for.
+    ///
+    /// [`LogonTypes::UNSTATED`] on every principal written before the field
+    /// existed, and on every one created without saying otherwise. The
+    /// authority reads that as its default, which permits everything a person
+    /// could use and never `Service` — so an existing account does not become
+    /// usable as a service identity by an upgrade, which is the whole reason
+    /// the default is not "everything".
+    permitted_logon_types: LogonTypes,
     /// Groups lpsd says this principal belongs to.
     ///
     /// SIDs only. Whether a group is enabled, owner-marked or deny-only is a
@@ -450,6 +460,7 @@ pub struct Record {
     pub rid: u32,
     pub unix_id: u32,
     pub enabled: bool,
+    pub permitted_logon_types: LogonTypes,
     pub sid: Sid,
     pub groups: Vec<GroupRef>,
     pub primary_group: GroupRef,
@@ -470,6 +481,9 @@ pub struct Identity {
     pub name: String,
     pub sid: Sid,
     pub unix_id: u32,
+    /// Asserted to the authority, which enforces it. A source states the
+    /// property; deciding what to do about it is not a source's business.
+    pub permitted_logon_types: LogonTypes,
     pub groups: Vec<GroupRef>,
     pub primary_group: GroupRef,
     pub home: String,
@@ -530,6 +544,15 @@ pub struct NewPrincipal {
     /// `None` takes [`DEFAULT_SHELL`].
     pub shell: Option<String>,
     pub display_name: Option<String>,
+    /// Which kinds of sign-on this principal may be used for.
+    ///
+    /// [`LogonTypes::UNSTATED`] by default, which the authority reads as
+    /// everything a person could use and never `Service`. A principal that
+    /// exists to run a service is created with
+    /// [`LogonTypes::SERVICE_ONLY`], and that has to be asked for: a
+    /// credential-free service logon is not something an account should
+    /// acquire by omission.
+    pub permitted_logon_types: LogonTypes,
 }
 
 impl NewPrincipal {
@@ -543,6 +566,9 @@ impl NewPrincipal {
             home: None,
             shell: None,
             display_name: None,
+            // Nothing stated, which the authority reads as its default. A
+            // service principal is made by asking for one, never by default.
+            permitted_logon_types: LogonTypes::UNSTATED,
         }
     }
 }
@@ -693,6 +719,7 @@ impl Store {
             rid: principal.rid,
             unix_id: principal.unix_id,
             enabled: principal.enabled,
+            permitted_logon_types: principal.permitted_logon_types,
             sid: self.sid_of(principal.rid)?,
             groups: principal
                 .groups
@@ -1035,6 +1062,7 @@ impl Store {
             shell,
             display_name,
             claims: Vec::new(),
+            permitted_logon_types: new.permitted_logon_types,
         });
         Ok(rid)
     }
@@ -1338,6 +1366,7 @@ impl Store {
             name: principal.name.clone(),
             sid: self.sid_of(principal.rid).ok()?,
             unix_id: principal.unix_id,
+            permitted_logon_types: principal.permitted_logon_types,
             groups: principal
                 .groups
                 .iter()
@@ -1443,6 +1472,12 @@ impl Store {
                 encode_claim(&mut inner, claim);
                 w.bytes(&inner.finish());
             }
+
+            // Format version 4. A principal record carries no length frame of
+            // its own, so this could not simply be appended and read
+            // opportunistically -- a decoder that guessed wrong would consume
+            // the next principal's rid. The version gate is what makes it safe.
+            w.u32(principal.permitted_logon_types.bits());
         }
         w.finish()
     }
@@ -1466,6 +1501,7 @@ impl Store {
         // nothing. Access is decided by the SID, and the SID is untouched.
         let has_groups = version >= 2;
         let has_profile = version >= 2;
+        let has_logon_types = version >= 4;
         let upgraded = version < codec::VERSION;
 
         // Version 2's Unix ID counter. Read and discarded: version 3 allocates
@@ -1589,6 +1625,16 @@ impl Store {
                 (primary, home, shell, display_name, claims)
             };
 
+            // Absent before version 4, and absent means "not stated" rather
+            // than "nothing permitted" -- an upgrade must not lock every
+            // existing principal out. The authority substitutes its default,
+            // which is everything a person could use and never Service.
+            let permitted_logon_types = if has_logon_types {
+                LogonTypes(r.u32()?)
+            } else {
+                LogonTypes::UNSTATED
+            };
+
             principals.push(Principal {
                 rid,
                 unix_id,
@@ -1601,6 +1647,7 @@ impl Store {
                 shell,
                 display_name,
                 claims,
+                permitted_logon_types,
             });
         }
 
@@ -2091,6 +2138,63 @@ mod tests {
 
         assert!(needs_a_password(&store, "kiosk"));
         assert!(store.authenticate(b"kiosk", b"pw").is_some());
+    }
+
+    /// A service principal's designation survives the codec. If it did not, the
+    /// account would come back permitting everything a person could use and
+    /// nothing else — refusing the service it exists to run, and admitting an
+    /// interactive sign-on it should never allow.
+    #[test]
+    fn permitted_logon_types_round_trip_through_the_codec() {
+        use libauthd::wire::LogonType;
+        let mut store = Store::provision().expect("must provision");
+        store
+            .add(
+                NewPrincipal {
+                    permitted_logon_types: LogonTypes::SERVICE_ONLY,
+                    ..NewPrincipal::named("svc$jellyfin")
+                },
+                None,
+            )
+            .expect("must add");
+        store.add(new("jack", vec![]), Some(b"password")).expect("must add");
+
+        let body = store.encode();
+        let back = Store::decode(codec::VERSION, &body).expect("must decode");
+
+        let service = back.record("svc$jellyfin").expect("must be there");
+        assert_eq!(service.permitted_logon_types, LogonTypes::SERVICE_ONLY);
+        assert!(service.permitted_logon_types.permits(LogonType::Service));
+        assert!(!service.permitted_logon_types.permits(LogonType::Interactive));
+
+        // An ordinary principal states nothing, and nothing is read as the
+        // authority's default rather than as "everything".
+        let ordinary = back.record("jack").expect("must be there");
+        assert!(ordinary.permitted_logon_types.is_unstated());
+        assert!(ordinary.permitted_logon_types.permits(LogonType::Interactive));
+        assert!(!ordinary.permitted_logon_types.permits(LogonType::Service));
+    }
+
+    /// A store written before the field existed must not come back with every
+    /// principal locked out — and must not come back with every principal
+    /// usable as a service identity either.
+    #[test]
+    fn a_store_from_before_the_field_reads_as_unstated() {
+        use libauthd::wire::LogonType;
+        let mut store = Store::provision().expect("must provision");
+        store.add(new("jack", vec![]), Some(b"password")).expect("must add");
+        let body = store.encode();
+
+        // Version 3 is the last layout without the field. Its body is this
+        // one minus the trailing u32 per principal, which `decode` must not
+        // look for.
+        let older = &body[..body.len() - 4];
+        let back = Store::decode(3, older).expect("a version 3 store must still read");
+
+        let jack = back.record("jack").expect("must be there");
+        assert!(jack.permitted_logon_types.is_unstated());
+        assert!(jack.permitted_logon_types.permits(LogonType::Interactive));
+        assert!(!jack.permitted_logon_types.permits(LogonType::Service));
     }
 
     /// The empty verifier frame survives a write and a read. If it did not, a

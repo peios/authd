@@ -209,13 +209,16 @@ impl Fields {
     pub const MEMBERS: Fields = Fields(1 << 6);
     pub const CLAIMS: Fields = Fields(1 << 7);
     pub const ENABLED: Fields = Fields(1 << 8);
+    /// Which kinds of sign-on this principal may be used for. See
+    /// [`LogonTypes`](crate::wire::LogonTypes).
+    pub const LOGON_TYPES: Fields = Fields(1 << 9);
 
     /// Everything this build implements.
     ///
     /// A peer may set bits outside this; they are ignored rather than refused,
     /// which is the exception to the closed-enum rule that the module docs set
     /// out.
-    pub const KNOWN: Fields = Fields(0x01ff);
+    pub const KNOWN: Fields = Fields(0x03ff);
 
     /// What a `passwd` record needs, in one request.
     pub const PASSWD: Fields = Fields(
@@ -300,6 +303,7 @@ pub enum Value {
     Members(Vec<Reference>),
     Claims(Vec<Claim>),
     Enabled(bool),
+    LogonTypes(crate::wire::LogonTypes),
 }
 
 impl Value {
@@ -315,6 +319,7 @@ impl Value {
             Self::Members(_) => Fields::MEMBERS,
             Self::Claims(_) => Fields::CLAIMS,
             Self::Enabled(_) => Fields::ENABLED,
+            Self::LogonTypes(_) => Fields::LOGON_TYPES,
         }
     }
 }
@@ -539,6 +544,7 @@ fn write_value(w: &mut Writer, value: &Value) -> Result<(), WireError> {
         Value::Members(refs) => write_references(w, refs, MAX_MEMBERS)?,
         Value::Claims(claims) => crate::claim::write_claims(w, claims)?,
         Value::Enabled(enabled) => w.u8(u8::from(*enabled)),
+        Value::LogonTypes(types) => w.u32(types.bits()),
     }
     w.close(at);
     Ok(())
@@ -556,6 +562,7 @@ fn read_value(r: &mut Reader<'_>, field: Fields) -> Result<Option<Value>, WireEr
         Fields::MEMBERS => Value::Members(read_references(&mut b, MAX_MEMBERS)?),
         Fields::CLAIMS => Value::Claims(crate::claim::read_claims(&mut b)?),
         Fields::ENABLED => Value::Enabled(b.u8()? != 0),
+        Fields::LOGON_TYPES => Value::LogonTypes(crate::wire::LogonTypes(b.u32()?)),
         // A bit this build does not implement. Its value was length-framed, so
         // `open` has already stepped over it and the fields after it are intact.
         _ => return Ok(None),
@@ -1096,9 +1103,10 @@ mod tests {
     #[test]
     fn field_bits_iterate_in_ascending_order() {
         let bits: Vec<u32> = Fields::KNOWN.iter().map(|f| f.0).collect();
-        assert_eq!(bits.len(), 9);
+        assert_eq!(bits.len(), 10);
         assert!(bits.windows(2).all(|w| w[0] < w[1]));
         assert_eq!(bits[0], Fields::UNIX_ID.0);
+        assert_eq!(*bits.last().unwrap(), Fields::LOGON_TYPES.0);
     }
 
     #[test]
