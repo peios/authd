@@ -50,6 +50,7 @@ use libauthd::wire::{
 use peios::security::{Sid, SidRef};
 
 use crate::derive;
+use crate::home;
 use crate::log;
 use crate::peer;
 use crate::policy;
@@ -784,6 +785,18 @@ fn grant(
         ));
         profile.shell.clear();
     }
+
+    // The home directory, if the profile names one and it is absent.
+    //
+    // After minting and after the absolute-path correction above, so
+    // that a relative home has already been cleared and cannot reach
+    // the filesystem; before the grant is sent, so the directory is
+    // there by the time `login` chdirs into it. `login` cannot create it
+    // itself — it has assumed the principal's token by then, and /home
+    // grants Everyone traverse but not create.
+    //
+    // Never fatal: a logon is not worth failing over a directory.
+    home::ensure(user, &profile.home);
 
     let message = encode_access_granted(&AccessGranted {
         session_id: granted.session.0,

@@ -575,12 +575,19 @@ fn current_tty() -> Option<String> {
 /// fallback here rather than being required. An authority that says nothing
 /// produces exactly the session this did before the profile existed.
 ///
-/// **The home directory is not created, and a missing one is not fatal.** The
-/// `chdir` is attempted and its failure reported; the user still gets a shell,
-/// in `/`. A login that refused to proceed because a directory was absent would
-/// turn a cosmetic problem into being locked out, and creating it here would put
-/// directory provisioning inside the one program that must keep working when
-/// everything else is broken.
+/// **The home directory is not created here, and a missing one is not fatal.**
+/// The `chdir` is attempted and its failure reported; the user still gets a
+/// shell, in `/`. A login that refused to proceed because a directory was
+/// absent would turn a cosmetic problem into being locked out, and creating it
+/// here would put directory provisioning inside the one program that must keep
+/// working when everything else is broken.
+///
+/// The authority creates it instead, at logon, when the profile names one
+/// (authd's `home` module). It has to: by the time this runs, `login` has
+/// already made the principal's token its own, and `/home` grants Everyone
+/// traverse but not create. The fallback below therefore now means "the
+/// authority said nothing, or could not provision it" rather than "nothing on
+/// this system ever will".
 fn exec_shell(
     username: &str,
     profile: &Profile,

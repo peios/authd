@@ -62,6 +62,7 @@ mod attest;
 mod conversation;
 mod derive;
 mod domain;
+mod home;
 mod ident;
 mod log;
 mod peer;
