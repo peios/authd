@@ -19,9 +19,21 @@
 # system, so an image that wants an authority without that reach must be able to
 # say so by not installing a package.
 
+# -11: drop the temporary BUILTIN\Administrators membership from every
+# attested service token (PEI-547). It existed only because a service could
+# reach no part of the filesystem: one inheritable ACL granted SYSTEM and
+# Administrators alone, and propagated through KACS's missing-SD synthesis into
+# the whole tree (PEI-546). With the root and phase-1 descriptors now granting
+# Everyone read and execute, a service reaches what it needs as itself. The
+# revert is the point: privileges union across a token's SIDs, so that ACE was
+# not granting filesystem access but the entire Administrators policy record --
+# SeLoadDriverPrivilege, SeRestorePrivilege, SeManageVolumePrivilege,
+# SeSecurityPrivilege and High integrity, on a DNS parser reading from a
+# network socket, invisibly, because svctl reports the declared identity.
+
 format = "peipkg"
 
 [package]
-version      = "{{version}}-10"
+version      = "{{version}}-11"
 architecture = "x86_64"
 license      = "MIT"

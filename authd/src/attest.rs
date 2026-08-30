@@ -139,13 +139,7 @@ pub fn serve(
     // them, no credential could exist for them, and they are designated by
     // construction.
     if let Some(user) = well_known_identity(&attest.identity) {
-        return mint_and_send(
-            stream,
-            user.as_ref(),
-            &temporary_administrator_membership(),
-            &service,
-            &attest.service,
-        );
+        return mint_and_send(stream, user.as_ref(), &[], &service, &attest.service);
     }
 
     // Anything else is a principal somebody holds, so it is resolved and its
@@ -239,37 +233,6 @@ fn resolve_service_principal(registry: &Registry, identity: &str) -> Option<Reso
         .unwrap_or_default();
 
     Some(Resolved { user, groups })
-}
-
-/// **TEMPORARY — DELETE THIS.** `BUILTIN\\Administrators`, on every service
-/// token, so that a service can reach the filesystem at all.
-///
-/// # Why this exists
-///
-/// seed-sd stamps one inheritable ACL on the root and every descendant, and it
-/// grants exactly SYSTEM and `BUILTIN\Administrators` (PEI-546). A service
-/// running as `LocalService` can therefore traverse nothing: it fails
-/// `chdir("/")` with `EACCES` in pre-exec, before it runs, and could not read
-/// its own image to exec it either. Every principal that has ever existed on a
-/// Peios image is SYSTEM or an administrator, so nothing had hit this until
-/// service identity became real.
-///
-/// # What it costs, stated plainly
-///
-/// Privileges union across every SID on a token, so this does not grant
-/// filesystem access — it grants the whole `Administrators` policy record.
-/// Every service now holds `SeLoadDriverPrivilege`, `SeRestorePrivilege`,
-/// `SeManageVolumePrivilege` and `SeSecurityPrivilege`, and runs at High
-/// integrity. On `resolvd` — a DNS parser reading from a network socket — that
-/// is a worse position than the design this milestone exists to establish, and
-/// it is invisible from outside because `svctl` reports the declared identity.
-///
-/// This is deliberate and it is scaffolding. It unblocks work that cannot
-/// proceed without a bootable non-SYSTEM service while the real answer —
-/// per-subtree SD materialisation at image finalisation, or a narrow
-/// `S-1-5-6` ACE in the seed template — is built. **It must not ship.**
-fn temporary_administrator_membership() -> Vec<Sid> {
-    Sid::build(5, &[32, 544]).map(|sid| vec![sid]).unwrap_or_default()
 }
 
 /// Resolve one of the authority's own service identities, or `None`.
