@@ -45,7 +45,7 @@ pub const MAGIC: [u8; 8] = *b"PEIOSLPS";
 /// store can be upgraded in place rather than refused, which on a machine whose
 /// only administrator lives in that file is the difference between an upgrade
 /// and a brick.
-pub const VERSION: u16 = 3;
+pub const VERSION: u16 = 4;
 
 /// The oldest body layout this lpsd can still read.
 pub const OLDEST_READABLE_VERSION: u16 = 1;

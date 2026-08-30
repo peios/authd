@@ -78,7 +78,8 @@ use crate::frame::{self, Framing, Writer};
 use crate::ident::{Fields, Kind, Outcome, Value, Withheld};
 use crate::secret::Secret;
 use crate::wire::{
-    CredentialRequest, CredentialResponse, Denial, LogonStart, Profile, MAX_REASON_BYTES, WireError,
+    CredentialRequest, CredentialResponse, Denial, LogonStart, LogonTypes, Profile,
+    MAX_REASON_BYTES, WireError,
 };
 
 /// Four literal bytes opening every message: **P**eios **P**rincipal **S**ource
@@ -341,6 +342,12 @@ pub struct Assertion {
     /// grant. Which claim names a source may assert is the same shape of
     /// question as which groups it may assert, and belongs with that control.
     pub claims: Vec<Claim>,
+    /// Which kinds of sign-on this principal may be used for.
+    ///
+    /// [`LogonTypes::UNSTATED`] where the source does not hold the property,
+    /// which every source predating this field sends and which the authority
+    /// reads as its own default. See [`LogonTypes`].
+    pub permitted_logon_types: LogonTypes,
 }
 
 /// The source declining. Source to authd.
@@ -734,6 +741,7 @@ pub fn encode_assertion(conversation: u64, assertion: &Assertion) -> Result<Vec<
     w.close(nested);
 
     crate::claim::write_claims(&mut w, &assertion.claims)?;
+    w.u32(assertion.permitted_logon_types.bits());
 
     w.close(body);
     w.finish()
@@ -774,6 +782,11 @@ pub fn decode_assertion(buf: &[u8]) -> Result<Assertion, WireError> {
     } else {
         crate::claim::read_claims(&mut b)?
     };
+    let permitted_logon_types = if b.at_end() {
+        LogonTypes::UNSTATED
+    } else {
+        LogonTypes(b.u32()?)
+    };
 
     Ok(Assertion {
         user_sid,
@@ -783,6 +796,7 @@ pub fn decode_assertion(buf: &[u8]) -> Result<Assertion, WireError> {
         primary_group,
         profile,
         claims,
+        permitted_logon_types,
     })
 }
 
@@ -1235,6 +1249,7 @@ mod tests {
 
     fn assertion() -> Assertion {
         Assertion {
+            permitted_logon_types: LogonTypes::UNSTATED,
             user_sid: vec![1, 1, 0, 0, 0, 0, 0, 5, 18, 0, 0, 0],
             canonical_name: "jack".into(),
             groups: vec![

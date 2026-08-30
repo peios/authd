@@ -111,6 +111,78 @@ pub enum LogonType {
     NewCredentials = 9,
 }
 
+/// Which kinds of sign-on a principal may be used for. PGSS Logon §2.16.
+///
+/// A bitmask indexed by [`LogonType`]'s own values, so bit 5 is `Service`. A
+/// property of the principal, asserted by whoever holds it, and checked by the
+/// authority before it mints.
+///
+/// # Why this is on the principal rather than in local policy
+///
+/// It has to travel with the principal. As a machine-local setting, a
+/// directory-defined service account would need re-declaring on every machine
+/// that ran it, and the machine that forgot would be the one that let it sign
+/// in interactively. It is the same kind of statement as "this account is
+/// disabled", and lives in the same place.
+///
+/// A machine keeps the complementary power: local policy may *narrow* what a
+/// record permits, and never widen it. The record grants; policy restricts.
+///
+/// # Zero means "not stated"
+///
+/// A source that predates this field sends zero, and an authority reads that as
+/// its own default rather than as "nothing permitted" — otherwise adding the
+/// field would lock every principal on every existing system out at once.
+///
+/// The default an authority applies MUST NOT include `Service`. A principal
+/// that has never said anything about how it may be used has certainly not
+/// said it may be used for a credential-free service logon (§2.19).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct LogonTypes(pub u32);
+
+impl LogonTypes {
+    /// Nothing stated. See the type documentation.
+    pub const UNSTATED: LogonTypes = LogonTypes(0);
+
+    /// What an authority applies when a principal states nothing: every logon
+    /// type a person could use, and never `Service`.
+    pub const DEFAULT: LogonTypes = LogonTypes(
+        (1 << LogonType::Interactive as u32)
+            | (1 << LogonType::Network as u32)
+            | (1 << LogonType::Batch as u32)
+            | (1 << LogonType::NetworkCleartext as u32)
+            | (1 << LogonType::NewCredentials as u32),
+    );
+
+    /// Exactly one logon type, for a principal that exists to run a service.
+    pub const SERVICE_ONLY: LogonTypes = LogonTypes(1 << LogonType::Service as u32);
+
+    pub const fn bits(self) -> u32 {
+        self.0
+    }
+
+    /// Whether anything was stated at all.
+    pub const fn is_unstated(self) -> bool {
+        self.0 == 0
+    }
+
+    /// The set to apply, substituting the default where nothing was stated.
+    pub const fn effective(self) -> LogonTypes {
+        if self.is_unstated() { Self::DEFAULT } else { self }
+    }
+
+    /// Whether this set permits `logon_type`. Answers against the *effective*
+    /// set, so a caller cannot forget to substitute the default.
+    pub const fn permits(self, logon_type: LogonType) -> bool {
+        self.effective().0 & (1 << logon_type as u32) != 0
+    }
+
+    /// Add a logon type.
+    pub const fn with(self, logon_type: LogonType) -> LogonTypes {
+        LogonTypes(self.0 | (1 << logon_type as u32))
+    }
+}
+
 impl LogonType {
     pub fn from_u8(value: u8) -> Option<Self> {
         Some(match value {
@@ -734,6 +806,41 @@ mod tests {
                 credential_name: "Password".into(),
             }],
         }
+    }
+
+    /// The property that makes "a service cannot run as an ordinary principal"
+    /// true by data rather than by a special case in the authority.
+    #[test]
+    fn the_default_permits_everything_except_service() {
+        let unstated = LogonTypes::UNSTATED;
+        assert!(unstated.is_unstated());
+        assert!(unstated.permits(LogonType::Interactive));
+        assert!(unstated.permits(LogonType::Network));
+        assert!(unstated.permits(LogonType::Batch));
+        assert!(!unstated.permits(LogonType::Service));
+    }
+
+    /// A source that predates the field must not lock every principal out.
+    #[test]
+    fn unstated_is_the_default_rather_than_nothing() {
+        assert_eq!(LogonTypes::UNSTATED.effective(), LogonTypes::DEFAULT);
+        assert_ne!(LogonTypes::DEFAULT.bits(), 0);
+    }
+
+    #[test]
+    fn a_service_principal_permits_only_service() {
+        let only = LogonTypes::SERVICE_ONLY;
+        assert!(only.permits(LogonType::Service));
+        assert!(!only.permits(LogonType::Interactive));
+        assert!(!only.permits(LogonType::Network));
+        assert!(!only.permits(LogonType::Batch));
+    }
+
+    #[test]
+    fn stating_a_set_replaces_the_default_rather_than_adding_to_it() {
+        let stated = LogonTypes::UNSTATED.with(LogonType::Network);
+        assert!(stated.permits(LogonType::Network));
+        assert!(!stated.permits(LogonType::Interactive));
     }
 
     #[test]

@@ -48,6 +48,7 @@
 use crate::claim::Claim;
 use crate::frame::{self, Framing, Reader, WireError, Writer};
 use crate::secret::Secret;
+pub use crate::wire::LogonTypes;
 
 pub const MAGIC: [u8; 4] = *b"PLPS";
 pub const VERSION: u16 = 1;
@@ -357,6 +358,13 @@ pub struct Add<'a> {
     /// Groups as the operator wrote them, resolved by the daemon — see
     /// [`Membership::group`].
     pub groups: Vec<String>,
+    /// Which kinds of sign-on this principal may be used for.
+    ///
+    /// [`LogonTypes::UNSTATED`] from any client predating the field, which the
+    /// authority reads as its default — everything a person could use, and
+    /// never `Service`. So an old `lps` cannot create a service principal by
+    /// accident, which is the property worth having here.
+    pub permitted_logon_types: LogonTypes,
 }
 
 /// Reset a principal's password. Borrows, for the same reason as [`Add`].
@@ -506,6 +514,7 @@ pub fn encode_add(add: &Add<'_>) -> Result<Secret, WireError> {
         w.string(group, MAX_NAME_BYTES)?;
         w.close(at);
     }
+    w.u32(add.permitted_logon_types.bits());
     w.close(body);
 
     let encoded = w.finish()?;
@@ -527,11 +536,19 @@ pub fn decode_add(buf: &[u8]) -> Result<Add<'_>, WireError> {
         // exchange rather than defaulting to either answer.
         _ => return Err(WireError::UnknownValue),
     };
+    let enabled = b.u8()? != 0;
+    let groups = b.array(MAX_GROUPS, |g| Ok(g.string(MAX_NAME_BYTES)?.to_owned()))?;
+    let permitted_logon_types = if b.at_end() {
+        LogonTypes::UNSTATED
+    } else {
+        LogonTypes(b.u32()?)
+    };
     Ok(Add {
         name,
         credential,
-        enabled: b.u8()? != 0,
-        groups: b.array(MAX_GROUPS, |g| Ok(g.string(MAX_NAME_BYTES)?.to_owned()))?,
+        enabled,
+        groups,
+        permitted_logon_types,
     })
 }
 
@@ -980,6 +997,7 @@ mod tests {
     #[test]
     fn add_round_trips() {
         let add = Add {
+            permitted_logon_types: LogonTypes::UNSTATED,
             name: "jack".into(),
             credential: Credential::Password(b"hunter2"),
             enabled: true,
@@ -996,6 +1014,7 @@ mod tests {
     #[test]
     fn add_with_no_groups_round_trips() {
         let add = Add {
+            permitted_logon_types: LogonTypes::UNSTATED,
             name: "guest".into(),
             credential: Credential::None,
             enabled: false,
@@ -1015,6 +1034,7 @@ mod tests {
     #[test]
     fn an_unknown_credential_kind_is_refused() {
         let encoded = encode_add(&Add {
+            permitted_logon_types: LogonTypes::UNSTATED,
             name: "jack".into(),
             credential: Credential::Password(b"pw"),
             enabled: true,
@@ -1043,6 +1063,7 @@ mod tests {
     #[test]
     fn no_credential_and_an_empty_password_are_distinguishable() {
         let none = encode_add(&Add {
+            permitted_logon_types: LogonTypes::UNSTATED,
             name: "jack".into(),
             credential: Credential::None,
             enabled: true,
@@ -1050,6 +1071,7 @@ mod tests {
         })
         .unwrap();
         let empty = encode_add(&Add {
+            permitted_logon_types: LogonTypes::UNSTATED,
             name: "jack".into(),
             credential: Credential::Password(b""),
             enabled: true,
@@ -1397,6 +1419,7 @@ mod tests {
         let long = vec![b'x'; MAX_SECRET_BYTES + 1];
         assert_eq!(
             encode_add(&Add {
+                permitted_logon_types: LogonTypes::UNSTATED,
                 name: "jack".into(),
                 credential: Credential::Password(&long),
                 enabled: true,
@@ -1411,6 +1434,7 @@ mod tests {
     fn too_many_groups_are_rejected() {
         assert_eq!(
             encode_add(&Add {
+                permitted_logon_types: LogonTypes::UNSTATED,
                 name: "jack".into(),
                 credential: Credential::Password(b"pw"),
                 enabled: true,

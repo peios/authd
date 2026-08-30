@@ -44,6 +44,13 @@ struct Requested {
     no_prompt: bool,
     /// Create a principal that authenticates without a credential.
     no_password: bool,
+    /// Create a principal that exists to run a service, and can do nothing
+    /// else.
+    ///
+    /// Off unless asked for. A credential-free service logon is not something
+    /// an account should acquire by omission, so there is no way to reach it
+    /// except by naming it.
+    service: bool,
 }
 
 /// `lps add`.
@@ -123,6 +130,11 @@ pub fn add(options: &[&str]) -> Result<(), Failed> {
         },
         enabled: requested.enabled,
         groups: requested.groups.clone(),
+        permitted_logon_types: if requested.service {
+            lps::LogonTypes::SERVICE_ONLY
+        } else {
+            lps::LogonTypes::UNSTATED
+        },
     })
     .map_err(|error| Failed::Refused(format!("could not encode the request: {error:?}")))?;
 
@@ -187,6 +199,10 @@ fn parse(options: &[&str]) -> Result<Requested, Failed> {
             "--no-prompt" => {
                 requested.no_prompt = true;
                 rest = tail;
+                continue;
+            }
+            "--service" => {
+                requested.service = true;
                 continue;
             }
             "--no-password" => {
