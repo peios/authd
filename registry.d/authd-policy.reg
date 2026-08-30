@@ -83,8 +83,6 @@
     "  SeAuditPrivilege             Emits KMES events. Wants an audit policy",
     "                               decision first.",
     "  SeLockMemoryPrivilege        Rarely needed and a denial-of-service lever.",
-    "  SeBindPrivilegedPortPrivilege  Belongs on the service that needs it, not",
-    "                               on every administrator.",
     "",
     "-- Locking down ----------------------------------------------------------",
     "",
