@@ -31,9 +31,18 @@
 # SeSecurityPrivilege and High integrity, on a DNS parser reading from a
 # network socket, invisibly, because svctl reports the declared identity.
 
+# -12: authd creates a principal's home directory at logon when the profile
+# names one and it is absent (PEI-560). Nothing did before -- lpsd records the
+# path and creates nothing, login treats a missing home as non-fatal and starts
+# the session in / -- so every account but the seeded administrator logged in
+# with nowhere to write. It cannot live in login, which has already assumed the
+# principal's token by the time it chdirs, and /home now grants Everyone
+# traverse but not create (fsbase 1.0.0-8). It self-scopes to human accounts:
+# a service identity is minted with Profile::default(), whose home is empty.
+
 format = "peipkg"
 
 [package]
-version      = "{{version}}-11"
+version      = "{{version}}-12"
 architecture = "x86_64"
 license      = "MIT"
