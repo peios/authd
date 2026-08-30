@@ -58,6 +58,7 @@
 //! real is routing — [`source::Registry::route`] ignores the identifier, so
 //! more than one configured source sends every logon to the first (PEI-304).
 
+mod attest;
 mod conversation;
 mod derive;
 mod domain;

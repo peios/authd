@@ -43,8 +43,9 @@ use std::time::{Duration, Instant};
 use libauthd::transport::{recv_message, send_message, send_message_with_fd};
 use libauthd::wire::{
     self, AccessDenied, AccessGranted, CredentialRequest, CredentialResponse, Denial, LogonStart,
-    LogonType, MSG_CREDENTIAL_RESPONSE, MSG_LOGON_START, decode_credential_response, decode_header,
-    decode_logon_start, encode_access_denied, encode_access_granted, encode_credential_request,
+    LogonType, MSG_CREDENTIAL_RESPONSE, MSG_LOGON_START, MSG_SERVICE_ATTEST, ServiceAttest,
+    decode_credential_response, decode_header, decode_logon_start, decode_service_attest,
+    encode_access_denied, encode_access_granted, encode_credential_request,
 };
 use peios::security::{Sid, SidRef};
 
@@ -134,8 +135,14 @@ fn run(registry: &Registry, stream: &UnixStream, deadline: Instant) -> io::Resul
         }
     };
 
-    let start = match read_logon_start(stream) {
-        Ok(start) => start,
+    let start = match read_opening(stream) {
+        Ok(Opening::Logon(start)) => start,
+        // A service attestation is not a conversation: it carries no
+        // credential, so none of the relay below applies to it. Dispatched here
+        // rather than earlier because everything up to this point -- the
+        // timeouts, and establishing who the peer actually is -- is identical
+        // and must not be duplicated into a second path that could drift.
+        Ok(Opening::Attest(attest)) => return crate::attest::serve(stream, &peer, &attest),
         Err(denial) => return deny(stream, denial.0, denial.1),
     };
 
@@ -706,6 +713,9 @@ fn grant(
         logon_type: start.logon_type,
         auth_package: source_name,
         policy: outcome.clone(),
+        // A source checked a credential, which is evidence that does not stop
+        // at this machine's edge.
+        evidence: derive::Evidence::Verified,
     }) {
         Ok(granted) => granted,
         Err(error) => {
@@ -787,8 +797,16 @@ fn deny(stream: &UnixStream, denial: Denial, reason: &str) -> io::Result<()> {
     send_message(stream, &message)
 }
 
+/// What a client opened with.
+enum Opening {
+    /// A logon conversation, which will exchange credentials.
+    Logon(LogonStart),
+    /// A service attestation, which will not. See [`crate::attest`].
+    Attest(ServiceAttest),
+}
+
 /// Read and validate the opening message.
-fn read_logon_start(stream: &UnixStream) -> Result<LogonStart, (Denial, &'static str)> {
+fn read_opening(stream: &UnixStream) -> Result<Opening, (Denial, &'static str)> {
     let received = recv_message(&wire::FRAMING, stream).map_err(|error| {
         // A client slow to send LogonStart was told its message was malformed,
         // which is both wrong and unactionable. A timeout is a policy limit.
@@ -817,15 +835,18 @@ fn read_logon_start(stream: &UnixStream) -> Result<LogonStart, (Denial, &'static
         ),
         _ => (Denial::MalformedRequest, "Malformed message header."),
     })?;
-    if msg_type != MSG_LOGON_START {
-        return Err((
+    match msg_type {
+        MSG_LOGON_START => decode_logon_start(received.expose())
+            .map(Opening::Logon)
+            .map_err(|_| (Denial::MalformedRequest, "Malformed LogonStart.")),
+        MSG_SERVICE_ATTEST => decode_service_attest(received.expose())
+            .map(Opening::Attest)
+            .map_err(|_| (Denial::MalformedRequest, "Malformed ServiceAttest.")),
+        _ => Err((
             Denial::MalformedRequest,
-            "A conversation must open with LogonStart.",
-        ));
+            "A connection must open with LogonStart or ServiceAttest.",
+        )),
     }
-
-    decode_logon_start(received.expose())
-        .map_err(|_| (Denial::MalformedRequest, "Malformed LogonStart."))
 }
 
 /// Whether a principal may originate logons at all.

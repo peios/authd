@@ -9,7 +9,7 @@
 //! most dangerous thing any peer can do to this process.
 
 use std::fmt;
-use std::os::fd::AsFd;
+use std::os::fd::{AsFd, AsRawFd};
 use std::os::unix::net::UnixStream;
 
 use peios::security::{Sid, WellKnown};
@@ -30,6 +30,52 @@ pub fn identity(stream: &UnixStream) -> peios::Result<Sid> {
 /// Whether a principal is the local SYSTEM account.
 pub fn is_system(peer: &Sid) -> bool {
     *peer == Sid::well_known(WellKnown::System)
+}
+
+/// Whether the connected peer is PID 1.
+///
+/// This reads `SO_PEERCRED`, which the module comment above forbids — and the
+/// prohibition stands. That rule is about the **uid** field, which is a
+/// projection and cannot answer "who is this"; this reads the **pid** field,
+/// which answers a different question and is never used as an identity claim.
+/// It is layered on top of [`identity`], never instead of it: the caller has
+/// already established *what principal* the peer is, and this narrows "some
+/// process running as SYSTEM" — which is every platform daemon on the box — to
+/// the one process that launches services.
+///
+/// # Why a PID check is sound here and nowhere else
+///
+/// PID checks are normally unsound because a PID is recycled and because the
+/// process can be gone by the time you look. Neither applies:
+///
+/// - The kernel captures these credentials at `connect()`. They name the
+///   process that actually connected, not whoever holds that PID afterwards.
+/// - PID 1 cannot exit and be replaced. If it dies the kernel panics, so for
+///   the life of a boot there is exactly one process this can be true of.
+///
+/// **Do not generalise this to any other PID**, where recycling makes the same
+/// check meaningless.
+///
+/// Fails closed: a `getsockopt` that does not answer is not PID 1.
+pub fn is_init(stream: &UnixStream) -> bool {
+    let mut cred = libc::ucred {
+        pid: 0,
+        uid: 0,
+        gid: 0,
+    };
+    let mut len = core::mem::size_of::<libc::ucred>() as libc::socklen_t;
+    // SAFETY: `stream` is live for the call; `cred` and `len` are a correctly
+    // sized output buffer for SO_PEERCRED.
+    let rc = unsafe {
+        libc::getsockopt(
+            stream.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_PEERCRED,
+            (&mut cred as *mut libc::ucred).cast(),
+            &mut len,
+        )
+    };
+    rc == 0 && len as usize == core::mem::size_of::<libc::ucred>() && cred.pid == 1
 }
 
 /// Why a connection could not be matched to a configured principal source.
