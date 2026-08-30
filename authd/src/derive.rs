@@ -221,6 +221,40 @@ pub fn token_groups(
     groups
 }
 
+/// How strong the evidence behind a logon is.
+///
+/// This fixes the impersonation level of the token, and through the ratchet the
+/// ceiling on everything derived from it. The rule is that **the level tracks
+/// the strength of the evidence**, rather than every logon starting at the top:
+///
+/// - A credential a principal source verified is evidence another machine could
+///   in principle check too, so the token may be delegated.
+/// - A local process's attestation is evidence only here. peinit vouching for a
+///   service it is launching says nothing a second machine has any reason to
+///   believe, so the token must not leave this one.
+///
+/// Stated as a rule rather than a carve-out for services, it survives the
+/// arrival of a domain: a domain-issued service credential would be
+/// independently verifiable and would sit at [`Verified`](Self::Verified),
+/// and the reasoning already says why.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Evidence {
+    /// A credential, verified by a principal source.
+    Verified,
+    /// A trusted local process's word, with no credential behind it.
+    Attested,
+}
+
+impl Evidence {
+    /// The impersonation level this evidence supports.
+    fn impersonation_level(self) -> ImpersonationLevel {
+        match self {
+            Self::Verified => ImpersonationLevel::Delegation,
+            Self::Attested => ImpersonationLevel::Impersonation,
+        }
+    }
+}
+
 pub struct Minting<'a> {
     pub user: &'a SidRef,
     /// Every SID the token will carry, from [`token_groups`].
@@ -236,6 +270,9 @@ pub struct Minting<'a> {
     pub auth_package: &'a str,
     /// What local policy decided this principal gets. Never from a source.
     pub policy: policy::Outcome,
+    /// What satisfied the authority that this logon should happen, which sets
+    /// the token's impersonation level. See [`Evidence`].
+    pub evidence: Evidence,
 }
 
 /// Convert a source's claims into the form the kernel takes.
@@ -315,6 +352,7 @@ pub fn mint(minting: Minting<'_>) -> peios::Result<Grant> {
         logon_type,
         auth_package,
         policy,
+        evidence,
     } = minting;
 
     let session = Session::create(kacs_logon_type(logon_type), auth_package, user)?;
@@ -385,9 +423,15 @@ pub fn mint(minting: Minting<'_>) -> peios::Result<Grant> {
         .primary_group_index(primary_group_index)
         // The impersonation level is a ratchet on every token: nothing captured
         // from, conveyed by, or duplicated out of this token can act above it.
-        // A logon token starts at the top; a client lowers it per connection
-        // with KACS_SO_IMPERSONATION_LEVEL. (Kernel TRM §3.5.1)
-        .token_type(TokenType::Primary, ImpersonationLevel::Delegation)
+        // A client may lower it further per connection with
+        // KACS_SO_IMPERSONATION_LEVEL. (Kernel TRM §3.5.1)
+        //
+        // Where it *starts* is set by how the authority was satisfied, not by
+        // what was asked for -- see `Evidence`. A credentialled logon starts at
+        // the top; an attested one starts a rung below, so nothing derived from
+        // it can be forwarded off this machine on the strength of a local
+        // process's word.
+        .token_type(TokenType::Primary, evidence.impersonation_level())
         // Both from local policy, keyed on the SIDs this token ends up
         // carrying. A principal source has no way to influence either and
         // should not: how much this machine trusts someone is not a fact about

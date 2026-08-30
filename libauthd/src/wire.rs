@@ -69,6 +69,15 @@ pub const MSG_CREDENTIAL_REQUEST: u16 = 0x8001;
 pub const MSG_ACCESS_GRANTED: u16 = 0x8002;
 pub const MSG_ACCESS_DENIED: u16 = 0x8003;
 
+// The service-attestation request. Client to authority, and answered with the
+// same `MSG_ACCESS_GRANTED` / `MSG_ACCESS_DENIED` a conversation ends with —
+// the outcome of a logon is one shape however the authority was satisfied.
+//
+// A separate type in the `0x0020` range rather than a `LogonStart` carrying no
+// credentials. See [`ServiceAttest`] for why that distinction is load-bearing
+// rather than tidy.
+pub const MSG_SERVICE_ATTEST: u16 = 0x0020;
+
 pub const MAX_IDENTIFIER_BYTES: usize = 1024;
 pub const MAX_CREDENTIAL_BYTES: usize = 32 * 1024;
 pub const MAX_PROMPTS: usize = 16;
@@ -80,6 +89,7 @@ pub const MAX_TTY_BYTES: usize = 128;
 pub const MAX_REMOTE_HOST_BYTES: usize = 256;
 pub const MAX_REASON_BYTES: usize = 512;
 pub const MAX_SUPPORTED_CREDENTIAL_TYPES: usize = 32;
+pub const MAX_SERVICE_NAME_BYTES: usize = 256;
 
 // ---------------------------------------------------------------------------
 // Enumerations
@@ -373,6 +383,45 @@ pub struct AccessDenied {
     pub reason: String,
 }
 
+/// The service manager asking for a token for a service it is about to launch.
+/// Client to authority. PGSS Logon §2.19.
+///
+/// A service identity has no credential and must never acquire one: a machine
+/// that could authenticate its own services would have to hold their secret,
+/// and a store of service passwords is a thing to design out rather than
+/// protect. What stands in for the credential is *attestation* — the authority
+/// satisfies itself about who is asking, and takes the service name on that
+/// peer's word because no other component is in a position to know it.
+///
+/// # Why this is not a `LogonStart` with no credentials
+///
+/// It would encode identically and it would be wrong. Sending this as a
+/// `LogonStart` creates a path through the conversation code on which *zero
+/// credentials succeeds*, and the only thing then keeping an ordinary principal
+/// off that path is the authorisation check being correct. A distinct message
+/// makes the credential-free path unreachable for anything else, so a mistake
+/// in that check is a mistake rather than an authentication bypass.
+///
+/// The reply is an ordinary [`AccessGranted`] or [`AccessDenied`], with the
+/// minted token arriving as an `SCM_RIGHTS` descriptor exactly as it does for a
+/// conversation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServiceAttest {
+    /// The identity the service definition declared — a well-known service
+    /// identity, a principal name, or a literal SID. Asserted by the client and
+    /// checked by the authority against what that peer may attest.
+    pub identity: String,
+    /// The name of the service being launched. The authority derives the
+    /// `S-1-5-80` service SID from it and stamps that on the token, which is
+    /// what keeps services distinguishable from one another however they run.
+    ///
+    /// The authority cannot verify this against anything: the process it names
+    /// does not exist yet, so there is no token to interrogate. It is taken on
+    /// the peer's word, which is exactly why the set of peers permitted to send
+    /// this message is as narrow as it is.
+    pub service: String,
+}
+
 // ---------------------------------------------------------------------------
 // Bodies
 //
@@ -617,6 +666,23 @@ pub fn encode_access_denied(denied: &AccessDenied) -> Result<Vec<u8>, WireError>
     w.finish()
 }
 
+pub fn decode_service_attest(buf: &[u8]) -> Result<ServiceAttest, WireError> {
+    let mut b = frame::open_body(&FRAMING, buf, MSG_SERVICE_ATTEST)?;
+    Ok(ServiceAttest {
+        identity: b.string(MAX_NAME_BYTES)?.to_owned(),
+        service: b.string(MAX_SERVICE_NAME_BYTES)?.to_owned(),
+    })
+}
+
+pub fn encode_service_attest(attest: &ServiceAttest) -> Result<Vec<u8>, WireError> {
+    let mut w = Writer::new(&FRAMING, MSG_SERVICE_ATTEST);
+    let body = w.open();
+    w.string(&attest.identity, MAX_NAME_BYTES)?;
+    w.string(&attest.service, MAX_SERVICE_NAME_BYTES)?;
+    w.close(body);
+    w.finish()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -668,6 +734,45 @@ mod tests {
                 credential_name: "Password".into(),
             }],
         }
+    }
+
+    #[test]
+    fn service_attest_round_trips() {
+        let attest = ServiceAttest {
+            identity: "LocalService".into(),
+            service: "resolvd".into(),
+        };
+        let decoded = decode_service_attest(&encode_service_attest(&attest).unwrap()).unwrap();
+        assert_eq!(decoded, attest);
+    }
+
+    /// A `ServiceAttest` must not decode as a `LogonStart` or the reverse. The
+    /// whole point of the separate type is that the credential-free path is
+    /// unreachable from the conversation message, and a decoder that accepted
+    /// either buffer for either type would give that away for free.
+    #[test]
+    fn service_attest_and_logon_start_do_not_decode_as_each_other() {
+        let attest = ServiceAttest {
+            identity: "LocalService".into(),
+            service: "resolvd".into(),
+        };
+        let attest_bytes = encode_service_attest(&attest).unwrap();
+        let start_bytes = encode_logon_start(&start()).unwrap();
+
+        assert!(decode_logon_start(&attest_bytes).is_err());
+        assert!(decode_service_attest(&start_bytes).is_err());
+    }
+
+    #[test]
+    fn service_attest_rejects_an_oversized_service_name() {
+        let attest = ServiceAttest {
+            identity: "LocalService".into(),
+            service: "s".repeat(MAX_SERVICE_NAME_BYTES + 1),
+        };
+        assert!(matches!(
+            encode_service_attest(&attest),
+            Err(WireError::TooLong)
+        ));
     }
 
     #[test]
