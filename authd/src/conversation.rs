@@ -54,8 +54,8 @@ use crate::home;
 use crate::log;
 use crate::peer;
 use crate::policy;
-use crate::unix_id;
 use crate::source::{Conversation, Inbound, Registry, Stalled};
+use crate::unix_id;
 
 /// How many prompt/answer rounds a single logon may take.
 ///
@@ -178,16 +178,38 @@ fn run(registry: &Registry, stream: &UnixStream, deadline: Instant) -> io::Resul
         String::from_utf8_lossy(&start.identifier)
     ));
 
-    let Some(source) = registry.route(&start.identifier) else {
-        log::warn(format_args!(
-            "no principal source can answer for {}",
-            String::from_utf8_lossy(&start.identifier)
-        ));
-        return deny(
-            stream,
-            Denial::AuthorityUnavailable,
-            "No authority is available for that principal.",
-        );
+    let source = match crate::resolve::route(registry, &start.identifier) {
+        crate::resolve::Route::Owner(source) => source,
+        crate::resolve::Route::Blind(source) => {
+            // Logged for the administrator; the caller learns nothing. The
+            // source runs a blinded conversation for a name it does not hold
+            // and denies AuthenticationFailed, indistinguishable from a
+            // wrong password (PGSS §2.10).
+            log::info(format_args!(
+                "no source claims {}; blinding via {}",
+                String::from_utf8_lossy(&start.identifier),
+                source.name()
+            ));
+            source
+        }
+        crate::resolve::Route::Unavailable => {
+            return deny(
+                stream,
+                Denial::AuthorityUnavailable,
+                "The authority could not be reached.",
+            );
+        }
+        crate::resolve::Route::NoSources => {
+            log::warn(format_args!(
+                "no principal source can answer for {}",
+                String::from_utf8_lossy(&start.identifier)
+            ));
+            return deny(
+                stream,
+                Denial::AuthorityUnavailable,
+                "No authority is available for that principal.",
+            );
+        }
     };
 
     let Some(mut conversation) = source.open() else {
@@ -506,8 +528,9 @@ fn ask_client(
     send_message(stream, &encoded).map_err(ClientFailed::Io)?;
 
     let received = recv_message(&wire::FRAMING, stream).map_err(ClientFailed::Io)?;
-    let (msg_type, _) = decode_header(received.expose())
-        .map_err(|_| ClientFailed::Protocol(Denial::MalformedRequest, "Malformed message header."))?;
+    let (msg_type, _) = decode_header(received.expose()).map_err(|_| {
+        ClientFailed::Protocol(Denial::MalformedRequest, "Malformed message header.")
+    })?;
     if msg_type != MSG_CREDENTIAL_RESPONSE {
         return Err(ClientFailed::Protocol(
             Denial::MalformedRequest,
@@ -920,23 +943,39 @@ fn read_opening(stream: &UnixStream) -> Result<Opening, (Denial, &'static str)> 
 
 /// Whether a principal may originate logons at all.
 ///
-/// Permits SYSTEM only, which is what the compiled-in `login` service runs as.
-/// This widens to a dedicated `LogonService` principal once there is one — the
-/// point of a narrow list now is that widening it is a visible, deliberate edit
-/// rather than a discovery.
+/// SYSTEM unconditionally, plus any peer whose policy record grants at
+/// least one logon type. Widening the originator set is therefore a
+/// registry edit — a `LogonTypes` list on the peer's record under
+/// `Machine\Generic\Authn\Policy` — which is the visible, deliberate act
+/// this check exists to require.
 fn may_originate(peer: &Sid) -> bool {
     peer::is_system(peer)
+        || policy::originator_logon_types(peer.as_ref()).is_some_and(|types| types.bits() != 0)
 }
 
 /// Whether a given originator may request a given logon type.
 ///
-/// The constraint half of "client proposes, authority constrains". A WebUI
-/// should be able to ask for `Network` and nothing else; `peinit` for `Service`
-/// and nothing else. There is one originator today and it is SYSTEM, so the
-/// table is trivial — but the check exists at the right place, which is what
-/// makes adding the real table a data change rather than a structural one.
-fn may_request(peer: &Sid, _logon_type: LogonType) -> bool {
-    peer::is_system(peer)
+/// The constraint half of "client proposes, authority constrains" (PGSS
+/// §2.4, obligation 15): `logon_type` selects a group SID the minted token
+/// will carry, and derivation policy is evaluated against it, so the type
+/// must be what the *peer* is permitted — not what it proposed. A greeter
+/// granted `["Interactive"]` cannot mint itself a network-shaped token, and
+/// a web console granted `["Network"]` cannot mint a console-shaped one.
+///
+/// SYSTEM is permitted every type, compiled in rather than configured:
+/// SYSTEM administers the policy store, so a registry constraint on it
+/// enforces nothing, and pretending otherwise would dress a non-control as
+/// policy. Every other peer gets exactly what its record's `LogonTypes`
+/// lists, and a peer with no record gets nothing — tested against the raw
+/// bits, never [`LogonTypes::permits`], whose substitution of a default for
+/// the empty set is right for a principal's own sign-on surface and wrong
+/// for a grant.
+fn may_request(peer: &Sid, logon_type: LogonType) -> bool {
+    if peer::is_system(peer) {
+        return true;
+    }
+    policy::originator_logon_types(peer.as_ref())
+        .is_some_and(|types| types.bits() & (1 << logon_type as u32) != 0)
 }
 
 #[cfg(test)]

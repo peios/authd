@@ -74,7 +74,6 @@ mod unix_id;
 mod well_known;
 
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixDatagram, UnixListener, UnixStream};
 use std::path::Path;
 use std::process::ExitCode;
@@ -122,7 +121,7 @@ fn main() -> ExitCode {
         libauthd::psi::VERSION
     ));
 
-    let logon = match listen(Path::new(LOGON_SOCKET_PATH), 0o600) {
+    let logon = match listen(Path::new(LOGON_SOCKET_PATH)) {
         Ok(listener) => listener,
         Err(error) => {
             log::error(format_args!(
@@ -132,24 +131,17 @@ fn main() -> ExitCode {
         }
     };
 
-    // Deliberately open. A principal source is admitted by the registry
-    // allowlist and the service SID on its token, not by reaching the socket,
-    // and treating the permissions as a boundary would be a way to end up
-    // depending on one. Anything here is denial-of-service mitigation only —
-    // and that job belongs to MAX_SOURCE_CONNECTIONS, which works regardless.
-    let psi = match listen(Path::new(PSI_SOCKET_PATH), 0o666) {
+    let psi = match listen(Path::new(PSI_SOCKET_PATH)) {
         Ok(listener) => listener,
         Err(error) => {
-            log::error(format_args!("could not listen on {PSI_SOCKET_PATH}: {error}"));
+            log::error(format_args!(
+                "could not listen on {PSI_SOCKET_PATH}: {error}"
+            ));
             return ExitCode::FAILURE;
         }
     };
 
-    // Deliberately open, and for a different reason than the PSI socket. Here
-    // there is nothing to protect: a principal refused a connection would see
-    // numbers where names should be, while one that can connect learns the same
-    // names either way. Restriction, when authd wants it, goes on fields.
-    let ident = match listen(Path::new(IDENT_SOCKET_PATH), 0o666) {
+    let ident = match listen(Path::new(IDENT_SOCKET_PATH)) {
         Ok(listener) => listener,
         Err(error) => {
             log::error(format_args!(
@@ -158,7 +150,7 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    open_the_ident_socket();
+    protect_the_sockets();
 
     // Read once, here, rather than per lookup. It is what tells the resolver
     // which sources *should* be present, so that a name a crashed source holds
@@ -204,49 +196,90 @@ fn main() -> ExitCode {
     ExitCode::SUCCESS
 }
 
-/// Let every principal reach the identity socket.
+/// The descriptors the three sockets carry. PGSS §2.4 and §2.14: socket
+/// access is controlled by a security descriptor, explicitly not by process
+/// integrity and not by POSIX permission bits, which KACS never consults
+/// (every credential carries `CAP_DAC_OVERRIDE`).
 ///
-/// The mode above says `0o666` and decides nothing: KACS raises
-/// `CAP_DAC_OVERRIDE` on every credential, so the POSIX bits are never
-/// consulted and the descriptor is the whole of the access control.
+/// Left alone, each socket would take what `/run` gives it — SYSTEM and
+/// Administrators and nothing else, since `/run`'s Everyone ACE is `CI`
+/// without `OI` and reaches directories, never the objects in them. That
+/// inherited descriptor is fail-closed, which is why a failed stamp is
+/// logged and not fatal; what it is not is *stated*, and an access control
+/// nobody wrote down is the condition PEI-286 exists to end.
 ///
-/// Left alone, the socket takes what `/run` gives it, which is SYSTEM and
-/// Administrators and nothing else -- `/run`'s Everyone ACE is `CI` without
-/// `OI`, so it reaches directories under `/run` and never the objects in
-/// them. That is the right default for the sockets around it and the wrong
-/// one for this one, because **NSS runs inside every process on the system**.
-/// A principal that cannot connect does not get an error it can act on: the
-/// lookup fails and the caller reports `No such id`, so an ordinary account
-/// cannot resolve any name, including its own (PEI-571).
+/// **`/run/ident.sock`** is universally connectable, and that is a constant
+/// rather than configuration: NSS runs inside every process on the system,
+/// and a principal that cannot connect does not get an error it can act on —
+/// the lookup fails and the caller reports `No such id`, so an ordinary
+/// account cannot resolve any name, including its own (PEI-571). Everyone
+/// gets exactly what a connect needs and nothing more: `FILE_WRITE_DATA`,
+/// which is what `unix_stream_connect` checks, plus `READ_ATTRIBUTES` and
+/// `SYNCHRONIZE` so that stat and open behave.
 ///
-/// Everyone gets exactly what a connect needs and nothing more:
-/// `FILE_WRITE_DATA`, which is what `unix_stream_connect` checks, plus
-/// `READ_ATTRIBUTES` and `SYNCHRONIZE` so that stat and open behave. Not read
-/// or write of the socket's own descriptor, and no delete.
+/// **`/run/logon.sock`** admits the originators: SYSTEM, which is what the
+/// compiled-in `login` runs as, and Administrators. Which principals may
+/// originate logons is genuinely site policy — §2.4's rationale is a
+/// graphical greeter, a web console, a remote access daemon — so this one
+/// alone is overridable, by `LogonSocketDescriptor` on the policy key. The
+/// descriptor is the outer gate; `may_originate`/`may_request` still decide
+/// per peer and per logon type behind it, so widening the socket without
+/// granting the peer a `LogonTypes` record changes nothing.
 ///
-/// Protected, so `/run`'s inheritance can neither widen this later nor take
-/// the Everyone ACE away.
+/// **`/run/psi.sock`** is authd's own protocol, so the requirement is ours
+/// to state: SYSTEM and Administrators, constant. Every source is a SYSTEM
+/// service today; a future source running as something else needs an authd
+/// change anyway, since the registration allowlist is consulted with the
+/// peer's identity. The connection caps stay load-bearing regardless — a
+/// descriptor bounds who, not how many.
 ///
-/// Failure is logged and not fatal. authd serving lookups that only
-/// administrators can reach is the behaviour that already shipped; refusing to
-/// start would take logons down with it, which is far worse.
-fn open_the_ident_socket() {
+/// All three are protected (`P`), so `/run`'s inheritance can neither widen
+/// nor narrow them later.
+fn protect_the_sockets() {
     const IDENT_SDDL: &str = "O:SYG:SYD:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;0x100082;;;WD)";
+    const LOGON_SDDL: &str = "O:SYG:SYD:P(A;;GA;;;SY)(A;;GA;;;BA)";
+    const PSI_SDDL: &str = "O:SYG:SYD:P(A;;GA;;;SY)(A;;GA;;;BA)";
 
-    let sd = match sddl::parse(IDENT_SDDL) {
+    stamp(
+        IDENT_SOCKET_PATH,
+        IDENT_SDDL,
+        "only administrators will resolve names, and every other principal \
+         will see numbers",
+    );
+
+    let configured = policy::logon_socket_descriptor();
+    let logon_sddl = configured.as_deref().unwrap_or(LOGON_SDDL);
+    stamp(
+        LOGON_SOCKET_PATH,
+        logon_sddl,
+        "only SYSTEM and Administrators will reach the logon socket",
+    );
+
+    stamp(
+        PSI_SOCKET_PATH,
+        PSI_SDDL,
+        "principal sources that are not SYSTEM will not register",
+    );
+}
+
+/// Stamp one socket, logging the consequence of failure rather than dying:
+/// the inherited `/run` descriptor every failure falls back to is more
+/// restrictive than anything stamped here, and refusing to start would take
+/// logons down with it.
+fn stamp(path: &str, sddl_text: &str, consequence: &str) {
+    let sd = match sddl::parse(sddl_text) {
         Ok(sd) => sd,
         Err(error) => {
             log::error(format_args!(
-                "could not build the descriptor for {IDENT_SOCKET_PATH}: {error:?}"
+                "could not build the descriptor for {path}: {error:?}; {consequence}"
             ));
             return;
         }
     };
     let info = SecInfo::OWNER | SecInfo::GROUP | SecInfo::DACL;
-    if let Err(error) = file::set_sd(None, Path::new(IDENT_SOCKET_PATH), info, &sd, 0) {
+    if let Err(error) = file::set_sd(None, Path::new(path), info, &sd, 0) {
         log::error(format_args!(
-            "could not stamp {IDENT_SOCKET_PATH}: {error}; only administrators will \
-             resolve names, and every other principal will see numbers"
+            "could not stamp {path}: {error}; {consequence}"
         ));
     }
 }
@@ -259,7 +292,7 @@ fn open_the_ident_socket() {
 /// greeter, a web console) to be signed at high trust merely to collect a
 /// password. On the PSI socket it is the registry allowlist and the peer's
 /// service SID.
-fn listen(path: &Path, mode: u32) -> std::io::Result<UnixListener> {
+fn listen(path: &Path) -> std::io::Result<UnixListener> {
     // A stale socket from an unclean shutdown would make bind() fail with
     // EADDRINUSE even though nothing is listening.
     match fs::remove_file(path) {
@@ -268,11 +301,12 @@ fn listen(path: &Path, mode: u32) -> std::io::Result<UnixListener> {
         Err(error) => return Err(error),
     }
 
-    let listener = UnixListener::bind(path)?;
-    // Explicit rather than umask-dependent: whichever way it goes, it should be
-    // a decision in the source rather than a property of how authd was started.
-    fs::set_permissions(path, fs::Permissions::from_mode(mode))?;
-    Ok(listener)
+    // No POSIX mode is set, deliberately. KACS raises CAP_DAC_OVERRIDE on
+    // every credential, so the bits are never consulted; the descriptor each
+    // caller stamps right after this is the whole of the access control, and
+    // mode bits beside it would imply a second control that does not exist
+    // (PEI-286).
+    UnixListener::bind(path)
 }
 
 fn accept_logons(registry: &Arc<Registry>, listener: UnixListener) {
@@ -291,17 +325,17 @@ fn accept_logons(registry: &Arc<Registry>, listener: UnixListener) {
         live.fetch_add(1, Ordering::Relaxed);
         let held = Arc::clone(&live);
         let registry = Arc::clone(registry);
-        let spawned = thread::Builder::new()
-            .name("logon".into())
-            .spawn(move || {
-                conversation::serve(registry, stream);
-                held.fetch_sub(1, Ordering::Relaxed);
-            });
+        let spawned = thread::Builder::new().name("logon".into()).spawn(move || {
+            conversation::serve(registry, stream);
+            held.fetch_sub(1, Ordering::Relaxed);
+        });
 
         if let Err(error) = spawned {
             // The thread never ran, so nothing will decrement for us.
             live.fetch_sub(1, Ordering::Relaxed);
-            log::warn(format_args!("could not spawn a conversation thread: {error}"));
+            log::warn(format_args!(
+                "could not spawn a conversation thread: {error}"
+            ));
         }
     });
 }
@@ -330,12 +364,10 @@ fn accept_lookups(registry: &Arc<Registry>, listener: UnixListener) {
         live.fetch_add(1, Ordering::Relaxed);
         let held = Arc::clone(&live);
         let registry = Arc::clone(registry);
-        let spawned = thread::Builder::new()
-            .name("ident".into())
-            .spawn(move || {
-                ident::serve(registry, stream);
-                held.fetch_sub(1, Ordering::Relaxed);
-            });
+        let spawned = thread::Builder::new().name("ident".into()).spawn(move || {
+            ident::serve(registry, stream);
+            held.fetch_sub(1, Ordering::Relaxed);
+        });
 
         if let Err(error) = spawned {
             live.fetch_sub(1, Ordering::Relaxed);
@@ -363,12 +395,10 @@ fn accept_sources(registry: &Arc<Registry>, listener: UnixListener) {
         live.fetch_add(1, Ordering::Relaxed);
         let held = Arc::clone(&live);
         let registry = Arc::clone(registry);
-        let spawned = thread::Builder::new()
-            .name("source".into())
-            .spawn(move || {
-                source::serve(&registry, stream);
-                held.fetch_sub(1, Ordering::Relaxed);
-            });
+        let spawned = thread::Builder::new().name("source".into()).spawn(move || {
+            source::serve(&registry, stream);
+            held.fetch_sub(1, Ordering::Relaxed);
+        });
 
         if let Err(error) = spawned {
             // The thread never ran, so nothing will decrement for us.

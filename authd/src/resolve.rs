@@ -149,6 +149,119 @@ fn by_name(registry: &Registry, name: &str, kind: Kind, fields: Fields) -> Answe
 
 /// A SID needs no search: it names its own domain, and identity confinement
 /// makes at most one source authoritative for it.
+/// Where a logon conversation should be sent (PSI §2.11).
+///
+/// One source, decided on the identifier before any credential exists —
+/// never by trying sources in turn with the password, which is the PAM
+/// stacking failure §2.11 exists to prevent.
+pub enum Route {
+    /// This source claims the identifier — or is the only source configured,
+    /// in which case there is nothing to decide and nothing is asked.
+    Owner(Arc<Source>),
+    /// No configured source claims the identifier. The conversation still
+    /// goes to this source — the first in the search order — because an
+    /// authority MUST NOT distinguish an unknown principal from a bad
+    /// credential (PGSS §2.10), by denial code or by observable behaviour.
+    /// A short-circuit denial here would let anyone who can reach the
+    /// socket test which names exist; a source runs its own blinded
+    /// conversation for a name it does not hold and denies at the end,
+    /// which is indistinguishable from a wrong password. Exactly one
+    /// source sees the credential either way.
+    Blind(Arc<Source>),
+    /// The search order could not be walked to a decision: a configured
+    /// source is absent, or one that had to answer could not. Falling
+    /// through is forbidden — a name that resolves differently while
+    /// something is broken has its authority chosen by whoever broke it —
+    /// so the logon is denied `AuthorityUnavailable`, which is honest: an
+    /// outage is not a secret the way a principal's existence is.
+    Unavailable,
+    /// Nothing is registered at all. "No sources means no accounts" — a
+    /// denial, not a hang.
+    NoSources,
+}
+
+/// Decide which single source answers a logon for `identifier`.
+///
+/// The same two no-fall-through rules as [`by_name`], because they guard the
+/// same property: which principal a name means must not depend on what
+/// happens to be broken. The resolution query carries no credential — asking
+/// each source "do you own this name?" is the step §2.11 explicitly permits.
+///
+/// Well-known names are deliberately not consulted: nobody logs on as
+/// `Everyone`, and a source cannot own a well-known SID, so such a name
+/// takes the blind path and fails authentication like any other name nobody
+/// holds.
+pub fn route(registry: &Registry, identifier: &[u8]) -> Route {
+    // Interpreted as a name because IdentifierType has one variant. A SID
+    // identifier, when one exists, routes by domain containment
+    // (`Registry::owning`) instead — a different mechanism, decided then.
+    let name = String::from_utf8_lossy(identifier);
+
+    // A name no source could hold — malformed, oversized — still gets the
+    // blind conversation rather than a distinct refusal, for the same
+    // enumeration-resistance reason as an unknown one.
+    let usable = name_is_usable(&name);
+
+    // One configured source is the degenerate case with no routing question:
+    // every conversation goes there, exactly as before routing existed, and
+    // no resolution round trip is added to the common deployment. This is
+    // also what keeps a single logon-only source (no QUERIES capability)
+    // usable — it cannot answer "do you own this name?", and with nobody
+    // else configured the answer cannot matter.
+    let slots = registry.slots();
+    if let [slot] = slots.as_slice() {
+        return match slot {
+            Slot::Live(source) => Route::Owner(Arc::clone(source)),
+            Slot::Absent(absent) => {
+                log::warn(format_args!(
+                    "logon: {absent} is configured and not registered; no logon \
+                     can be answered"
+                ));
+                Route::Unavailable
+            }
+        };
+    }
+
+    let mut fallback: Option<Arc<Source>> = None;
+    for slot in slots {
+        let source = match slot {
+            Slot::Live(source) => source,
+            Slot::Absent(absent) => {
+                log::warn(format_args!(
+                    "logon: {absent} is configured and not registered; a principal \
+                     it might hold cannot be routed from further down the order"
+                ));
+                return Route::Unavailable;
+            }
+        };
+        if fallback.is_none() {
+            fallback = Some(Arc::clone(&source));
+        }
+        if !usable {
+            continue;
+        }
+        match ask(
+            &source,
+            psi::Key::Name(name.to_string()),
+            Kind::Principal,
+            Fields::empty(),
+        ) {
+            Reply::Found(_) => return Route::Owner(source),
+            Reply::NotFound => continue,
+            // A source that had to answer and could not — including one that
+            // declared no QUERIES capability, which can never say who it
+            // holds. Continuing past it would fall through a name it might
+            // own.
+            Reply::Refused | Reply::Unavailable => return Route::Unavailable,
+        }
+    }
+
+    match fallback {
+        Some(source) => Route::Blind(source),
+        None => Route::NoSources,
+    }
+}
+
 fn by_sid(registry: &Registry, sid: &SidRef, kind: Kind, fields: Fields) -> Answer {
     if let Some(answer) = well_known_by_sid(sid, kind, fields) {
         return answer;
@@ -168,7 +281,12 @@ fn by_sid(registry: &Registry, sid: &SidRef, kind: Kind, fields: Fields) -> Answ
             Outcome::Unavailable
         });
     };
-    match ask(&source, psi::Key::Sid(sid.as_bytes().to_vec()), kind, fields) {
+    match ask(
+        &source,
+        psi::Key::Sid(sid.as_bytes().to_vec()),
+        kind,
+        fields,
+    ) {
         Reply::Found(entry) => found(&source, &entry, kind, fields),
         Reply::NotFound => Answer::of(Outcome::NotFound),
         Reply::Refused => Answer::of(Outcome::Unavailable),
@@ -255,7 +373,11 @@ fn well_known_answer(sid: &SidRef, kind: Kind, fields: Fields) -> Option<Answer>
     // Nothing records who is in these; authd staples them onto a token at
     // derivation. Absent rather than declined — declining would suggest an
     // answer exists somewhere and is being kept back.
-    for field in KNOWN.difference(Fields::UNIX_ID).intersection(fields).iter() {
+    for field in KNOWN
+        .difference(Fields::UNIX_ID)
+        .intersection(fields)
+        .iter()
+    {
         withheld.push(Withheld {
             field,
             reason: WithheldReason::Absent,
@@ -513,7 +635,10 @@ fn rebase_ref(source: &Arc<Source>, reference: &Reference) -> Reference {
         }),
         None => None,
     };
-    let name = match (reference.name.is_empty(), SidRef::from_bytes(&reference.sid)) {
+    let name = match (
+        reference.name.is_empty(),
+        SidRef::from_bytes(&reference.sid),
+    ) {
         (true, Some(sid)) => well_known::name_of(sid).unwrap_or_default().to_string(),
         _ => reference.name.clone(),
     };
@@ -538,11 +663,7 @@ fn rebase_ref(source: &Arc<Source>, reference: &Reference) -> Reference {
 /// That is worse than the inconsistency suggests. A POSIX-shaped tool reads
 /// group membership from the name-resolution path and treats it as an
 /// access-control input, because on other systems that path *is* the authority.
-fn permitted_refs(
-    source: &Arc<Source>,
-    subject: &SidRef,
-    refs: &[Reference],
-) -> Vec<Reference> {
+fn permitted_refs(source: &Arc<Source>, subject: &SidRef, refs: &[Reference]) -> Vec<Reference> {
     let scoped = !source.may_assert_foreign_memberships();
     refs.iter()
         .filter(|r| {
@@ -820,8 +941,8 @@ pub fn well_known_page(kind: Kind, fields: Fields) -> Vec<libauthd::ident::Recor
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::unix_id;
     use crate::source::pump_for_test;
+    use crate::unix_id;
     use libauthd::ident::{Key, Value};
     use libauthd::transport::{recv_message, send_message};
     use peios::security::Sid;
@@ -844,7 +965,12 @@ mod tests {
         unix_id::Range::new(BASE, 1_000_000).expect("a usable range")
     }
 
-    fn stub(name: &str, domain: &str, order: u32, answer: Option<psi::QueryEntry>) -> Arc<Registry> {
+    fn stub(
+        name: &str,
+        domain: &str,
+        order: u32,
+        answer: Option<psi::QueryEntry>,
+    ) -> Arc<Registry> {
         let registry = Arc::new(Registry::for_test(&[(name, order, Some(range()))]));
         add_stub(&registry, name, domain, order, answer);
         registry
@@ -993,7 +1119,13 @@ mod tests {
     fn a_number_in_no_sources_range_is_not_found() {
         let registry = stub("lpsd", DOMAIN, 1000, None);
         assert_eq!(
-            lookup(&registry, &Key::UnixId(42), Kind::Principal, Fields::empty()).outcome,
+            lookup(
+                &registry,
+                &Key::UnixId(42),
+                Kind::Principal,
+                Fields::empty()
+            )
+            .outcome,
             Outcome::NotFound
         );
     }
@@ -1300,7 +1432,10 @@ mod tests {
         let Some(Value::Groups(groups)) = record.value(Fields::GROUPS) else {
             panic!("groups must be present");
         };
-        assert_eq!(groups[0].unix_id, 102, "authd's table, not the source's base");
+        assert_eq!(
+            groups[0].unix_id, 102,
+            "authd's table, not the source's base"
+        );
     }
 
     /// Obligation 35: a name is refused "whether created locally, received in a
@@ -1315,14 +1450,14 @@ mod tests {
     #[test]
     fn a_source_asserting_an_unusable_name_is_refused() {
         for bad in [
-            "jack\nroot:x:0:0",  // forges a passwd line
-            "jack:x",            // a field separator
-            "corp\\jack",        // a reserved character
+            "jack\nroot:x:0:0", // forges a passwd line
+            "jack:x",           // a field separator
+            "corp\\jack",       // a reserved character
             "jack@local",
             "jack/../root",
-            " jack",             // leading space
-            "jack ",             // trailing space
-            "ja\u{7f}ck",         // outside 0x20-0x7e
+            " jack",      // leading space
+            "jack ",      // trailing space
+            "ja\u{7f}ck", // outside 0x20-0x7e
         ] {
             let answer = entry("S-1-5-21-1-2-3-1000", bad, 1000);
             let registry = stub("corp", DOMAIN, 1000, Some(answer));
@@ -1613,7 +1748,8 @@ mod tests {
             Some(entry("S-1-5-21-7-7-7-1000", "ada", 1000)),
         );
 
-        let page = enumerate(&registry, Kind::Principal, Fields::UNIX_ID, &[]).expect("an honourable cursor");
+        let page = enumerate(&registry, Kind::Principal, Fields::UNIX_ID, &[])
+            .expect("an honourable cursor");
         let names: Vec<&str> = page
             .entries
             .iter()
@@ -1637,7 +1773,8 @@ mod tests {
             10,
             ours,
         );
-        let page = enumerate(&registry, Kind::Principal, Fields::empty(), &[]).expect("an honourable cursor");
+        let page = enumerate(&registry, Kind::Principal, Fields::empty(), &[])
+            .expect("an honourable cursor");
         drop(theirs);
         assert!(page.entries.is_empty());
         assert_eq!(page.incomplete, vec!["quiet".to_string()]);
@@ -1670,7 +1807,8 @@ mod tests {
         // A cursor naming `b` resumes there, skipping `a` entirely.
         let mut cursor = vec![1u8];
         cursor.extend_from_slice(b"b");
-        let page = enumerate(&registry, Kind::Principal, Fields::empty(), &cursor).expect("an honourable cursor");
+        let page = enumerate(&registry, Kind::Principal, Fields::empty(), &cursor)
+            .expect("an honourable cursor");
         let names: Vec<&str> = page
             .entries
             .iter()
@@ -1695,9 +1833,9 @@ mod tests {
             Some(entry("S-1-5-21-1-2-3-1000", "jack", 1000)),
         );
         for cursor in [
-            vec![0xff],                    // a length longer than the cursor
+            vec![0xff],                      // a length longer than the cursor
             vec![4, 0xff, 0xff, 0xff, 0xff], // a name that is not UTF-8
-            vec![9, 1, 2],                 // truncated
+            vec![9, 1, 2],                   // truncated
         ] {
             assert_eq!(
                 enumerate(&registry, Kind::Principal, Fields::empty(), &cursor).err(),
@@ -1742,7 +1880,8 @@ mod tests {
             10,
             Some(entry("S-1-5-21-1-2-3-1000", "jack", 1000)),
         );
-        let page = enumerate(&registry, Kind::Principal, Fields::empty(), &[]).expect("an honourable cursor");
+        let page = enumerate(&registry, Kind::Principal, Fields::empty(), &[])
+            .expect("an honourable cursor");
         assert_eq!(page.incomplete, vec!["gone".to_string()]);
     }
 
@@ -1791,5 +1930,85 @@ mod tests {
             "a session property is not a row in a group table"
         );
         assert!(well_known_page(Kind::Principal, Fields::empty()).is_empty());
+    }
+
+    // -- routing (PSI §2.11) --------------------------------------------
+
+    const OTHER_DOMAIN: &str = "S-1-5-21-7-8-9";
+
+    fn two_source_registry(
+        first_answer: Option<psi::QueryEntry>,
+        second_answer: Option<psi::QueryEntry>,
+    ) -> Arc<Registry> {
+        let registry = Arc::new(Registry::for_test(&[
+            ("first", 1, Some(range())),
+            ("second", 2, Some(range())),
+        ]));
+        add_stub(&registry, "first", DOMAIN, 1, first_answer);
+        add_stub(&registry, "second", OTHER_DOMAIN, 2, second_answer);
+        registry
+    }
+
+    #[test]
+    fn a_single_source_is_routed_to_without_being_asked() {
+        // The degenerate case has no routing question, and deliberately no
+        // resolution round trip: a single logon-only source that cannot
+        // answer name queries still receives every conversation.
+        let registry = stub("only", DOMAIN, 1, None);
+        match route(&registry, b"jack") {
+            Route::Owner(source) => assert_eq!(source.name(), "only"),
+            _ => panic!("expected the only source"),
+        }
+    }
+
+    #[test]
+    fn a_name_routes_to_the_source_that_claims_it() {
+        // The PEI-304 bug: every logon went to the first source in the
+        // order. A name the second source holds must route there, or the
+        // first source is handed a credential for a principal it does not
+        // own.
+        let registry = two_source_registry(None, Some(entry("S-1-5-21-7-8-9-500", "jack", 1)));
+        match route(&registry, b"jack") {
+            Route::Owner(source) => assert_eq!(source.name(), "second"),
+            _ => panic!("expected the owning source"),
+        }
+    }
+
+    #[test]
+    fn an_unclaimed_name_blinds_via_the_first_source() {
+        // Nobody owns the name. The conversation still runs — against
+        // exactly one source, deterministically the first — because a
+        // short-circuit denial would distinguish an unknown principal from
+        // a bad credential (PGSS §2.10).
+        let registry = two_source_registry(None, None);
+        match route(&registry, b"nobody") {
+            Route::Blind(source) => assert_eq!(source.name(), "first"),
+            _ => panic!("expected the blind path"),
+        }
+    }
+
+    #[test]
+    fn an_absent_configured_source_denies_rather_than_falling_through() {
+        // "second" is configured and never registered. A name it might hold
+        // cannot be routed past it — falling through would let whoever took
+        // a source down choose which authority answers for its principals.
+        let registry = Arc::new(Registry::for_test(&[
+            ("first", 1, Some(range())),
+            ("second", 2, Some(range())),
+        ]));
+        add_stub(&registry, "first", DOMAIN, 1, None);
+        match route(&registry, b"jack") {
+            Route::Unavailable => {}
+            _ => panic!("expected Unavailable"),
+        }
+    }
+
+    #[test]
+    fn no_sources_at_all_is_its_own_answer() {
+        let registry = Registry::for_test(&[]);
+        match route(&registry, b"jack") {
+            Route::NoSources => {}
+            _ => panic!("expected NoSources"),
+        }
     }
 }
