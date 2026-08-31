@@ -40,9 +40,15 @@
 # traverse but not create (fsbase 1.0.0-8). It self-scopes to human accounts:
 # a service identity is minted with Profile::default(), whose home is empty.
 
+# -13: authd stamps a descriptor on /run/ident.sock granting Everyone the right
+# to connect. The socket inherited SYSTEM and Administrators from /run -- whose
+# Everyone ACE is container-inherit only -- so no ordinary principal could reach
+# the name resolver, including for its own name (PEI-571). The 0o666 mode beside
+# the bind never applied: KACS raises CAP_DAC_OVERRIDE on every credential.
+
 format = "peipkg"
 
 [package]
-version      = "{{version}}-12"
+version      = "{{version}}-13"
 architecture = "x86_64"
 license      = "MIT"
