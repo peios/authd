@@ -44,7 +44,6 @@
 
 use std::io;
 use std::os::fd::AsFd;
-use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
 use std::time::Duration;
@@ -110,32 +109,27 @@ impl Refused {
     }
 }
 
-/// Unix modes here are inert, and are set permissively to say so.
-///
-/// KACS raises `CAP_DAC_OVERRIDE` and `CAP_DAC_READ_SEARCH` on every managed
-/// process (`pkm/kacs/capability.c`), so the DAC check never denies anything on
-/// this system. A restrictive mode here would not be a weak control but a
-/// decorative one — and worse, it would read to the next person as though
-/// access were being decided by something that has no say in it.
-///
-/// What decides is the KACS descriptor ([`protect`]) and the peer's token
-/// ([`may_administer`]). `psi.sock` is `0666` for the same reason.
-const DIRECTORY_MODE: u32 = 0o755;
-const SOCKET_MODE: u32 = 0o666;
-
 /// Create `/run/lpsd` and bind the administrative socket.
 ///
 /// `/run` is tmpfs, so this happens every boot. A stale socket cannot survive a
 /// reboot but can survive a crash, so an existing one is removed rather than
 /// treated as a fatal bind failure — otherwise a crashed daemon would refuse to
 /// restart until someone deleted a file by hand.
+///
+/// The **directory** is peinit's: `RuntimeDirectories=["lpsd"]` provisions it
+/// before launch with a descriptor that is a strict superset of anything lpsd
+/// would write — SYSTEM, Administrators, *and lpsd's own service SID*.
+/// Stamping over it on every start made that declaration cosmetic (PEI-476),
+/// so lpsd no longer touches the directory's descriptor or its mode:
+/// `create_dir_all` remains only as the fallback for running without peinit,
+/// where the directory takes `/run`'s inherited descriptor as it always did.
+/// The **socket** stays lpsd's to protect — it creates it, and nothing else
+/// knows it exists. No POSIX mode is set on it: KACS raises
+/// `CAP_DAC_OVERRIDE` on every managed process, so the bits decide nothing,
+/// and a mode beside the descriptor would read as a control that has no say.
 pub fn listen() -> io::Result<UnixListener> {
     let directory = Path::new(LPSD_RUN_DIR);
     std::fs::create_dir_all(directory)?;
-    // Deliberately not made durable, unlike the store's directory: /run is
-    // tmpfs and nothing here is meant to survive a reboot.
-    std::fs::set_permissions(directory, std::fs::Permissions::from_mode(DIRECTORY_MODE))?;
-    protect(directory);
 
     let path = Path::new(LPSD_ADMIN_SOCKET_PATH);
     match std::fs::remove_file(path) {
@@ -145,13 +139,11 @@ pub fn listen() -> io::Result<UnixListener> {
     }
 
     let listener = UnixListener::bind(path)?;
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(SOCKET_MODE))?;
     protect(path);
     Ok(listener)
 }
 
-/// Stamp a SYSTEM-and-Administrators descriptor on lpsd's runtime directory and
-/// socket.
+/// Stamp a SYSTEM-and-Administrators descriptor on the administrative socket.
 ///
 /// **This is load-bearing, not defence in depth.** peinit seeds every Phase-1
 /// virtual mount with `O:SYG:SYD:(A;OICI;GA;;;SY)` — SYSTEM alone, inheritable —
