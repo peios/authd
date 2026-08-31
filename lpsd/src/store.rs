@@ -222,25 +222,6 @@ pub fn well_known_group(name: &str) -> Option<Sid> {
 /// Nothing records who is in them. `Everyone` and `Authenticated Users` are not
 /// memberships anyone stores; they are a rule authd applies at derivation, so
 /// "who is in this group" has no answer a store could give.
-///
-/// The distinction is not well-known-versus-local: `BUILTIN\Administrators` is
-/// equally well-known and lpsd holds real memberships into it. What matters is
-/// whether anything records an edge.
-///
-/// lpsd could return every principal it holds for these, and it would be a wrong
-/// answer rather than a partial one — it knows nothing of other sources'
-/// principals, and the group is a property of a token rather than of an account.
-const STAPLED_GROUPS: &[(u64, &[u32])] = &[
-    (1, &[0]),  // Everyone
-    (5, &[11]), // Authenticated Users
-];
-
-fn is_stapled(sid: &SidRef) -> bool {
-    STAPLED_GROUPS.iter().any(|(authority, subs)| {
-        Sid::build(*authority, subs).is_ok_and(|built| built.as_ref().as_bytes() == sid.as_bytes())
-    })
-}
-
 /// The name of a well-known group, if this is one.
 pub fn well_known_group_name(sid: &SidRef) -> Option<&'static str> {
     WELL_KNOWN_GROUPS
@@ -435,9 +416,6 @@ pub struct GroupRecord {
     pub rid: Option<u32>,
     /// `None` for a well-known group, which lpsd does not number.
     pub unix_id: Option<u32>,
-    /// Whether anything records membership edges into it. False for a group the
-    /// authority staples onto tokens — see [`STAPLED_GROUPS`].
-    pub enumerable: bool,
 }
 
 /// A principal in a group's membership list.
@@ -750,9 +728,6 @@ impl Store {
     /// Groups win over principals for a well-known name, which cannot collide in
     /// practice: [`check_name`] refuses those names at creation.
     pub fn lookup_name(&self, name: &str) -> Option<Object> {
-        if let Some(sid) = well_known_group(name) {
-            return self.group_record(sid.as_ref()).map(Object::Group);
-        }
         if let Some(group) = self.groups.iter().find(|g| g.matches(name)) {
             return self.group_record_of(group).map(Object::Group);
         }
@@ -775,30 +750,18 @@ impl Store {
         self.record(&principal.name).ok().map(Object::Principal)
     }
 
-    /// Resolve a SID, which may be one of this domain's or a well-known group's.
+    /// Resolve a SID of this domain, and nothing else.
+    ///
+    /// Well-known SIDs deliberately resolve to `None` (PEI-313): identity
+    /// confinement gives a source authority over its own domain only, and a
+    /// `Found` for `BUILTIN\Administrators` was lpsd asserting an object it
+    /// does not own. The authority's own table answers for well-knowns —
+    /// and always answered first, so nothing on the wire ever reached this
+    /// branch. Naming a well-known group as a *membership* is a different
+    /// act, explicitly permitted, and unchanged.
     pub fn lookup_sid(&self, sid: &SidRef) -> Option<Object> {
-        if let Some(rid) = self.rid_in_domain(sid) {
-            return self.lookup_relative_id(rid);
-        }
-        self.group_record(sid).map(Object::Group)
-    }
-
-    /// A group this machine can name, local or well-known.
-    pub fn group_record(&self, sid: &SidRef) -> Option<GroupRecord> {
-        if let Some(rid) = self.rid_in_domain(sid) {
-            let group = self.groups.iter().find(|g| g.rid == rid)?;
-            return self.group_record_of(group);
-        }
-        let name = well_known_group_name(sid)?;
-        Some(GroupRecord {
-            sid: sid.to_owned(),
-            name: name.to_string(),
-            rid: None,
-            // lpsd does not number what it does not own — applying its base to a
-            // `BUILTIN` group would land it inside lpsd's range.
-            unix_id: None,
-            enumerable: !is_stapled(sid),
-        })
+        let rid = self.rid_in_domain(sid)?;
+        self.lookup_relative_id(rid)
     }
 
     /// Give a group a `unix_id` that differs from its RID, for tests.
@@ -822,7 +785,6 @@ impl Store {
             name: group.name.clone(),
             rid: Some(group.rid),
             unix_id: Some(group.unix_id),
-            enumerable: true,
         })
     }
 
@@ -834,13 +796,11 @@ impl Store {
     /// lands past the end. That is what lets lpsd page a membership without
     /// holding per-cursor state or ever refusing a cursor it issued.
     ///
-    /// `None` where nothing records edges into the group. See [`is_stapled`].
+    /// `None` for any group this domain does not own — the only groups the
+    /// query surface can name here since well-known lookups were withdrawn
+    /// (PEI-313), and the only ones whose membership lpsd may assert.
     pub fn members_of(&self, sid: &SidRef, after: Option<u32>) -> Option<Vec<Member>> {
-        if is_stapled(sid) {
-            return None;
-        }
-        let owned = self.rid_in_domain(sid).is_some();
-        if !owned && well_known_group_name(sid).is_none() {
+        if self.rid_in_domain(sid).is_none() {
             return None;
         }
         let sid = sid.to_owned();
@@ -850,13 +810,11 @@ impl Store {
                 .filter(|p| after.is_none_or(|rid| p.rid > rid))
                 .filter(|p| {
                     p.groups.iter().any(|g| g.as_ref().as_bytes() == sid.as_ref().as_bytes())
-                        // A primary group is a membership claim (PSPU §2.13),
-                        // but only where lpsd owns the group. Every principal
-                        // defaults to `Authenticated Users`, and listing them
-                        // all as its members would be an answer this machine is
-                        // in no position to give.
-                        || (owned
-                            && p.primary_group.as_ref().as_bytes() == sid.as_ref().as_bytes())
+                        // A primary group is a membership claim (PSPU §2.13).
+                        // Safe to count unconditionally now: the owned-domain
+                        // precondition above means the stapled default
+                        // (`Authenticated Users`) can never reach this line.
+                        || p.primary_group.as_ref().as_bytes() == sid.as_ref().as_bytes()
                 })
                 .filter_map(|p| {
                     Some(Member {

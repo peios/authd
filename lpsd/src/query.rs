@@ -272,9 +272,6 @@ fn group_entry(store: &Store, record: &GroupRecord, fields: Fields) -> psi::Quer
 /// `Ok(None)` — nothing records edges into this group.
 /// `Err(())` — it does, and the list will not fit in one reply.
 fn members(store: &Store, record: &GroupRecord) -> Result<Option<Vec<Reference>>, ()> {
-    if !record.enumerable {
-        return Ok(None);
-    }
     let Some(found) = store.members_of(record.sid.as_ref(), None) else {
         return Ok(None);
     };
@@ -692,48 +689,51 @@ mod tests {
         );
     }
 
-    /// `BUILTIN\Administrators` is well-known *and* enumerable: lpsd holds real
-    /// memberships into it. Well-known-ness is not what decides this.
+    /// `BUILTIN\Administrators` is well-known, and since PEI-313 the query
+    /// surface refuses to assert it: identity confinement gives lpsd
+    /// authority over its own domain only, and the authority's table answers
+    /// for well-knowns. lpsd still holds the membership *edges* — they
+    /// surface through each principal's GROUPS field, which §2.13 permits —
+    /// but the group object itself is not lpsd's to describe.
     #[test]
-    fn a_well_known_group_with_recorded_members_lists_them() {
+    fn a_well_known_group_is_not_found_on_the_query_surface() {
         let store = seeded();
-        let entry = ask(
-            &store,
-            psi::Key::Name("Administrators".into()),
-            Kind::Group,
-            Fields::MEMBERS,
-        );
-        let Some(Value::Members(members)) = entry.value(Fields::MEMBERS) else {
-            panic!("members must be present");
-        };
-        assert_eq!(members.len(), 1);
-        assert_eq!(members[0].name, "jack");
-    }
-
-    /// Nothing records who is in `Everyone`; authd staples it onto every token.
-    /// Absent, not declined — declining would suggest an answer exists.
-    #[test]
-    fn a_stapled_group_has_no_members_rather_than_withheld_ones() {
-        let store = seeded();
-        for name in ["Everyone", "Authenticated Users"] {
+        for name in ["Administrators", "Everyone", "Authenticated Users"] {
             let entry = ask(
                 &store,
                 psi::Key::Name(name.into()),
                 Kind::Group,
                 Fields::MEMBERS,
             );
-            assert_eq!(entry.outcome, Outcome::Found, "{name} is still nameable");
-            assert!(entry.value(Fields::MEMBERS).is_none());
             assert_eq!(
-                entry
-                    .withheld
-                    .iter()
-                    .find(|w| w.field == Fields::MEMBERS)
-                    .map(|w| w.reason),
-                Some(WithheldReason::Absent),
-                "{name} has no membership to record"
+                entry.outcome,
+                Outcome::NotFound,
+                "{name} is not this domain's"
             );
         }
+    }
+
+    /// The membership edge survives the object's withdrawal: jack's own
+    /// record still names Administrators among his groups.
+    #[test]
+    fn a_well_known_membership_still_surfaces_on_the_principal() {
+        let store = seeded();
+        let entry = ask(
+            &store,
+            psi::Key::Name("jack".into()),
+            Kind::Principal,
+            Fields::GROUPS,
+        );
+        let Some(Value::Groups(groups)) = entry.value(Fields::GROUPS) else {
+            panic!("groups must be present");
+        };
+        let admins = well_known_group("Administrators").unwrap();
+        assert!(
+            groups
+                .iter()
+                .any(|g| g.sid == admins.as_ref().as_bytes().to_vec()),
+            "the Administrators membership edge must survive"
+        );
     }
 
     /// Every principal defaults to `Authenticated Users` as their primary group.
