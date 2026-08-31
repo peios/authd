@@ -377,14 +377,6 @@ pub fn enumerate(
     }
 }
 
-fn complete(entries: Vec<psi::QueryEntry>) -> psi::EnumerateResult {
-    psi::EnumerateResult {
-        outcome: Outcome::Found,
-        entries,
-        next: Vec::new(),
-    }
-}
-
 /// `Ok(None)` begins a walk; `Ok(Some(rid))` resumes after one; `Err` is a
 /// cursor lpsd cannot honour.
 ///
