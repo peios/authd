@@ -554,7 +554,10 @@ impl Registry {
     /// per-connection checks in [`verify_domain`].
     fn admit(&self, source: Arc<Source>) -> Result<(), Rejected> {
         let mut sources = self.sources.lock().unwrap_or_else(|e| e.into_inner());
-        let mut first_declared = self.first_declared.lock().unwrap_or_else(|e| e.into_inner());
+        let mut first_declared = self
+            .first_declared
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
 
         if sources.len() >= MAX_SOURCES {
             return Err(Rejected::TooMany);
@@ -595,28 +598,7 @@ impl Registry {
     }
 
     pub fn count(&self) -> usize {
-        self.sources
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .len()
-    }
-
-    /// Which source should answer for this identifier?
-    ///
-    /// **M2 is a stub**: the first live source, whatever the identifier says.
-    /// The real rule is resolution in a configured order, first claim wins,
-    /// with a qualified name (`CORP\jack`) going to its owning source and never
-    /// falling back — because a name that can fall through to a different
-    /// source when its own is unreachable lets anyone who can break the network
-    /// choose which authority answers for you.
-    ///
-    /// Note what resolution deliberately is *not*: broadcasting the credential.
-    /// Asking several sources "do you own this name?" is a resolution step with
-    /// no secret in it. Trying each source in turn *with the password* — PAM and
-    /// NSS stacking — hands every source the credentials of every other
-    /// source's users, including on typos.
-    pub fn route(&self, _identifier: &[u8]) -> Option<Arc<Source>> {
-        self.ordered().into_iter().next()
+        self.sources.lock().unwrap_or_else(|e| e.into_inner()).len()
     }
 
     /// Every live source, in the order a bare name is resolved.
@@ -651,7 +633,11 @@ impl Registry {
         let mut slots: Vec<(u32, &str, Option<Arc<Source>>)> = Vec::new();
 
         for source in &live {
-            slots.push((source.search_order(), source.name(), Some(Arc::clone(source))));
+            slots.push((
+                source.search_order(),
+                source.name(),
+                Some(Arc::clone(source)),
+            ));
         }
         for entry in &self.configured {
             if !live.iter().any(|s| s.name() == entry.name) {
@@ -771,7 +757,6 @@ impl Registry {
     }
 }
 
-
 // ---------------------------------------------------------------------------
 // Serving a connection
 // ---------------------------------------------------------------------------
@@ -815,10 +800,7 @@ pub fn serve(registry: &Registry, stream: UnixStream) {
     };
 
     if let Err(rejected) = registry.admit(Arc::clone(&source)) {
-        log::error(format_args!(
-            "psi: refused {}: {rejected}",
-            source.name()
-        ));
+        log::error(format_args!("psi: refused {}: {rejected}", source.name()));
         return;
     }
 
@@ -826,10 +808,9 @@ pub fn serve(registry: &Registry, stream: UnixStream) {
     // source never applies the base — authd does that — but knowing it lets an
     // administration tool show the uid a principal will really project to
     // rather than the relative number on disk.
-    let range = source.unix_id_range().unwrap_or(unix_id::Range {
-        base: 0,
-        count: 0,
-    });
+    let range = source
+        .unix_id_range()
+        .unwrap_or(unix_id::Range { base: 0, count: 0 });
 
     // Only once it is in the registry, so a logon racing the acknowledgement
     // cannot find a source that is not routable yet.
@@ -926,7 +907,9 @@ fn register(stream: UnixStream, entry: &policy::SourceEntry) -> Option<Arc<Sourc
     // The connection is long-lived and idle most of the time; per-conversation
     // deadlines are enforced on the channels, not the socket.
     if let Err(error) = stream.set_read_timeout(None) {
-        log::warn(format_args!("psi: could not clear the read timeout: {error}"));
+        log::warn(format_args!(
+            "psi: could not clear the read timeout: {error}"
+        ));
         return None;
     }
 
@@ -941,7 +924,10 @@ fn register(stream: UnixStream, entry: &policy::SourceEntry) -> Option<Arc<Sourc
         ));
     }
 
-    if register.capabilities.contains(psi::Capabilities::PUSHES_CHANGES) && register.entry_ttl != 0
+    if register
+        .capabilities
+        .contains(psi::Capabilities::PUSHES_CHANGES)
+        && register.entry_ttl != 0
     {
         log::info(format_args!(
             "psi: {} pushes changes and bounds an entry at {}s",
@@ -1082,7 +1068,10 @@ fn pump(source: &Arc<Source>) {
 /// `PUSHES_CHANGES` and found authd refusing its notifications would be right to
 /// consider authd broken, and a cache added later plugs in exactly here.
 fn changed_here(source: &Arc<Source>, changed: &psi::Changed) {
-    if !source.capabilities().contains(psi::Capabilities::PUSHES_CHANGES) {
+    if !source
+        .capabilities()
+        .contains(psi::Capabilities::PUSHES_CHANGES)
+    {
         log::warn(format_args!(
             "psi: {}: sent a change notification without declaring PushesChanges",
             source.name()
@@ -1121,10 +1110,7 @@ fn changed_here(source: &Arc<Source>, changed: &psi::Changed) {
             format!("{sid}")
         }
     };
-    log::info(format_args!(
-        "psi: {}: invalidated {scope}",
-        source.name()
-    ));
+    log::info(format_args!("psi: {}: invalidated {scope}", source.name()));
 }
 
 fn decode(source: &Arc<Source>, envelope: &psi::Envelope, buf: &[u8]) -> Option<Inbound> {
@@ -1394,7 +1380,13 @@ mod tests {
     fn a_source_may_not_claim_a_well_known_namespace() {
         // The case that matters: claiming BUILTIN would make every
         // `S-1-5-32-…` alias assertable as an identity by that source.
-        for text in ["S-1-5-32", "S-1-5-32-544", "S-1-5-18", "S-1-1-0", "S-1-5-21-1-2-3-1000"] {
+        for text in [
+            "S-1-5-32",
+            "S-1-5-32-544",
+            "S-1-5-18",
+            "S-1-1-0",
+            "S-1-5-21-1-2-3-1000",
+        ] {
             assert_eq!(
                 verify_domain(&declared(text), &entry("lpsd", None)),
                 None,
@@ -1492,31 +1484,26 @@ mod tests {
     }
 
     #[test]
-    fn routing_finds_a_live_source_and_skips_a_dead_one() {
+    fn ordering_includes_a_live_source_and_drops_a_dead_one() {
+        // What routing (resolve::route) builds on: a source that shut down
+        // must vanish from the order, or a logon would be sent to a wire
+        // nobody answers.
         let registry = Registry::new();
         let (source, _peer) = pair();
         registry.admit(Arc::clone(&source)).expect("must admit");
-        assert!(registry.route(b"jack").is_some());
+        assert_eq!(registry.ordered().len(), 1);
 
         source.shut_down();
-        assert!(registry.route(b"jack").is_none());
+        assert!(registry.ordered().is_empty());
     }
 
     #[test]
-    fn routing_with_no_sources_is_none() {
-        // Which is what makes "no sources means no accounts" an honest answer
-        // rather than an outage: it becomes AuthorityUnavailable, not a hang.
-        let registry = Registry::new();
-        assert!(registry.route(b"jack").is_none());
-    }
-
-    #[test]
-    fn a_removed_source_is_no_longer_routable() {
+    fn a_removed_source_is_no_longer_ordered() {
         let registry = Registry::new();
         let (source, _peer) = pair();
         registry.admit(Arc::clone(&source)).expect("must admit");
         registry.remove(&source);
         assert_eq!(registry.count(), 0);
-        assert!(registry.route(b"jack").is_none());
+        assert!(registry.ordered().is_empty());
     }
 }

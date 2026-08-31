@@ -47,6 +47,7 @@
 //! ship as registry data (`authd-policy.reg`), where they can be read and
 //! edited, rather than being compiled in where they can be neither.
 
+use libauthd::wire::{LogonType, LogonTypes};
 use peios::registry::{Key, KeyAccess, OpenFlags};
 use peios::security::{Acl, IntegrityLevel, Privileges, Sid, SidRef, sddl};
 
@@ -72,6 +73,28 @@ const OWNER_VALUE: &str = "Owner";
 
 /// The DACL objects a token creates inherit, as SDDL.
 const DEFAULT_DACL_VALUE: &str = "DefaultDacl";
+
+/// The logon types this principal may *originate* — request of the
+/// authority on behalf of somebody else, over `/run/logon.sock`.
+///
+/// The other half of "client proposes, authority constrains" (PGSS §2.4,
+/// obligation 15). Distinct from the wire's per-principal `LogonTypes`,
+/// which is the source's statement about the account being signed in; this
+/// one is the machine's statement about the *asker* — a graphical greeter
+/// gets `["Interactive"]`, a web console `["Network"]`, and neither can
+/// mint itself a console-shaped token by proposing a different type.
+const LOGON_TYPES_VALUE: &str = "LogonTypes";
+
+/// The security descriptor `/run/logon.sock` carries, as SDDL.
+///
+/// On the parent key beside [`DENIED_PRIVILEGES_VALUE`], because which
+/// principals may reach the logon socket is machine-wide authentication
+/// policy, not a property of any one principal's record. PGSS §2.4 requires
+/// the socket's access to be controlled by a security descriptor — a site
+/// admitting a graphical greeter or a web console widens this value, and
+/// grants the peer's record a `LogonTypes` list to make the widening mean
+/// something.
+const LOGON_SOCKET_SD_VALUE: &str = "LogonSocketDescriptor";
 
 /// Privileges no principal may hold, whatever any record says.
 ///
@@ -144,6 +167,13 @@ struct Record {
     integrity: Option<IntegrityLevel>,
     owner: Option<Sid>,
     default_dacl: Option<Acl>,
+    /// `None` — the value is absent, this record does not speak to
+    /// origination. `Some` with no bits set — an explicitly empty list,
+    /// which *revokes*: the two must not be conflated, because
+    /// `LogonTypes::permits` substitutes a default for the empty set that
+    /// would silently turn "may originate nothing" into "may originate
+    /// almost anything".
+    logon_types: Option<LogonTypes>,
 }
 
 /// Everything the key says.
@@ -339,12 +369,18 @@ fn read() -> Configured {
             continue;
         };
 
-        match Key::open(Some(&key), &name, KeyAccess::QUERY_VALUE, OpenFlags::empty()) {
+        match Key::open(
+            Some(&key),
+            &name,
+            KeyAccess::QUERY_VALUE,
+            OpenFlags::empty(),
+        ) {
             Ok(entry) => records.push(Record {
                 privileges: privileges(&entry, &name),
                 integrity: integrity_of(&entry, &name),
                 owner: owner_of(&entry, &name),
                 default_dacl: default_dacl_of(&entry, &name),
+                logon_types: logon_types_of(&entry, &name),
                 sid,
             }),
             Err(error) => log::warn(format_args!(
@@ -354,7 +390,8 @@ fn read() -> Configured {
     }
 
     Configured {
-        denied: read_privilege_list(&key, KEY, DENIED_PRIVILEGES_VALUE).unwrap_or_else(Privileges::empty),
+        denied: read_privilege_list(&key, KEY, DENIED_PRIVILEGES_VALUE)
+            .unwrap_or_else(Privileges::empty),
         records,
     }
 }
@@ -371,6 +408,7 @@ fn floor() -> Configured {
                     integrity: None,
                     owner: None,
                     default_dacl: None,
+                    logon_types: None,
                 })
             })
             .collect(),
@@ -386,6 +424,93 @@ fn resolve(name: &str) -> Option<Sid> {
 
 fn privileges(entry: &Key, name: &str) -> Option<Privileges> {
     read_privilege_list(entry, &format!("{KEY}\\{name}"), PRIVILEGES_VALUE)
+}
+
+/// The configured SDDL for `/run/logon.sock`, if a site has stated one.
+///
+/// Read once at startup rather than per logon: a descriptor is applied to
+/// the socket when it is bound, and rereading a value that can no longer be
+/// applied would only misreport what is in force.
+pub fn logon_socket_descriptor() -> Option<String> {
+    let key = Key::open(None, KEY, KeyAccess::QUERY_VALUE, OpenFlags::empty()).ok()?;
+    let value = key
+        .query_value(LOGON_SOCKET_SD_VALUE.as_bytes(), None)
+        .ok()?;
+    match sz(&value.ty, &value.data) {
+        Some(text) => Some(text.to_string()),
+        None => {
+            log::warn(format_args!(
+                "{KEY}\\{LOGON_SOCKET_SD_VALUE} is not a REG_SZ; using the built-in \
+                 descriptor"
+            ));
+            None
+        }
+    }
+}
+
+/// The logon types the peer named by `peer` may originate.
+///
+/// Consulted with the socket peer's user SID and nothing else — no group
+/// union, deliberately. Origination is checked before any token exists, so
+/// there is no final SID set to evaluate against; the socket yields exactly
+/// one verified identity, and a right this consequential should be granted
+/// to it by name rather than assembled from memberships nobody stated
+/// together.
+///
+/// `None` means no record speaks to it. What that defaults to is the
+/// caller's decision, not this module's — see `may_request`.
+pub fn originator_logon_types(peer: &SidRef) -> Option<LogonTypes> {
+    read()
+        .records
+        .iter()
+        .find(|record| record.sid.as_ref().as_bytes() == peer.as_bytes())
+        .and_then(|record| record.logon_types)
+}
+
+/// Read a `REG_MULTI_SZ` of logon-type names.
+///
+/// The same tolerance rule as privileges: an unknown name is dropped with a
+/// warning rather than failing the list, because dropping one grants
+/// strictly less — the safe direction for a grant.
+fn logon_types_of(entry: &Key, name: &str) -> Option<LogonTypes> {
+    let value = entry.query_value(LOGON_TYPES_VALUE.as_bytes(), None).ok()?;
+    let path = format!("{KEY}\\{name}");
+    let Some(names) = multi_sz(&value.ty, &value.data) else {
+        log::warn(format_args!(
+            "{path}\\{LOGON_TYPES_VALUE} is not a REG_MULTI_SZ (type {:#x}); ignoring it",
+            value.ty.0
+        ));
+        return None;
+    };
+    Some(parse_logon_type_names(&names, &path))
+}
+
+/// Turn a list of logon-type names into the bitmask.
+fn parse_logon_type_names(names: &[&str], path: &str) -> LogonTypes {
+    let mut types = LogonTypes::UNSTATED;
+    for name in names {
+        match logon_type_by_name(name) {
+            Some(logon_type) => types = types.with(logon_type),
+            None => log::warn(format_args!(
+                "{path}\\{LOGON_TYPES_VALUE} names {name:?}, which is not a logon \
+                 type this build knows; ignoring it"
+            )),
+        }
+    }
+    types
+}
+
+/// The names an administrator writes, matching [`LogonType`]'s variants.
+fn logon_type_by_name(name: &str) -> Option<LogonType> {
+    Some(match name {
+        "Interactive" => LogonType::Interactive,
+        "Network" => LogonType::Network,
+        "Batch" => LogonType::Batch,
+        "Service" => LogonType::Service,
+        "NetworkCleartext" => LogonType::NetworkCleartext,
+        "NewCredentials" => LogonType::NewCredentials,
+        _ => return None,
+    })
 }
 
 /// Read a `REG_MULTI_SZ` of privilege names.
@@ -502,7 +627,9 @@ fn default_dacl(records: &[Record], user: &SidRef, groups: &[&SidRef]) -> Option
 /// The kernel's own default applies instead, which is the same outcome as not
 /// configuring one — so a typo here costs the customisation, not the session.
 fn default_dacl_of(entry: &Key, name: &str) -> Option<Acl> {
-    let value = entry.query_value(DEFAULT_DACL_VALUE.as_bytes(), None).ok()?;
+    let value = entry
+        .query_value(DEFAULT_DACL_VALUE.as_bytes(), None)
+        .ok()?;
 
     let Some(text) = sz(&value.ty, &value.data) else {
         log::warn(format_args!(
@@ -577,13 +704,18 @@ mod tests {
         text.parse().expect("a well-formed SID")
     }
 
-    fn record(name: &str, privileges: Option<Privileges>, integrity: Option<IntegrityLevel>) -> Record {
+    fn record(
+        name: &str,
+        privileges: Option<Privileges>,
+        integrity: Option<IntegrityLevel>,
+    ) -> Record {
         Record {
             sid: resolve(name).expect("a resolvable principal"),
             privileges,
             integrity,
             owner: None,
             default_dacl: None,
+            logon_types: None,
         }
     }
 
@@ -596,11 +728,18 @@ mod tests {
 
     /// `evaluate` reads the registry, so the composition rules are tested
     /// against the pure halves it delegates to.
-    fn union(records: &[Record], user: &SidRef, groups: &[&SidRef], denied: Privileges) -> Privileges {
+    fn union(
+        records: &[Record],
+        user: &SidRef,
+        groups: &[&SidRef],
+        denied: Privileges,
+    ) -> Privileges {
         let mut privileges = Privileges::empty();
         for record in records {
             let applies = record.sid.as_ref().as_bytes() == user.as_bytes()
-                || groups.iter().any(|g| g.as_bytes() == record.sid.as_ref().as_bytes());
+                || groups
+                    .iter()
+                    .any(|g| g.as_bytes() == record.sid.as_ref().as_bytes());
             if applies {
                 privileges |= record.privileges.unwrap_or_else(Privileges::empty);
             }
@@ -629,7 +768,11 @@ mod tests {
             record("Everyone", None, Some(IntegrityLevel::LOW)),
         ];
         assert_eq!(
-            integrity(&records, user.as_ref(), &[admins.as_ref(), everyone.as_ref()]),
+            integrity(
+                &records,
+                user.as_ref(),
+                &[admins.as_ref(), everyone.as_ref()]
+            ),
             IntegrityLevel::HIGH
         );
     }
@@ -702,10 +845,19 @@ mod tests {
         let everyone = sid("S-1-1-0");
         let records = [
             record("Everyone", Some(Privileges::CHANGE_NOTIFY), None),
-            record("Administrators", Some(Privileges::BACKUP | Privileges::RESTORE), None),
+            record(
+                "Administrators",
+                Some(Privileges::BACKUP | Privileges::RESTORE),
+                None,
+            ),
         ];
         assert_eq!(
-            union(&records, user.as_ref(), &[admins.as_ref(), everyone.as_ref()], Privileges::empty()),
+            union(
+                &records,
+                user.as_ref(),
+                &[admins.as_ref(), everyone.as_ref()],
+                Privileges::empty()
+            ),
             Privileges::CHANGE_NOTIFY | Privileges::BACKUP | Privileges::RESTORE
         );
     }
@@ -722,7 +874,12 @@ mod tests {
             None,
         )];
         assert_eq!(
-            union(&records, user.as_ref(), &[admins.as_ref()], Privileges::DEBUG),
+            union(
+                &records,
+                user.as_ref(),
+                &[admins.as_ref()],
+                Privileges::DEBUG
+            ),
             Privileges::BACKUP
         );
     }
@@ -730,7 +887,11 @@ mod tests {
     #[test]
     fn an_empty_privilege_list_grants_nothing() {
         let user = sid("S-1-5-21-1-2-3-1000");
-        let records = [record("S-1-5-21-1-2-3-1000", Some(Privileges::empty()), None)];
+        let records = [record(
+            "S-1-5-21-1-2-3-1000",
+            Some(Privileges::empty()),
+            None,
+        )];
         assert_eq!(
             union(&records, user.as_ref(), &[], Privileges::empty()),
             Privileges::empty()
@@ -749,7 +910,12 @@ mod tests {
         let everyone = sid("S-1-1-0");
         let configured = floor();
         assert_eq!(
-            union(&configured.records, user.as_ref(), &[everyone.as_ref()], configured.denied),
+            union(
+                &configured.records,
+                user.as_ref(),
+                &[everyone.as_ref()],
+                configured.denied
+            ),
             Privileges::CHANGE_NOTIFY
         );
     }
@@ -786,7 +952,11 @@ mod tests {
 
     #[test]
     fn every_floor_entry_names_a_principal_that_resolves() {
-        assert_eq!(floor().records.len(), FLOOR.len(), "a floor entry did not resolve");
+        assert_eq!(
+            floor().records.len(),
+            FLOOR.len(),
+            "a floor entry did not resolve"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -830,7 +1000,9 @@ mod tests {
             Some("S-1-5-32-544".to_string())
         );
         assert_eq!(
-            resolve("S-1-5-21-1-2-3-1000").as_ref().map(|s| s.to_string()),
+            resolve("S-1-5-21-1-2-3-1000")
+                .as_ref()
+                .map(|s| s.to_string()),
             Some("S-1-5-21-1-2-3-1000".to_string())
         );
     }
@@ -930,8 +1102,8 @@ mod tests {
         let user = sid("S-1-5-21-1-2-3-1000");
         let admins = sid("S-1-5-32-544");
         let records = [with_dacl("Administrators", "D:(A;;GA;;;SY)(A;;GA;;;BA)")];
-        let chosen = default_dacl(&records, user.as_ref(), &[admins.as_ref()])
-            .expect("the group's DACL");
+        let chosen =
+            default_dacl(&records, user.as_ref(), &[admins.as_ref()]).expect("the group's DACL");
         assert_eq!(chosen.view().expect("parseable").len(), 2);
     }
 
@@ -943,8 +1115,8 @@ mod tests {
             with_dacl("Administrators", "D:(A;;GA;;;SY)(A;;GA;;;BA)"),
             with_dacl("S-1-5-21-1-2-3-1000", "D:(A;;GA;;;SY)"),
         ];
-        let chosen = default_dacl(&records, user.as_ref(), &[admins.as_ref()])
-            .expect("the user's DACL");
+        let chosen =
+            default_dacl(&records, user.as_ref(), &[admins.as_ref()]).expect("the user's DACL");
         assert_eq!(chosen.view().expect("parseable").len(), 1);
     }
 
@@ -1076,5 +1248,40 @@ mod tests {
         assert_eq!(resolve("Domain Admins"), None);
         assert_eq!(resolve("BUILTIN\\Administrators"), None);
         assert_eq!(resolve(""), None);
+    }
+
+    // -----------------------------------------------------------------------
+    // Originator logon types (PGSS §2.4 obligation 15)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn logon_type_names_parse_to_the_bitmask() {
+        let types = parse_logon_type_names(&["Interactive", "Network"], "test");
+        assert!(types.bits() & (1 << LogonType::Interactive as u32) != 0);
+        assert!(types.bits() & (1 << LogonType::Network as u32) != 0);
+        assert!(types.bits() & (1 << LogonType::Service as u32) == 0);
+    }
+
+    #[test]
+    fn an_unknown_logon_type_name_is_dropped_not_fatal() {
+        let types = parse_logon_type_names(&["Interactive", "Telepathic"], "test");
+        assert!(types.bits() & (1 << LogonType::Interactive as u32) != 0);
+        assert_eq!(types.bits().count_ones(), 1);
+    }
+
+    #[test]
+    fn an_empty_list_grants_nothing_despite_the_wire_default() {
+        // The trap may_request avoids: LogonTypes::permits substitutes
+        // DEFAULT for the empty set, which is right for a principal's own
+        // sign-on surface and would turn "may originate nothing" into "may
+        // originate almost anything" here. The raw bits are the grant.
+        let types = parse_logon_type_names(&[], "test");
+        assert_eq!(types.bits(), 0);
+        assert!(
+            types.permits(LogonType::Interactive),
+            "permits() substitutes the default; if this stops holding, the \
+             comment in may_request is stale"
+        );
+        assert!(types.bits() & (1 << LogonType::Interactive as u32) == 0);
     }
 }

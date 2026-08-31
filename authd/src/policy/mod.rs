@@ -31,7 +31,7 @@ use peios::registry::ValueType;
 pub mod principal;
 pub mod sources;
 
-pub use principal::Outcome;
+pub use principal::{Outcome, logon_socket_descriptor, originator_logon_types};
 pub use sources::{SOURCES_KEY, SourceEntry, sources};
 
 /// Read a `REG_DWORD`'s value, if that is what this is.
