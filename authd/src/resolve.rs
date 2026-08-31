@@ -86,13 +86,16 @@ pub fn lookup(
     fields: Fields,
 ) -> Answer {
     let fields = fields.intersection(KNOWN);
+    // One budget for the whole request, however many sources answer it
+    // (§2.14, obligation 31).
+    let deadline = std::time::Instant::now() + QUERY_TIMEOUT;
     match key {
-        libauthd::ident::Key::Name(name) => by_name(registry, name, kind, fields),
+        libauthd::ident::Key::Name(name) => by_name(registry, name, kind, fields, deadline),
         libauthd::ident::Key::Sid(bytes) => match SidRef::from_bytes(bytes) {
-            Some(sid) => by_sid(registry, sid, kind, fields),
+            Some(sid) => by_sid(registry, sid, kind, fields, deadline),
             None => Answer::of(Outcome::Malformed),
         },
-        libauthd::ident::Key::UnixId(id) => by_unix_id(registry, *id, kind, fields),
+        libauthd::ident::Key::UnixId(id) => by_unix_id(registry, *id, kind, fields, deadline),
     }
 }
 
@@ -108,7 +111,13 @@ pub fn lookup(
 ///   resolve the name to a different SID than it does when the system is
 ///   healthy, so access decisions would be made against the wrong principal
 ///   precisely while something is broken.
-fn by_name(registry: &Registry, name: &str, kind: Kind, fields: Fields) -> Answer {
+fn by_name(
+    registry: &Registry,
+    name: &str,
+    kind: Kind,
+    fields: Fields,
+    deadline: std::time::Instant,
+) -> Answer {
     // Before the well-known lookup, not after. `well_known::by_name` trims, so
     // `" Everyone "` was answered `Found` where obligation 35 requires refusal
     // for a leading or trailing space.
@@ -135,7 +144,13 @@ fn by_name(registry: &Registry, name: &str, kind: Kind, fields: Fields) -> Answe
                 return Answer::of(Outcome::Unavailable);
             }
         };
-        match ask(&source, psi::Key::Name(name.to_string()), kind, fields) {
+        match ask(
+            &source,
+            psi::Key::Name(name.to_string()),
+            kind,
+            fields,
+            deadline,
+        ) {
             Reply::Found(entry) => return found(&source, &entry, kind, fields),
             Reply::NotFound => continue,
             // A source refused. That is a fact about the source, identical for
@@ -222,6 +237,7 @@ pub fn route(registry: &Registry, identifier: &[u8]) -> Route {
         };
     }
 
+    let deadline = std::time::Instant::now() + QUERY_TIMEOUT;
     let mut fallback: Option<Arc<Source>> = None;
     for slot in slots {
         let source = match slot {
@@ -245,6 +261,7 @@ pub fn route(registry: &Registry, identifier: &[u8]) -> Route {
             psi::Key::Name(name.to_string()),
             Kind::Principal,
             Fields::empty(),
+            deadline,
         ) {
             Reply::Found(_) => return Route::Owner(source),
             Reply::NotFound => continue,
@@ -262,7 +279,13 @@ pub fn route(registry: &Registry, identifier: &[u8]) -> Route {
     }
 }
 
-fn by_sid(registry: &Registry, sid: &SidRef, kind: Kind, fields: Fields) -> Answer {
+fn by_sid(
+    registry: &Registry,
+    sid: &SidRef,
+    kind: Kind,
+    fields: Fields,
+    deadline: std::time::Instant,
+) -> Answer {
     if let Some(answer) = well_known_by_sid(sid, kind, fields) {
         return answer;
     }
@@ -286,6 +309,7 @@ fn by_sid(registry: &Registry, sid: &SidRef, kind: Kind, fields: Fields) -> Answ
         psi::Key::Sid(sid.as_bytes().to_vec()),
         kind,
         fields,
+        deadline,
     ) {
         Reply::Found(entry) => found(&source, &entry, kind, fields),
         Reply::NotFound => Answer::of(Outcome::NotFound),
@@ -295,7 +319,13 @@ fn by_sid(registry: &Registry, sid: &SidRef, kind: Kind, fields: Fields) -> Answ
 }
 
 /// The inversion no source can perform for itself.
-fn by_unix_id(registry: &Registry, id: u32, kind: Kind, fields: Fields) -> Answer {
+fn by_unix_id(
+    registry: &Registry,
+    id: u32,
+    kind: Kind,
+    fields: Fields,
+    deadline: std::time::Instant,
+) -> Answer {
     if let Some(answer) = well_known_by_unix_id(id, kind, fields) {
         return answer;
     }
@@ -314,7 +344,13 @@ fn by_unix_id(registry: &Registry, id: u32, kind: Kind, fields: Fields) -> Answe
             None => Outcome::NotFound,
         });
     };
-    match ask(&source, psi::Key::RelativeId(relative), kind, fields) {
+    match ask(
+        &source,
+        psi::Key::RelativeId(relative),
+        kind,
+        fields,
+        deadline,
+    ) {
         Reply::Found(entry) => found(&source, &entry, kind, fields),
         Reply::NotFound => Answer::of(Outcome::NotFound),
         Reply::Refused => Answer::of(Outcome::Unavailable),
@@ -418,7 +454,22 @@ fn gated_fields(source: &Arc<Source>, fields: Fields) -> Fields {
     }
 }
 
-fn ask(source: &Arc<Source>, key: psi::Key, kind: Kind, fields: Fields) -> Reply {
+fn ask(
+    source: &Arc<Source>,
+    key: psi::Key,
+    kind: Kind,
+    fields: Fields,
+    deadline: std::time::Instant,
+) -> Reply {
+    // §2.14, obligation 31: the time bound is on the *request*, not on each
+    // source consulted for it. A walk across N slow-but-live sources used
+    // to take N × QUERY_TIMEOUT; every ask now spends from one budget, and
+    // a source reached with nothing left is Unavailable without a wire
+    // round trip — the same answer its timeout would have produced.
+    let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+    if remaining.is_zero() {
+        return Reply::Unavailable;
+    }
     // A source that did not declare it answers queries is not asked one. That is
     // what keeps a source written against an earlier PSI working untouched.
     //
@@ -453,7 +504,7 @@ fn ask(source: &Arc<Source>, key: psi::Key, kind: Kind, fields: Fields) -> Reply
         return Reply::Unavailable;
     }
 
-    let entry = match conversation.recv(QUERY_TIMEOUT) {
+    let entry = match conversation.recv(remaining) {
         Ok(Inbound::Results(result)) => {
             conversation.finished();
             match result.results.into_iter().next() {
@@ -779,6 +830,7 @@ pub fn enumerate(
     cursor: &[u8],
 ) -> Result<Page, Outcome> {
     let fields = fields.intersection(KNOWN);
+    let deadline = std::time::Instant::now() + QUERY_TIMEOUT;
     let sources = registry.ordered();
     let (resume, inner) = match split_cursor(cursor) {
         Some(split) => split,
@@ -814,7 +866,7 @@ pub fn enumerate(
             incomplete.push(source.name().to_string());
             continue;
         }
-        match page_from(source, kind, fields, &inner) {
+        match page_from(source, kind, fields, &inner, deadline) {
             Some(page) => {
                 for entry in &page.entries {
                     if let Answer {
@@ -884,7 +936,8 @@ pub fn enumerate_members(
     cursor: &[u8],
 ) -> Result<Page, Outcome> {
     let fields = fields.intersection(KNOWN);
-    let (source, key) = owning_group_source(registry, of)?;
+    let deadline = std::time::Instant::now() + QUERY_TIMEOUT;
+    let (source, key) = owning_group_source(registry, of, deadline)?;
 
     if !source
         .capabilities()
@@ -906,7 +959,8 @@ pub fn enumerate_members(
     if conversation.enumerate(&request).is_err() {
         return Err(Outcome::Unavailable);
     }
-    let page = match conversation.recv(QUERY_TIMEOUT) {
+    let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+    let page = match conversation.recv(remaining) {
         Ok(Inbound::Page(page)) => {
             conversation.finished();
             page
@@ -958,6 +1012,7 @@ pub fn enumerate_members(
 fn owning_group_source(
     registry: &Registry,
     of: &libauthd::ident::Key,
+    deadline: std::time::Instant,
 ) -> Result<(Arc<Source>, psi::Key), Outcome> {
     let (source, key) = match of {
         libauthd::ident::Key::Name(name) => {
@@ -976,6 +1031,7 @@ fn owning_group_source(
                     psi::Key::Name(name.clone()),
                     Kind::Group,
                     Fields::empty(),
+                    deadline,
                 ) {
                     Reply::Found(_) => return Ok((source, psi::Key::Name(name.clone()))),
                     Reply::NotFound => continue,
@@ -1005,7 +1061,7 @@ fn owning_group_source(
         },
     };
 
-    match ask(&source, key.clone(), Kind::Group, Fields::empty()) {
+    match ask(&source, key.clone(), Kind::Group, Fields::empty(), deadline) {
         Reply::Found(_) => Ok((source, key)),
         Reply::NotFound => Err(Outcome::NotFound),
         Reply::Refused | Reply::Unavailable => Err(Outcome::Unavailable),
@@ -1017,7 +1073,12 @@ fn page_from(
     kind: Kind,
     fields: Fields,
     cursor: &[u8],
+    deadline: std::time::Instant,
 ) -> Option<psi::EnumerateResult> {
+    let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+    if remaining.is_zero() {
+        return None;
+    }
     let mut conversation = source.open()?;
     let request = psi::EnumerateSource {
         kind,
@@ -1028,7 +1089,7 @@ fn page_from(
     if conversation.enumerate(&request).is_err() {
         return None;
     }
-    match conversation.recv(QUERY_TIMEOUT) {
+    match conversation.recv(remaining) {
         Ok(Inbound::Page(page)) => {
             conversation.finished();
             (page.outcome == Outcome::Found).then_some(page)
