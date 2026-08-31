@@ -83,6 +83,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
 
 use libauthd::{IDENT_SOCKET_PATH, LOGON_SOCKET_PATH, PSI_SOCKET_PATH};
+use peios::file::{self, SecInfo};
+use peios::security::sddl;
 
 use crate::source::Registry;
 
@@ -156,6 +158,7 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    open_the_ident_socket();
 
     // Read once, here, rather than per lookup. It is what tells the resolver
     // which sources *should* be present, so that a name a crashed source holds
@@ -199,6 +202,53 @@ fn main() -> ExitCode {
 
     accept_logons(&registry, logon);
     ExitCode::SUCCESS
+}
+
+/// Let every principal reach the identity socket.
+///
+/// The mode above says `0o666` and decides nothing: KACS raises
+/// `CAP_DAC_OVERRIDE` on every credential, so the POSIX bits are never
+/// consulted and the descriptor is the whole of the access control.
+///
+/// Left alone, the socket takes what `/run` gives it, which is SYSTEM and
+/// Administrators and nothing else -- `/run`'s Everyone ACE is `CI` without
+/// `OI`, so it reaches directories under `/run` and never the objects in
+/// them. That is the right default for the sockets around it and the wrong
+/// one for this one, because **NSS runs inside every process on the system**.
+/// A principal that cannot connect does not get an error it can act on: the
+/// lookup fails and the caller reports `No such id`, so an ordinary account
+/// cannot resolve any name, including its own (PEI-571).
+///
+/// Everyone gets exactly what a connect needs and nothing more:
+/// `FILE_WRITE_DATA`, which is what `unix_stream_connect` checks, plus
+/// `READ_ATTRIBUTES` and `SYNCHRONIZE` so that stat and open behave. Not read
+/// or write of the socket's own descriptor, and no delete.
+///
+/// Protected, so `/run`'s inheritance can neither widen this later nor take
+/// the Everyone ACE away.
+///
+/// Failure is logged and not fatal. authd serving lookups that only
+/// administrators can reach is the behaviour that already shipped; refusing to
+/// start would take logons down with it, which is far worse.
+fn open_the_ident_socket() {
+    const IDENT_SDDL: &str = "O:SYG:SYD:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;0x100082;;;WD)";
+
+    let sd = match sddl::parse(IDENT_SDDL) {
+        Ok(sd) => sd,
+        Err(error) => {
+            log::error(format_args!(
+                "could not build the descriptor for {IDENT_SOCKET_PATH}: {error:?}"
+            ));
+            return;
+        }
+    };
+    let info = SecInfo::OWNER | SecInfo::GROUP | SecInfo::DACL;
+    if let Err(error) = file::set_sd(None, Path::new(IDENT_SOCKET_PATH), info, &sd, 0) {
+        log::error(format_args!(
+            "could not stamp {IDENT_SOCKET_PATH}: {error}; only administrators will \
+             resolve names, and every other principal will see numbers"
+        ));
+    }
 }
 
 /// Bind a socket.
