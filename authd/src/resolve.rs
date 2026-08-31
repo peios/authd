@@ -860,6 +860,158 @@ pub fn enumerate(
     })
 }
 
+/// Walk one group's members — `Enumerate` with `of` (PGSS §2.17), the
+/// continuation path for a `MEMBERS` field withheld as `TooLarge`.
+///
+/// Members of one group are a lookup that overflowed, so this goes to the
+/// **owning source only**, never across the order: the group is one object,
+/// and exactly one source is authoritative for it. The client's cursor is
+/// relayed to that source verbatim and its `next` comes back the same way —
+/// opaque at both hops, and re-derived from `of` each page, so there is no
+/// state to hold between requests.
+///
+/// The group is resolved before each page is fetched. That is one extra
+/// round trip on a path only ever walked after a `TooLarge` withhold, and it
+/// buys the answer's honesty: "no such group" must be `NotFound`, and
+/// without the resolution step it would be indistinguishable from a
+/// source-side refusal. Well-known groups come back `NotFound` too — their
+/// membership is a rule, not a record, and no source can enumerate a rule.
+pub fn enumerate_members(
+    registry: &Registry,
+    of: &libauthd::ident::Key,
+    kind: Kind,
+    fields: Fields,
+    cursor: &[u8],
+) -> Result<Page, Outcome> {
+    let fields = fields.intersection(KNOWN);
+    let (source, key) = owning_group_source(registry, of)?;
+
+    if !source
+        .capabilities()
+        .contains(psi::Capabilities::ENUMERATES)
+    {
+        // The one source that could answer declared it never will. For the
+        // whole-table walk that is an `incomplete` entry; here it is the
+        // whole answer.
+        return Err(Outcome::Unavailable);
+    }
+
+    let mut conversation = source.open().ok_or(Outcome::Unavailable)?;
+    let request = psi::EnumerateSource {
+        kind,
+        fields,
+        of: Some(key),
+        cursor: cursor.to_vec(),
+    };
+    if conversation.enumerate(&request).is_err() {
+        return Err(Outcome::Unavailable);
+    }
+    let page = match conversation.recv(QUERY_TIMEOUT) {
+        Ok(Inbound::Page(page)) => {
+            conversation.finished();
+            page
+        }
+        Ok(Inbound::Refuse(_)) => {
+            conversation.finished();
+            return Err(Outcome::Unavailable);
+        }
+        _ => return Err(Outcome::Unavailable),
+    };
+    match page.outcome {
+        Outcome::Found => {}
+        // The group exists — the resolution above said so — and the
+        // semantic refusals lpsd documents are all "no such group here", so
+        // what remains is a cursor this walk did not issue. Saying so lets
+        // the client restart deliberately, exactly as the whole-table walk
+        // does.
+        Outcome::Refused => return Err(Outcome::Malformed),
+        _ => return Err(Outcome::Unavailable),
+    }
+
+    let mut entries = Vec::new();
+    for entry in &page.entries {
+        if let Answer {
+            record: Some(record),
+            ..
+        } = found(&source, entry, kind, fields)
+        {
+            entries.push(record);
+        }
+    }
+    Ok(Page {
+        entries,
+        next: page.next,
+        incomplete: Vec::new(),
+    })
+}
+
+/// Which single source holds this key **as a group**, and the key as that
+/// source is asked it.
+///
+/// The same ownership rules as the lookup paths, minus the well-known
+/// layer: nothing here answers for an object no source holds. Every arm
+/// ends by asking the candidate source whether the key names a group it
+/// actually has, which is what makes the caller's `NotFound` honest — a
+/// key naming a *principal* is `NotFound` here too, because §2.17 requires
+/// the named object to be a group and there is no enumerable group by that
+/// key.
+fn owning_group_source(
+    registry: &Registry,
+    of: &libauthd::ident::Key,
+) -> Result<(Arc<Source>, psi::Key), Outcome> {
+    let (source, key) = match of {
+        libauthd::ident::Key::Name(name) => {
+            if !name_is_usable(name) {
+                return Err(Outcome::Malformed);
+            }
+            // A name is owned by whichever source claims it first in the
+            // order, with by_name's no-fall-through rules.
+            for slot in registry.slots() {
+                let source = match slot {
+                    Slot::Live(source) => source,
+                    Slot::Absent(_) => return Err(Outcome::Unavailable),
+                };
+                match ask(
+                    &source,
+                    psi::Key::Name(name.clone()),
+                    Kind::Group,
+                    Fields::empty(),
+                ) {
+                    Reply::Found(_) => return Ok((source, psi::Key::Name(name.clone()))),
+                    Reply::NotFound => continue,
+                    Reply::Refused | Reply::Unavailable => return Err(Outcome::Unavailable),
+                }
+            }
+            return Err(Outcome::NotFound);
+        }
+        libauthd::ident::Key::Sid(bytes) => {
+            let Some(sid) = SidRef::from_bytes(bytes) else {
+                return Err(Outcome::Malformed);
+            };
+            match registry.owning(&sid) {
+                Some(source) => (source, psi::Key::Sid(bytes.clone())),
+                None if registry.complete() => return Err(Outcome::NotFound),
+                None => return Err(Outcome::Unavailable),
+            }
+        }
+        libauthd::ident::Key::UnixId(id) => match registry.rebasing(*id) {
+            Some((source, relative)) => (source, psi::Key::RelativeId(relative)),
+            None => {
+                return Err(match registry.configured_range(*id) {
+                    Some(_) => Outcome::Unavailable,
+                    None => Outcome::NotFound,
+                });
+            }
+        },
+    };
+
+    match ask(&source, key.clone(), Kind::Group, Fields::empty()) {
+        Reply::Found(_) => Ok((source, key)),
+        Reply::NotFound => Err(Outcome::NotFound),
+        Reply::Refused | Reply::Unavailable => Err(Outcome::Unavailable),
+    }
+}
+
 fn page_from(
     source: &Arc<Source>,
     kind: Kind,
@@ -2009,6 +2161,62 @@ mod tests {
         match route(&registry, b"jack") {
             Route::NoSources => {}
             _ => panic!("expected NoSources"),
+        }
+    }
+
+    // -- member enumeration: Enumerate with `of` (PGSS §2.17) -----------
+
+    #[test]
+    fn members_of_a_group_come_from_its_owning_source() {
+        let registry = stub(
+            "only",
+            DOMAIN,
+            1,
+            Some(entry("S-1-5-21-1-2-3-513", "devs", 5)),
+        );
+        let of = libauthd::ident::Key::Name("devs".into());
+        let page = enumerate_members(&registry, &of, Kind::Principal, Fields::PASSWD, b"")
+            .expect("a page");
+        assert_eq!(page.entries.len(), 1);
+        assert!(page.next.is_empty());
+        assert!(page.incomplete.is_empty());
+    }
+
+    #[test]
+    fn members_of_a_group_nobody_holds_is_not_found() {
+        let registry = stub("only", DOMAIN, 1, None);
+        let of = libauthd::ident::Key::Name("ghosts".into());
+        match enumerate_members(&registry, &of, Kind::Principal, Fields::PASSWD, b"") {
+            Err(Outcome::NotFound) => {}
+            Ok(_) => panic!("expected NotFound, got a page"),
+            Err(other) => panic!("expected NotFound, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn members_cannot_be_walked_past_an_absent_source() {
+        // "second" is configured and not registered; the group might be its.
+        let registry = Arc::new(Registry::for_test(&[
+            ("first", 1, Some(range())),
+            ("second", 2, Some(range())),
+        ]));
+        add_stub(&registry, "first", DOMAIN, 1, None);
+        let of = libauthd::ident::Key::Name("devs".into());
+        match enumerate_members(&registry, &of, Kind::Principal, Fields::PASSWD, b"") {
+            Err(Outcome::Unavailable) => {}
+            Ok(_) => panic!("expected Unavailable, got a page"),
+            Err(other) => panic!("expected Unavailable, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_unusable_of_name_is_malformed() {
+        let registry = stub("only", DOMAIN, 1, None);
+        let of = libauthd::ident::Key::Name(" devs ".into());
+        match enumerate_members(&registry, &of, Kind::Principal, Fields::PASSWD, b"") {
+            Err(Outcome::Malformed) => {}
+            Ok(_) => panic!("expected Malformed, got a page"),
+            Err(other) => panic!("expected Malformed, got {other:?}"),
         }
     }
 }

@@ -71,7 +71,9 @@ pub fn serve(registry: Arc<Registry>, stream: UnixStream) {
         return;
     }
     if let Err(error) = stream.set_write_timeout(Some(WRITE_TIMEOUT)) {
-        log::warn(format_args!("ident: could not set a write timeout: {error}"));
+        log::warn(format_args!(
+            "ident: could not set a write timeout: {error}"
+        ));
         return;
     }
 
@@ -153,14 +155,29 @@ fn enumerate(registry: &Registry, buf: &[u8]) -> io::Result<Vec<u8>> {
         return encode_enumerate_refusal(request.tag, Outcome::Malformed);
     }
     // Members of one group are a lookup that overflowed, and belong to the
-    // source that holds the group rather than to a walk across all of them.
-    if request.of.is_some() {
-        // An `of` enumeration is a mode authd has not implemented (PEI-295),
-        // which is a fact about the authority rather than about the caller's
-        // permission. Malformed until it lands; Refused is reserved for a
-        // per-field restriction mechanism authd does not yet have, and §2.18
-        // requires it to stay unsent until then.
-        return encode_enumerate_refusal(request.tag, Outcome::Malformed);
+    // source that holds the group rather than to a walk across all of them —
+    // the continuation path for a MEMBERS field withheld as TooLarge
+    // (PGSS §2.16-§2.17). No well-known injection here: this is one group's
+    // membership, not a table.
+    if let Some(of) = &request.of {
+        let page = match resolve::enumerate_members(
+            registry,
+            of,
+            request.kind,
+            request.fields,
+            &request.cursor,
+        ) {
+            Ok(page) => page,
+            Err(outcome) => return encode_enumerate_refusal(request.tag, outcome),
+        };
+        return ident::encode_enumerate_reply(&ident::EnumerateReply {
+            tag: request.tag,
+            outcome: Outcome::Found,
+            entries: page.entries,
+            next: page.next,
+            incomplete: page.incomplete,
+        })
+        .map_err(|_| io::Error::other("could not encode an enumeration reply"));
     }
 
     let fields = request.fields;
@@ -256,10 +273,7 @@ mod tests {
     /// are below every source's base and belong to nobody else.
     #[test]
     fn a_well_known_group_resolves_without_a_source() {
-        for key in [
-            ident::Key::Name("Everyone".into()),
-            ident::Key::UnixId(100),
-        ] {
+        for key in [ident::Key::Name("Everyone".into()), ident::Key::UnixId(100)] {
             let request = ident::encode_lookup(&ident::Lookup {
                 tag: 1,
                 key: key.clone(),
