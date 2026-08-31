@@ -15,7 +15,7 @@
 //!
 //! The logon-type SIDs are the reason the number is optional. They are real
 //! group memberships and ACLs are written against them, but nothing wants a
-//! *gid* for "arrived over the network", and PSD-004 §12.1 is explicit that
+//! *gid* for "arrived over the network", and Kernel TRM §3.10.1 is explicit that
 //! supplementary GIDs come only from groups that have a number. Carrying them
 //! with `None` says that in the data; leaving them out of the table entirely —
 //! as this previously did — said it only by absence, and made them unnameable

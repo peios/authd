@@ -45,7 +45,7 @@
 //! shared between them so a group can never collide with a user's SID. A
 //! principal's Unix ID is simply *its RID*.
 //!
-//! That satisfies PSD-004 §12.1 — which requires one counter across all
+//! That satisfies Kernel TRM §3.10.1 — which requires one counter across all
 //! principal types, so an id issued to a user is never issued again to a group —
 //! and it buys something the specification does not ask for: **one object has
 //! one number.** With two counters `jack` was RID 1000 and uid 1, two
@@ -1134,7 +1134,7 @@ impl Store {
 
     /// Set which group is primary. Returns whether anything changed.
     ///
-    /// Membership is *not* required. PSD-004 §4.4 does require the primary group
+    /// Membership is *not* required. Kernel TRM §3.2.2 does require the primary group
     /// to be a group on the token, but that is authd's invariant to keep, and
     /// authd keeps it by adding the group if it is missing — naming a group as
     /// primary implies the membership. Requiring it here would make the order of
@@ -2417,7 +2417,7 @@ mod tests {
 
     #[test]
     fn principals_and_groups_share_one_unix_id_counter() {
-        // PSD-004 §12.1: SIDs are one namespace, uid and gid are two, so a
+        // Kernel TRM §3.10.1: SIDs are one namespace, uid and gid are two, so a
         // number issued to a principal must never be issued to a group.
         let mut store = Store::provision().expect("must provision");
         store.add(new("a", vec![]), Some(b"pw")).unwrap();

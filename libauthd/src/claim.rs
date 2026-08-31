@@ -22,7 +22,7 @@
 //!
 //! # Bounds
 //!
-//! The type codes and flag bits are PSD-004 §3.9's, used verbatim rather than
+//! The type codes and flag bits are PCDS §5.9's, used verbatim rather than
 //! translated, so a claim that survives this module is one KACS can parse. The
 //! *counts* are ours and are tighter than the specification permits — see
 //! [`MAX_VALUES`]. They bound the work done decoding a message from a source
@@ -60,7 +60,7 @@ pub const MAX_OCTET_BYTES: usize = 1024;
 /// A SID's maximum size, from [`crate::frame`].
 pub const MAX_SID_BYTES: usize = crate::frame::MAX_SID_BYTES;
 
-// PSD-004 §3.9 value types. `FQBN` (0x0004) is reserved and unsupported, which
+// PCDS §5.9 value types. `FQBN` (0x0004) is reserved and unsupported, which
 // is why the numbering has a hole in it.
 pub const TYPE_INT64: u32 = 0x0001;
 pub const TYPE_UINT64: u32 = 0x0002;
@@ -69,7 +69,7 @@ pub const TYPE_SID: u32 = 0x0005;
 pub const TYPE_BOOLEAN: u32 = 0x0006;
 pub const TYPE_OCTET: u32 = 0x0010;
 
-// PSD-004 §3.9 claim flags.
+// PCDS §5.9 claim flags.
 pub const FLAG_NON_INHERITABLE: u32 = 0x0001;
 pub const FLAG_CASE_SENSITIVE: u32 = 0x0002;
 pub const FLAG_USE_FOR_DENY_ONLY: u32 = 0x0004;
@@ -145,7 +145,7 @@ impl Values {
         })
     }
 
-    /// The name PSD-004 §3.9 gives this type, for diagnostics and `lps`.
+    /// The name PCDS §5.9 gives this type, for diagnostics and `lps`.
     pub fn type_name(&self) -> &'static str {
         match self {
             Self::Int64(_) => "int64",
