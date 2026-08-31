@@ -2,7 +2,7 @@
 //!
 //! KACS tokens are the only identity that decides anything. Linux programs do
 //! not know tokens exist — they call `getuid`, `getgid`, `getgroups` — so every
-//! token carries precomputed POSIX numbers (PSD-004 §12.1). The kernel does not
+//! token carries precomputed POSIX numbers (Kernel TRM §3.10.1). The kernel does not
 //! resolve them; authd computes them once, here, and they ride on the token.
 //!
 //! # Sources count, authd numbers
@@ -38,7 +38,7 @@ use peios::security::SidRef;
 
 /// The projection given to a SID nothing can number.
 ///
-/// 65534 is the conventional Linux `nobody`, and it is what PSD-004 §12.1
+/// 65534 is the conventional Linux `nobody`, and it is what Kernel TRM §3.10.1
 /// specifies for a SID with no `uidNumber`. Setting it explicitly is not
 /// optional: the projection defaults to **0**, and KACS refuses to create a
 /// token projecting uid 0 for any user SID that is not SYSTEM.

@@ -447,7 +447,7 @@ pub fn mint(minting: Minting<'_>) -> peios::Result<Grant> {
         // enable before it worked would be a grant in name only.
         .privileges(policy.privileges, policy.privileges)
         // Computed once, here, and carried on the token: KACS must not resolve
-        // a SID to a number at runtime (PSD-004 §12.1), so what a Linux program
+        // a SID to a number at runtime (Kernel TRM §3.10.1), so what a Linux program
         // sees from `getuid` is decided at this line and nowhere else.
         .projected_ids(projection.uid, projection.gid)
         .supplementary_gids(&projection.supplementary)
