@@ -46,9 +46,18 @@
 # the name resolver, including for its own name (PEI-571). The 0o666 mode beside
 # the bind never applied: KACS raises CAP_DAC_OVERRIDE on every credential.
 
+# -14: the groups authd staples onto every token -- Everyone, Local, and the
+# logon type -- now reach the POSIX projection. The credentialled logon path
+# numbered only what the source asserted, so `Everyone`, which has carried gid
+# 100 in the well-known table from the start, was never on a token: `getgrgid`
+# resolved it and `getgroups` never returned it (PEI-206). The attested path
+# already numbered the token's own groups; both now do. `Local` (S-1-2-0) was
+# not in the table at all and is now 107, so it is numbered and nameable in
+# policy like the rest.
+
 format = "peipkg"
 
 [package]
-version      = "{{version}}-13"
+version      = "{{version}}-14"
 architecture = "x86_64"
 license      = "MIT"

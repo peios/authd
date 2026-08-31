@@ -411,6 +411,39 @@ mod tests {
     }
 
     #[test]
+    fn a_group_the_source_never_numbered_still_projects() {
+        // The regression this exists for (PEI-206). `derive::token_groups`
+        // staples Everyone, Local and the logon type onto every token, and a
+        // source neither sends nor may speak for their numbers -- they reach
+        // the projection with relative 0. `built_in` has to answer for them,
+        // because otherwise a token carries a membership that `getgroups`
+        // cannot report, and an ACE granting Everyone grants through a group
+        // no identity tool on the machine can show.
+        let everyone = sid("S-1-1-0");
+        let local = sid("S-1-2-0");
+        let interactive = sid("S-1-5-4");
+        let groups = vec![
+            Numbered {
+                sid: everyone.as_ref(),
+                relative: 0,
+            },
+            Numbered {
+                sid: local.as_ref(),
+                relative: 0,
+            },
+            // Deliberately unnumbered, and must stay that way: it says how the
+            // logon happened, not who the principal is.
+            Numbered {
+                sid: interactive.as_ref(),
+                relative: 0,
+            },
+        ];
+        let administrators = sid("S-1-5-32-544");
+        let projection = project(Some(&range()), 1, administrators.as_ref(), &groups);
+        assert_eq!(projection.supplementary, vec![100, 107]);
+    }
+
+    #[test]
     fn a_principal_with_no_number_projects_to_nobody() {
         let everyone = sid("S-1-1-0");
         let groups = vec![Numbered {
