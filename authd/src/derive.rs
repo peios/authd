@@ -489,6 +489,40 @@ mod tests {
     }
 
     #[test]
+    fn every_group_stapled_onto_a_token_is_numbered() {
+        // The contract PEI-206 found broken from the other end. `token_groups`
+        // adds these to every token regardless of what a source said, so each
+        // needs a number in `well_known` -- otherwise `getgroups` reports a
+        // membership short and `id`/`groups` under-report every principal on
+        // the machine.
+        //
+        // The logon-type SID is excluded deliberately and tested for below:
+        // it says how the logon happened rather than who the principal is.
+        let user: Sid = "S-1-5-21-1-2-3-1000".parse().expect("a well-formed SID");
+        let groups = token_groups(user.as_ref(), &[], LogonType::Interactive);
+
+        for text in ["S-1-1-0", "S-1-5-11", "S-1-2-0"] {
+            let wanted: Sid = text.parse().expect("a well-formed SID");
+            assert!(
+                groups
+                    .iter()
+                    .any(|(sid, _)| sid.as_ref().as_bytes() == wanted.as_ref().as_bytes()),
+                "{text} is no longer stapled onto every token"
+            );
+            assert!(
+                crate::unix_id::built_in(wanted.as_ref()).is_some(),
+                "{text} is stapled onto every token but carries no number"
+            );
+        }
+
+        let interactive: Sid = "S-1-5-4".parse().expect("a well-formed SID");
+        assert!(
+            crate::unix_id::built_in(interactive.as_ref()).is_none(),
+            "a logon-type SID must stay unnumbered"
+        );
+    }
+
+    #[test]
     fn new_credentials_confers_no_group() {
         assert!(logon_type_sid(LogonType::NewCredentials).is_none());
     }

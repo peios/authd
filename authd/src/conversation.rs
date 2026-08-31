@@ -413,6 +413,18 @@ fn scoped_groups<'a>(
         .collect()
 }
 
+/// The relative id a source gave a group, or 0 if it named no number for it.
+///
+/// 0 is what the protocol already means by "this source does not number this
+/// group", so a group the source never mentioned at all -- one authd stapled on
+/// -- lands on the same answer without a separate case.
+fn asserted_relative(memberships: &[(Sid, u32)], sid: &SidRef) -> u32 {
+    memberships
+        .iter()
+        .find(|(candidate, _)| candidate.as_ref().as_bytes() == sid.as_bytes())
+        .map_or(0, |(_, relative)| *relative)
+}
+
 /// The first group a source may not assert for this principal, if any.
 ///
 /// An ordinary source vouches for its own users and its own groups, and nothing
@@ -678,14 +690,34 @@ fn grant(
         }
     }
 
+    // The SID set the token will carry, derived SIDs included. Built here
+    // because everything below is a statement about *this* set rather than
+    // about what the source sent: local policy is evaluated against it, and so
+    // is the projection.
+    let token_groups = derive::token_groups(user, &groups, start.logon_type);
+    let token_sids: Vec<&SidRef> = token_groups.iter().map(|(sid, _)| sid.as_ref()).collect();
+
     // The POSIX numbers. Every id a source sends is *relative* to the range the
     // registry assigned it; this is where the base is added, and it is the only
     // place that may add it.
-    let numbered: Vec<unix_id::Numbered<'_>> = memberships
+    //
+    // Numbered from the token's groups rather than from the assertion. The
+    // groups authd staples on -- Everyone, Local, the logon type -- are
+    // numbered by authd's own table, which no source can speak for, so
+    // numbering only what a source sent dropped them entirely: `Everyone` has
+    // carried gid 100 in `well_known` from the start and `getgrgid(100)`
+    // resolved it, yet no token this path minted ever carried that gid, and
+    // `id`/`groups` reported a membership short. `attest::mint_and_send`
+    // already numbered the token's own groups; this is that rule applied to
+    // both paths rather than to one.
+    let numbered: Vec<unix_id::Numbered<'_>> = token_groups
         .iter()
-        .map(|(sid, relative)| unix_id::Numbered {
+        .map(|(sid, _)| unix_id::Numbered {
             sid: sid.as_ref(),
-            relative: *relative,
+            // What the source called it, where the source named it at all. A
+            // stapled group has no relative id and needs none: `built_in`
+            // answers for it first, and deliberately outranks a source.
+            relative: asserted_relative(&memberships, sid.as_ref()),
         })
         .collect();
     let projection = unix_id::project(
@@ -723,12 +755,6 @@ fn grant(
             "The authority returned an unusable claim.",
         );
     };
-
-    // The SID set the token will carry, derived SIDs included. Built before
-    // minting because local policy is evaluated against *this* set: a record
-    // for `Everyone`, or for a logon-type SID, would otherwise never apply.
-    let token_groups = derive::token_groups(user, &groups, start.logon_type);
-    let token_sids: Vec<&SidRef> = token_groups.iter().map(|(sid, _)| sid.as_ref()).collect();
 
     // Read per logon rather than cached at startup, so a policy change takes
     // effect on the next sign-on rather than on the next restart of the one

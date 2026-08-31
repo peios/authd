@@ -49,6 +49,12 @@ const WELL_KNOWN: &[Entry] = &[
     Entry { name: "Guests", authority: 5, sub_authorities: &[32, 546], unix_id: Some(104) },
     Entry { name: "Local Service", authority: 5, sub_authorities: &[19], unix_id: Some(105) },
     Entry { name: "Network Service", authority: 5, sub_authorities: &[20], unix_id: Some(106) },
+    // Stapled onto every token by `derive::token_groups` alongside Everyone,
+    // and numbered for the same reason: it is a membership an ACL can be
+    // written against, so it needs to survive the projection and be nameable
+    // in policy. Unlike the logon-type SIDs below it is not a property of the
+    // session -- every token minted on this machine carries it.
+    Entry { name: "Local", authority: 2, sub_authorities: &[0], unix_id: Some(107) },
     // Nameable in policy, deliberately unnumbered — see the module docs. These
     // are what make "network logons cap at Low" expressible without any
     // mechanism beyond a policy record.
@@ -153,6 +159,7 @@ mod tests {
         assert_eq!(unix_id(sid("S-1-5-32-546").as_ref()), Some(104));
         assert_eq!(unix_id(sid("S-1-5-19").as_ref()), Some(105));
         assert_eq!(unix_id(sid("S-1-5-20").as_ref()), Some(106));
+        assert_eq!(unix_id(sid("S-1-2-0").as_ref()), Some(107));
     }
 
     /// §12.1: supplementary GIDs come only from groups that have a number, so a
