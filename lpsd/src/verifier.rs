@@ -207,8 +207,8 @@ fn run_argon2id(
 ) -> Result<Vec<u8>, VerifierError> {
     use argon2::{Algorithm as A, Argon2, Params, Version};
 
-    let params = Params::new(memory_kib, passes, lanes, Some(HASH_BYTES))
-        .map_err(|_| VerifierError::Kdf)?;
+    let params =
+        Params::new(memory_kib, passes, lanes, Some(HASH_BYTES)).map_err(|_| VerifierError::Kdf)?;
     let argon2 = Argon2::new(A::Argon2id, Version::V0x13, params);
     let mut out = vec![0u8; HASH_BYTES];
     argon2
@@ -314,7 +314,10 @@ mod tests {
     #[test]
     fn a_fresh_verifier_uses_the_current_parameters() {
         let v = Verifier::create(b"password").expect("must create");
-        assert_eq!((v.memory_kib, v.passes, v.lanes), (MEMORY_KIB, PASSES, LANES));
+        assert_eq!(
+            (v.memory_kib, v.passes, v.lanes),
+            (MEMORY_KIB, PASSES, LANES)
+        );
     }
 
     #[test]
@@ -354,7 +357,10 @@ mod tests {
 
     #[test]
     fn an_empty_salt_or_hash_is_refused() {
-        for (salt, hash) in [(&b""[..], &[0u8; 32][..]), (&b"0123456789abcdef"[..], &[][..])] {
+        for (salt, hash) in [
+            (&b""[..], &[0u8; 32][..]),
+            (&b"0123456789abcdef"[..], &[][..]),
+        ] {
             let mut w = Writer::new();
             w.u8(1);
             w.u32(8);

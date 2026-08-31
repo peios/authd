@@ -275,7 +275,10 @@ fn open_store() -> Result<Store, StoreError> {
         return Ok(store);
     }
 
-    log::info(format_args!("no store at {}; provisioning", store::STORE_PATH));
+    log::info(format_args!(
+        "no store at {}; provisioning",
+        store::STORE_PATH
+    ));
     if let Some(directory) = path.parent() {
         // Durably: an atomically-replaced file inside a directory that is not
         // itself durable buys nothing, and losing the directory means losing
@@ -422,6 +425,7 @@ fn pump(
                 &mut pending,
                 envelope.conversation,
                 received.expose(),
+                registered.unix_id_count,
             )?,
             psi::MSG_CREDENTIAL_RESPONSE => answer(
                 stream,
@@ -429,14 +433,25 @@ fn pump(
                 &mut pending,
                 envelope.conversation,
                 received.expose(),
+                registered.unix_id_count,
             )?,
             psi::MSG_ABANDON => {
                 pending.remove(&envelope.conversation);
             }
-            psi::MSG_QUERY => serve_query(stream, store, envelope.conversation, received.expose())?,
-            psi::MSG_ENUMERATE_SOURCE => {
-                serve_enumeration(stream, store, envelope.conversation, received.expose())?
-            }
+            psi::MSG_QUERY => serve_query(
+                stream,
+                store,
+                envelope.conversation,
+                received.expose(),
+                registered.unix_id_count,
+            )?,
+            psi::MSG_ENUMERATE_SOURCE => serve_enumeration(
+                stream,
+                store,
+                envelope.conversation,
+                received.expose(),
+                registered.unix_id_count,
+            )?,
             other => {
                 log::warn(format_args!("unexpected message type {other:#06x}"));
             }
@@ -452,11 +467,12 @@ fn serve_query(
     store: &Store,
     conversation: u64,
     buf: &[u8],
+    unix_id_count: u32,
 ) -> io::Result<()> {
     let Ok(query) = psi::decode_query(buf) else {
         return refuse_query(stream, conversation, "malformed query");
     };
-    let result = query::answer(store, &query);
+    let result = query::answer(store, &query, unix_id_count);
     match psi::encode_query_result(conversation, &result) {
         Ok(message) => send_message(stream, &message),
         // The answers were correct and too large to carry. Refusing the whole
@@ -472,11 +488,12 @@ fn serve_enumeration(
     store: &Store,
     conversation: u64,
     buf: &[u8],
+    unix_id_count: u32,
 ) -> io::Result<()> {
     let Ok(request) = psi::decode_enumerate_source(buf) else {
         return refuse_query(stream, conversation, "malformed enumeration");
     };
-    let result = query::enumerate(store, &request);
+    let result = query::enumerate(store, &request, unix_id_count);
     match psi::encode_enumerate_result(conversation, &result) {
         Ok(message) => send_message(stream, &message),
         Err(_) => refuse_query(stream, conversation, "the page does not fit one message"),
@@ -484,7 +501,9 @@ fn serve_enumeration(
 }
 
 fn refuse_query(stream: &UnixStream, conversation: u64, reason: &str) -> io::Result<()> {
-    log::warn(format_args!("query: refusing conversation {conversation}: {reason}"));
+    log::warn(format_args!(
+        "query: refusing conversation {conversation}: {reason}"
+    ));
     let message = psi::encode_refusal(
         conversation,
         &psi::Refusal {
@@ -538,6 +557,7 @@ fn begin(
     pending: &mut HashMap<u64, Pending>,
     conversation: u64,
     buf: &[u8],
+    unix_id_count: u32,
 ) -> io::Result<()> {
     let Ok(request) = psi::decode_authenticate(buf) else {
         return refuse(
@@ -583,7 +603,7 @@ fn begin(
                 "asserting {} without a credential",
                 identity.name
             ));
-            assert_identity(stream, conversation, &identity)
+            assert_identity(stream, conversation, &identity, unix_id_count)
         }
 
         store::CredentialRequirement::Password => {
@@ -683,6 +703,7 @@ fn answer(
     pending: &mut HashMap<u64, Pending>,
     conversation: u64,
     buf: &[u8],
+    unix_id_count: u32,
 ) -> io::Result<()> {
     // Removed rather than borrowed: a conversation gets exactly one answer, and
     // taking the state out means a client that sends two cannot retry against
@@ -719,7 +740,7 @@ fn answer(
                 identity.sid,
                 identity.groups.len()
             ));
-            assert_identity(stream, conversation, &identity)
+            assert_identity(stream, conversation, &identity, unix_id_count)
         }
         None => {
             // One log line for both "no such principal" and "wrong password".
@@ -741,11 +762,29 @@ fn answer(
 }
 
 /// Tell the authority who this is.
+///
+/// Every relative identifier is confined to the assigned count on the way
+/// out (PSI §2.20, obligation 21), exactly as on the query path: an
+/// out-of-range number becomes "no number", loudly, rather than a claim
+/// the authority would refuse.
 fn assert_identity(
     stream: &UnixStream,
     conversation: u64,
     identity: &store::Identity,
+    unix_id_count: u32,
 ) -> io::Result<()> {
+    let confined = |unix_id: u32| {
+        if unix_id != 0 && unix_id >= unix_id_count {
+            log::warn(format_args!(
+                "relative id {unix_id} for {} is outside the assigned count \
+                 {unix_id_count}; asserting no number instead",
+                identity.name
+            ));
+            0
+        } else {
+            unix_id
+        }
+    };
     let message = psi::encode_assertion(
         conversation,
         &psi::Assertion {
@@ -760,11 +799,11 @@ fn assert_identity(
                     // how the protocol spells "I have no number for this". authd
                     // then uses its own, which is right: a well-known group's
                     // projection was never lpsd's to decide.
-                    unix_id: group.unix_id.unwrap_or(0),
+                    unix_id: confined(group.unix_id.unwrap_or(0)),
                 })
                 .collect(),
             // Relative. authd adds the base.
-            unix_id: identity.unix_id,
+            unix_id: confined(identity.unix_id),
             // Stated, not enforced. lpsd holds the property because it holds
             // the principal; deciding what to do about it is the authority's,
             // which is the same division as every other field here.
@@ -782,12 +821,7 @@ fn assert_identity(
     send_message(stream, &message)
 }
 
-fn refuse(
-    stream: &UnixStream,
-    conversation: u64,
-    denial: Denial,
-    reason: &str,
-) -> io::Result<()> {
+fn refuse(stream: &UnixStream, conversation: u64, denial: Denial, reason: &str) -> io::Result<()> {
     let message = psi::encode_refusal(
         conversation,
         &psi::Refusal {

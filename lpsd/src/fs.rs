@@ -93,7 +93,10 @@ pub trait File {
 /// Where a replacement is staged.
 fn staging_path(path: &Path) -> io::Result<PathBuf> {
     let name = path.file_name().ok_or_else(|| {
-        io::Error::new(io::ErrorKind::InvalidInput, "the store path has no file name")
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "the store path has no file name",
+        )
     })?;
     let mut staged = name.to_os_string();
     staged.push(STAGING_SUFFIX);
@@ -203,8 +206,9 @@ impl Fs for RealFs {
             Err(error) => return Err(error),
         };
         let len = file.metadata()?.len();
-        let len = usize::try_from(len)
-            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "the store is absurdly large"))?;
+        let len = usize::try_from(len).map_err(|_| {
+            io::Error::new(io::ErrorKind::InvalidData, "the store is absurdly large")
+        })?;
 
         // Read straight into a self-wiping buffer. Staging in an ordinary `Vec`
         // first would leave a copy of every verifier in freed memory.
@@ -616,7 +620,10 @@ mod real_tests {
         std::fs::write(&store, b"").unwrap();
 
         let read = RealFs.read(&store).expect("must read");
-        assert!(read.is_some(), "an empty file exists and must read as present");
+        assert!(
+            read.is_some(),
+            "an empty file exists and must read as present"
+        );
         assert_eq!(read.unwrap().expose(), b"");
     }
 
@@ -624,7 +631,10 @@ mod real_tests {
     fn reading_an_absent_file_is_not_an_error() {
         let dir = TempDir::new();
         assert!(
-            RealFs.read(&dir.join("nothing")).expect("absence is not failure").is_none()
+            RealFs
+                .read(&dir.join("nothing"))
+                .expect("absence is not failure")
+                .is_none()
         );
     }
 
@@ -635,7 +645,9 @@ mod real_tests {
         // the durability argument quietly evaporates, so it is asserted rather
         // than assumed.
         let dir = TempDir::new();
-        RealFs.sync_dir(&dir.path).expect("a directory must be syncable");
+        RealFs
+            .sync_dir(&dir.path)
+            .expect("a directory must be syncable");
     }
 
     #[test]
