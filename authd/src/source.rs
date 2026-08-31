@@ -438,7 +438,15 @@ pub struct Registry {
     /// calls this path thousands of times a second, and a registry read apiece
     /// would be the most expensive thing in it. Changing the allowlist already
     /// requires restarting authd for other reasons.
-    configured: Vec<Configured>,
+    /// The allowlist as most recently read. Refreshed on every PSI
+    /// connection from the same read that admits the peer, so the
+    /// resolution half and the registration half cannot disagree at the
+    /// moment they could be compared (PEI-314): an administrator who adds a
+    /// source sees the resolver learn of it when the source connects. A
+    /// pure removal or reorder with no connection event holds until one
+    /// happens — the registry is never read on the lookup path, which is
+    /// called from every process on the system.
+    configured: Mutex<Vec<Configured>>,
     /// The domain each source name was *first* seen to declare, kept for the
     /// lifetime of the process — including across a source disconnecting.
     ///
@@ -499,16 +507,26 @@ impl Registry {
     /// A registry that knows what the allowlist names.
     pub fn configured(entries: &[policy::SourceEntry]) -> Self {
         Self {
-            configured: entries
-                .iter()
-                .map(|entry| Configured {
-                    name: entry.name.clone(),
-                    search_order: entry.search_order,
-                    unix_id_range: entry.unix_id_range,
-                })
-                .collect(),
+            configured: Mutex::new(Self::configured_entries(entries)),
             ..Self::default()
         }
+    }
+
+    /// Adopt a fresh read of the allowlist.
+    pub fn refresh_configured(&self, entries: &[policy::SourceEntry]) {
+        *self.configured.lock().unwrap_or_else(|e| e.into_inner()) =
+            Self::configured_entries(entries);
+    }
+
+    fn configured_entries(entries: &[policy::SourceEntry]) -> Vec<Configured> {
+        entries
+            .iter()
+            .map(|entry| Configured {
+                name: entry.name.clone(),
+                search_order: entry.search_order,
+                unix_id_range: entry.unix_id_range,
+            })
+            .collect()
     }
 
     /// The range a configured source was given, whether or not it is here.
@@ -516,8 +534,9 @@ impl Registry {
     /// The inverse arithmetic has to work for an absent source too, or a
     /// `getpwuid` for one of its principals would answer `NotFound` — a
     /// cacheable absence — the moment it went away.
-    pub fn configured_range(&self, unix_id: u32) -> Option<&Configured> {
-        self.configured.iter().find(|entry| {
+    pub fn configured_range(&self, unix_id: u32) -> Option<Configured> {
+        let configured = self.configured.lock().unwrap_or_else(|e| e.into_inner());
+        configured.iter().cloned().find(|entry| {
             entry.unix_id_range.is_some_and(|range| {
                 unix_id
                     .checked_sub(range.base)
@@ -529,7 +548,8 @@ impl Registry {
     /// Every configured source that is not currently registered.
     pub fn absent(&self) -> Vec<String> {
         let live = self.sources.lock().unwrap_or_else(|e| e.into_inner());
-        self.configured
+        let configured = self.configured.lock().unwrap_or_else(|e| e.into_inner());
+        configured
             .iter()
             .filter(|entry| !live.iter().any(|s| s.is_live() && s.name() == entry.name))
             .map(|entry| entry.name.clone())
@@ -542,7 +562,8 @@ impl Registry {
     /// when everything that could have contradicted it was asked.
     pub fn complete(&self) -> bool {
         let live = self.sources.lock().unwrap_or_else(|e| e.into_inner());
-        self.configured
+        let configured = self.configured.lock().unwrap_or_else(|e| e.into_inner());
+        configured
             .iter()
             .all(|entry| live.iter().any(|s| s.is_live() && s.name() == entry.name))
     }
@@ -639,7 +660,8 @@ impl Registry {
                 Some(Arc::clone(source)),
             ));
         }
-        for entry in &self.configured {
+        let configured = self.configured.lock().unwrap_or_else(|e| e.into_inner());
+        for entry in configured.iter() {
             if !live.iter().any(|s| s.name() == entry.name) {
                 slots.push((entry.search_order, &entry.name, None));
             }
@@ -661,14 +683,16 @@ impl Registry {
     #[cfg(test)]
     pub fn for_test(configured: &[(&str, u32, Option<unix_id::Range>)]) -> Self {
         Self {
-            configured: configured
-                .iter()
-                .map(|(name, search_order, unix_id_range)| Configured {
-                    name: (*name).into(),
-                    search_order: *search_order,
-                    unix_id_range: *unix_id_range,
-                })
-                .collect(),
+            configured: Mutex::new(
+                configured
+                    .iter()
+                    .map(|(name, search_order, unix_id_range)| Configured {
+                        name: (*name).into(),
+                        search_order: *search_order,
+                        unix_id_range: *unix_id_range,
+                    })
+                    .collect(),
+            ),
             ..Self::default()
         }
     }
@@ -786,7 +810,11 @@ pub fn serve(registry: &Registry, stream: UnixStream) {
     // service SID subsumes it — every TCB daemon runs as SYSTEM, so the user
     // SID could never tell lpsd from eventd — and requiring SYSTEM would
     // needlessly forbid a future source running under a lesser account.
-    let entry = match crate::peer::identify_source(&stream, &policy::sources()) {
+    // One read serves both halves: the peer is admitted against it, and the
+    // resolver's view of which sources should exist adopts it (PEI-314).
+    let allowlist = policy::sources();
+    registry.refresh_configured(&allowlist);
+    let entry = match crate::peer::identify_source(&stream, &allowlist) {
         Ok(entry) => entry,
         Err(error) => {
             log::warn(format_args!("psi: refused a connection: {error}"));

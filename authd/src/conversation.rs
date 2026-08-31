@@ -315,6 +315,25 @@ fn relay(
                     );
                 }
 
+                // §2.3, obligation 12: a response MUST follow the request
+                // for it. Bytes already waiting before this prompt has been
+                // sent are a pipelined CredentialResponse — sent on
+                // speculation about a question the source had not asked,
+                // which the round-trip discipline exists to forbid. Checked
+                // per prompt rather than once, since round 2's answer can be
+                // pipelined behind round 1's as easily as round 1's behind
+                // LogonStart.
+                if client_already_answered(stream) {
+                    log::warn(format_args!(
+                        "client answered before being asked; refusing the conversation"
+                    ));
+                    return deny(
+                        stream,
+                        Denial::MalformedRequest,
+                        "A response arrived before the request for it.",
+                    );
+                }
+
                 let answers = match ask_client(stream, &request) {
                     Ok(answers) => answers,
                     Err(ClientFailed::Protocol(denial, reason)) => {
@@ -939,6 +958,28 @@ fn read_opening(stream: &UnixStream) -> Result<Opening, (Denial, &'static str)> 
             "A connection must open with LogonStart or ServiceAttest.",
         )),
     }
+}
+
+/// Are there bytes from the client already in the socket before we prompt?
+///
+/// A non-blocking `MSG_PEEK`: a positive count is the pipelined answer,
+/// `EAGAIN` is the good answer (nothing pending), and `0` — the client
+/// hung up — is left for the send/receive path to report as what it is
+/// rather than as pipelining. Any error abstains: this is a
+/// protocol-discipline check, not a security boundary, and failing a
+/// logon over a socket errno would invert its purpose.
+fn client_already_answered(stream: &UnixStream) -> bool {
+    use std::os::unix::io::AsRawFd;
+    let mut probe = [0u8; 1];
+    let received = unsafe {
+        libc::recv(
+            stream.as_raw_fd(),
+            probe.as_mut_ptr().cast(),
+            probe.len(),
+            libc::MSG_PEEK | libc::MSG_DONTWAIT,
+        )
+    };
+    received > 0
 }
 
 /// Whether a principal may originate logons at all.
