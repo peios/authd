@@ -78,7 +78,10 @@ impl core::fmt::Display for CodecError {
             Self::Truncated => write!(f, "the store is truncated"),
             Self::BadMagic => write!(f, "not a principal store"),
             Self::UnsupportedVersion(v) => {
-                write!(f, "store format version {v} is newer than this lpsd understands")
+                write!(
+                    f,
+                    "store format version {v} is newer than this lpsd understands"
+                )
             }
             Self::BadChecksum => write!(f, "the store failed its checksum"),
             Self::TrailingBytes => write!(f, "the store has trailing bytes"),
@@ -353,7 +356,10 @@ mod tests {
         file[8..10].copy_from_slice(&(VERSION + 1).to_le_bytes());
         // Refused on the version, before the checksum it would also fail — the
         // operator needs to be told "newer lpsd wrote this", not "corrupt".
-        assert_eq!(open(&file), Err(CodecError::UnsupportedVersion(VERSION + 1)));
+        assert_eq!(
+            open(&file),
+            Err(CodecError::UnsupportedVersion(VERSION + 1))
+        );
     }
 
     /// The asymmetry that lets a store be upgraded rather than refused: an

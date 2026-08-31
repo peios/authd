@@ -28,6 +28,7 @@ use libauthd::ident::{Fields, Kind, Outcome, Reference, Value, Withheld, Withhel
 use libauthd::psi;
 use peios::security::SidRef;
 
+use crate::log;
 use crate::store::{GroupRecord, Member, Object, Record, Store};
 
 /// How much of a message body one page may fill before lpsd stops adding to it.
@@ -49,13 +50,53 @@ const PAGE_ENTRIES: usize = 64;
 /// The order matters more than it looks: authd pairs answers with questions by
 /// position, so a reordered or short array would attach one principal's record
 /// to another's name.
-pub fn answer(store: &Store, query: &psi::Query) -> psi::QueryResult {
+pub fn answer(store: &Store, query: &psi::Query, unix_id_count: u32) -> psi::QueryResult {
     psi::QueryResult {
         results: query
             .keys
             .iter()
-            .map(|key| answer_one(store, key, query.fields))
+            .map(|key| {
+                let mut entry = answer_one(store, key, query.fields);
+                confine_unix_ids(&mut entry, unix_id_count);
+                entry
+            })
             .collect(),
+    }
+}
+
+/// Keep every relative identifier inside the count the authority assigned
+/// (PSI §2.20, source obligation 21).
+///
+/// Enforced here, where numbers leave lpsd, rather than by refusing to load
+/// a store: a count is configuration that can shrink after a store was
+/// written, and refusing to start over a registry edit would turn a
+/// numbering problem into an outage. An out-of-range number becomes `0` —
+/// the protocol's spelling of "no number for this" — so the object is still
+/// asserted, its POSIX projection is honestly absent instead of silently
+/// refused downstream, and the log says which object and why. authd would
+/// have refused the number anyway; the difference is that now the source
+/// keeps its obligation and the failure has a name.
+fn confine_unix_ids(entry: &mut psi::QueryEntry, count: u32) {
+    let confine = |unix_id: &mut u32| {
+        if *unix_id != 0 && *unix_id >= count {
+            log::warn(format_args!(
+                "relative id {unix_id} is outside the assigned count {count}; \
+                 asserting no number instead — raise UnixIDCount or renumber"
+            ));
+            *unix_id = 0;
+        }
+    };
+    for value in &mut entry.values {
+        match value {
+            Value::UnixId(unix_id) => confine(unix_id),
+            Value::PrimaryGroup(reference) => confine(&mut reference.unix_id),
+            Value::Groups(references) | Value::Members(references) => {
+                for reference in references {
+                    confine(&mut reference.unix_id);
+                }
+            }
+            _ => {}
+        }
     }
 }
 
@@ -281,7 +322,11 @@ fn encoded_size(value: &Value) -> usize {
 // ---------------------------------------------------------------------------
 
 /// Walk principals or groups, one page at a time.
-pub fn enumerate(store: &Store, request: &psi::EnumerateSource) -> psi::EnumerateResult {
+pub fn enumerate(
+    store: &Store,
+    request: &psi::EnumerateSource,
+    unix_id_count: u32,
+) -> psi::EnumerateResult {
     let Ok(after) = cursor_of(&request.cursor) else {
         return refused();
     };
@@ -315,6 +360,10 @@ pub fn enumerate(store: &Store, request: &psi::EnumerateSource) -> psi::Enumerat
         },
     };
 
+    let mut entries = entries;
+    for entry in &mut entries {
+        confine_unix_ids(entry, unix_id_count);
+    }
     psi::EnumerateResult {
         outcome: Outcome::Found,
         entries,
@@ -508,21 +557,36 @@ mod tests {
                 fields,
                 keys: vec![psi::QueryKey { key, kind }],
             },
+            u32::MAX,
         );
-        result.results.into_iter().next().expect("one key, one result")
+        result
+            .results
+            .into_iter()
+            .next()
+            .expect("one key, one result")
     }
 
     #[test]
     fn a_principal_answers_by_name_sid_and_relative_id() {
         let store = seeded();
-        let by_name = ask(&store, psi::Key::Name("JACK".into()), Kind::Any, Fields::PASSWD);
+        let by_name = ask(
+            &store,
+            psi::Key::Name("JACK".into()),
+            Kind::Any,
+            Fields::PASSWD,
+        );
         assert_eq!(by_name.outcome, Outcome::Found);
         assert_eq!(
             by_name.canonical_name, "jack",
             "the source's own spelling, not what was typed"
         );
 
-        let by_rid = ask(&store, psi::Key::RelativeId(1000), Kind::Any, Fields::PASSWD);
+        let by_rid = ask(
+            &store,
+            psi::Key::RelativeId(1000),
+            Kind::Any,
+            Fields::PASSWD,
+        );
         let by_sid = ask(
             &store,
             psi::Key::Sid(by_name.sid.clone()),
@@ -538,14 +602,24 @@ mod tests {
     #[test]
     fn a_unix_id_is_relative() {
         let store = seeded();
-        let entry = ask(&store, psi::Key::Name("jack".into()), Kind::Any, Fields::UNIX_ID);
+        let entry = ask(
+            &store,
+            psi::Key::Name("jack".into()),
+            Kind::Any,
+            Fields::UNIX_ID,
+        );
         assert_eq!(entry.value(Fields::UNIX_ID), Some(&Value::UnixId(1000)));
     }
 
     #[test]
     fn a_principal_is_not_answered_to_a_group_request() {
         let store = seeded();
-        let entry = ask(&store, psi::Key::Name("jack".into()), Kind::Group, Fields::empty());
+        let entry = ask(
+            &store,
+            psi::Key::Name("jack".into()),
+            Kind::Group,
+            Fields::empty(),
+        );
         assert_eq!(entry.outcome, Outcome::NotFound);
     }
 
@@ -564,17 +638,36 @@ mod tests {
     #[test]
     fn a_passwd_record_comes_back_in_one_query() {
         let store = seeded();
-        let entry = ask(&store, psi::Key::Name("jack".into()), Kind::Principal, Fields::PASSWD);
-        assert!(entry.present().contains(Fields::PASSWD), "every passwd field at once");
-        assert_eq!(entry.value(Fields::HOME), Some(&Value::Home("/home/jack".into())));
-        assert_eq!(entry.value(Fields::SHELL), Some(&Value::Shell("/bin/sh".into())));
+        let entry = ask(
+            &store,
+            psi::Key::Name("jack".into()),
+            Kind::Principal,
+            Fields::PASSWD,
+        );
+        assert!(
+            entry.present().contains(Fields::PASSWD),
+            "every passwd field at once"
+        );
+        assert_eq!(
+            entry.value(Fields::HOME),
+            Some(&Value::Home("/home/jack".into()))
+        );
+        assert_eq!(
+            entry.value(Fields::SHELL),
+            Some(&Value::Shell("/bin/sh".into()))
+        );
     }
 
     /// The direction sources actually hold. `initgroups` is one query.
     #[test]
     fn a_principals_groups_come_back_with_names() {
         let store = seeded();
-        let entry = ask(&store, psi::Key::Name("jack".into()), Kind::Principal, Fields::GROUPS);
+        let entry = ask(
+            &store,
+            psi::Key::Name("jack".into()),
+            Kind::Principal,
+            Fields::GROUPS,
+        );
         let Some(Value::Groups(groups)) = entry.value(Fields::GROUPS) else {
             panic!("groups must be present");
         };
@@ -601,7 +694,10 @@ mod tests {
         };
         assert_eq!(members.len(), 1);
         assert_eq!(members[0].name, "jack");
-        assert_eq!(members[0].unix_id, 1000, "relative, like every other number");
+        assert_eq!(
+            members[0].unix_id, 1000,
+            "relative, like every other number"
+        );
     }
 
     /// `BUILTIN\Administrators` is well-known *and* enumerable: lpsd holds real
@@ -628,11 +724,20 @@ mod tests {
     fn a_stapled_group_has_no_members_rather_than_withheld_ones() {
         let store = seeded();
         for name in ["Everyone", "Authenticated Users"] {
-            let entry = ask(&store, psi::Key::Name(name.into()), Kind::Group, Fields::MEMBERS);
+            let entry = ask(
+                &store,
+                psi::Key::Name(name.into()),
+                Kind::Group,
+                Fields::MEMBERS,
+            );
             assert_eq!(entry.outcome, Outcome::Found, "{name} is still nameable");
             assert!(entry.value(Fields::MEMBERS).is_none());
             assert_eq!(
-                entry.withheld.iter().find(|w| w.field == Fields::MEMBERS).map(|w| w.reason),
+                entry
+                    .withheld
+                    .iter()
+                    .find(|w| w.field == Fields::MEMBERS)
+                    .map(|w| w.reason),
                 Some(WithheldReason::Absent),
                 "{name} has no membership to record"
             );
@@ -646,7 +751,10 @@ mod tests {
         let store = seeded();
         assert!(
             store
-                .members_of(well_known_group("Authenticated Users").unwrap().as_ref(), None)
+                .members_of(
+                    well_known_group("Authenticated Users").unwrap().as_ref(),
+                    None
+                )
                 .is_none()
         );
     }
@@ -655,7 +763,13 @@ mod tests {
     fn an_unknown_name_is_not_found() {
         let store = seeded();
         assert_eq!(
-            ask(&store, psi::Key::Name("nobody".into()), Kind::Any, Fields::empty()).outcome,
+            ask(
+                &store,
+                psi::Key::Name("nobody".into()),
+                Kind::Any,
+                Fields::empty()
+            )
+            .outcome,
             Outcome::NotFound
         );
     }
@@ -679,6 +793,7 @@ mod tests {
                     },
                 ],
             },
+            u32::MAX,
         );
         assert_eq!(result.results.len(), 2);
         assert_eq!(result.results[0].outcome, Outcome::NotFound);
@@ -701,6 +816,7 @@ mod tests {
                     })
                     .collect(),
             },
+            u32::MAX,
         );
         assert_eq!(result.results.len(), names.len());
         assert_eq!(result.results[0].kind, Kind::Group);
@@ -725,6 +841,7 @@ mod tests {
                     of: None,
                     cursor: cursor.clone(),
                 },
+                u32::MAX,
             );
             seen.extend(page.entries.iter().map(|e| e.canonical_name.clone()));
             if page.next.is_empty() {
@@ -754,6 +871,7 @@ mod tests {
                 of: None,
                 cursor: 1000u32.to_le_bytes().to_vec(),
             },
+            u32::MAX,
         );
         let names: Vec<&str> = page
             .entries
@@ -783,6 +901,7 @@ mod tests {
                 of: Some(psi::Key::Name("developers".into())),
                 cursor: Vec::new(),
             },
+            u32::MAX,
         );
         let names: Vec<&str> = page
             .entries
@@ -837,6 +956,7 @@ mod tests {
                     of: None,
                     cursor: cursor.clone(),
                 },
+                u32::MAX,
             );
             assert_eq!(page.outcome, Outcome::Found);
             seen.extend(page.entries.iter().map(|e| e.canonical_name.clone()));
@@ -875,6 +995,7 @@ mod tests {
                     of: None,
                     cursor: cursor.clone(),
                 },
+                u32::MAX,
             );
             assert_eq!(
                 page.outcome,
@@ -900,6 +1021,7 @@ mod tests {
                     of: None,
                     cursor,
                 },
+                u32::MAX,
             );
             assert_eq!(page.outcome, Outcome::Found);
         }
@@ -929,6 +1051,7 @@ mod tests {
                     of: Some(key.clone()),
                     cursor: Vec::new(),
                 },
+                u32::MAX,
             );
             assert_eq!(
                 page.outcome,
@@ -951,6 +1074,7 @@ mod tests {
                 of: Some(psi::Key::Name("developers".into())),
                 cursor: Vec::new(),
             },
+            u32::MAX,
         );
         assert_eq!(page.outcome, Outcome::Found);
         assert!(page.entries.is_empty());
@@ -967,6 +1091,7 @@ mod tests {
                 of: None,
                 cursor: Vec::new(),
             },
+            u32::MAX,
         );
         assert_eq!(page.outcome, Outcome::Refused);
     }
@@ -982,6 +1107,7 @@ mod tests {
                 of: None,
                 cursor: Vec::new(),
             },
+            u32::MAX,
         );
         let names: Vec<&str> = page
             .entries
@@ -1012,8 +1138,58 @@ mod tests {
                 of: None,
                 cursor: Vec::new(),
             },
+            u32::MAX,
         );
         assert_eq!(page.entries.len(), PAGE_ENTRIES);
         assert!(!page.next.is_empty(), "there is more to come");
+    }
+
+    // -- unix_id confinement (PSI §2.20, obligation 21) -----------------
+
+    #[test]
+    fn an_out_of_range_relative_id_becomes_no_number() {
+        // jack's relative id is FIRST_RID (1000). With an assigned count of
+        // 5 that number is outside the range, and the source must not
+        // assert it — the entry still answers, with the protocol's spelling
+        // of "no number for this".
+        let store = seeded();
+        let result = answer(
+            &store,
+            &psi::Query {
+                fields: Fields::PASSWD,
+                keys: vec![psi::QueryKey {
+                    key: psi::Key::Name("jack".into()),
+                    kind: Kind::Principal,
+                }],
+            },
+            5,
+        );
+        let entry = result.results.into_iter().next().expect("one result");
+        assert_eq!(
+            entry.outcome,
+            Outcome::Found,
+            "the principal is still asserted"
+        );
+        let unix_id = entry.values.iter().find_map(|value| match value {
+            Value::UnixId(id) => Some(*id),
+            _ => None,
+        });
+        assert_eq!(unix_id, Some(0), "outside the count means no number");
+    }
+
+    #[test]
+    fn an_in_range_relative_id_is_untouched() {
+        let store = seeded();
+        let entry = ask(
+            &store,
+            psi::Key::Name("jack".into()),
+            Kind::Principal,
+            Fields::PASSWD,
+        );
+        let unix_id = entry.values.iter().find_map(|value| match value {
+            Value::UnixId(id) => Some(*id),
+            _ => None,
+        });
+        assert_eq!(unix_id, Some(1000));
     }
 }

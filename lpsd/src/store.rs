@@ -243,10 +243,12 @@ fn is_stapled(sid: &SidRef) -> bool {
 
 /// The name of a well-known group, if this is one.
 pub fn well_known_group_name(sid: &SidRef) -> Option<&'static str> {
-    WELL_KNOWN_GROUPS.iter().find_map(|(name, authority, subs)| {
-        let built = Sid::build(*authority, subs).ok()?;
-        (built.as_ref().as_bytes() == sid.as_bytes()).then_some(*name)
-    })
+    WELL_KNOWN_GROUPS
+        .iter()
+        .find_map(|(name, authority, subs)| {
+            let built = Sid::build(*authority, subs).ok()?;
+            (built.as_ref().as_bytes() == sid.as_bytes()).then_some(*name)
+        })
 }
 
 #[derive(Debug)]
@@ -1226,7 +1228,9 @@ impl Store {
     pub fn create_group(&mut self, name: &str) -> Result<u32, StoreError> {
         let name = check_name(name, "group")?;
         if self.groups.iter().any(|g| g.matches(&name)) {
-            return Err(StoreError::Invalid(format!("the group {name} already exists")));
+            return Err(StoreError::Invalid(format!(
+                "the group {name} already exists"
+            )));
         }
         if self.groups.len() >= MAX_GROUP_OBJECTS {
             return Err(StoreError::Invalid(format!(
@@ -1269,11 +1273,7 @@ impl Store {
         }
         // A group nobody is *in* may still be somebody's primary group, which
         // would leave them projecting a gid that names nothing.
-        if let Some(principal) = self
-            .principals
-            .iter()
-            .find(|p| p.primary_group == sid)
-        {
+        if let Some(principal) = self.principals.iter().find(|p| p.primary_group == sid) {
             return Err(StoreError::Invalid(format!(
                 "{name} is the primary group of {}; give them another before deleting it",
                 principal.name
@@ -1708,7 +1708,10 @@ impl Store {
         }
 
         for (index, group) in self.groups.iter().enumerate() {
-            if self.groups[..index].iter().any(|earlier| earlier.matches(&group.name)) {
+            if self.groups[..index]
+                .iter()
+                .any(|earlier| earlier.matches(&group.name))
+            {
                 return Err(StoreError::Invalid(format!(
                     "the store contains two groups named {}",
                     group.name
@@ -1949,7 +1952,7 @@ fn decode_claim(r: &mut Reader<'_>) -> Result<Claim, StoreError> {
             other => {
                 return Err(StoreError::Invalid(format!(
                     "the store contains a claim of unsupported type {other:#06x}"
-                )))
+                )));
             }
         })
     };
@@ -2157,7 +2160,9 @@ mod tests {
                 None,
             )
             .expect("must add");
-        store.add(new("jack", vec![]), Some(b"password")).expect("must add");
+        store
+            .add(new("jack", vec![]), Some(b"password"))
+            .expect("must add");
 
         let body = store.encode();
         let back = Store::decode(codec::VERSION, &body).expect("must decode");
@@ -2165,13 +2170,21 @@ mod tests {
         let service = back.record("svc$jellyfin").expect("must be there");
         assert_eq!(service.permitted_logon_types, LogonTypes::SERVICE_ONLY);
         assert!(service.permitted_logon_types.permits(LogonType::Service));
-        assert!(!service.permitted_logon_types.permits(LogonType::Interactive));
+        assert!(
+            !service
+                .permitted_logon_types
+                .permits(LogonType::Interactive)
+        );
 
         // An ordinary principal states nothing, and nothing is read as the
         // authority's default rather than as "everything".
         let ordinary = back.record("jack").expect("must be there");
         assert!(ordinary.permitted_logon_types.is_unstated());
-        assert!(ordinary.permitted_logon_types.permits(LogonType::Interactive));
+        assert!(
+            ordinary
+                .permitted_logon_types
+                .permits(LogonType::Interactive)
+        );
         assert!(!ordinary.permitted_logon_types.permits(LogonType::Service));
     }
 
@@ -2182,7 +2195,9 @@ mod tests {
     fn a_store_from_before_the_field_reads_as_unstated() {
         use libauthd::wire::LogonType;
         let mut store = Store::provision().expect("must provision");
-        store.add(new("jack", vec![]), Some(b"password")).expect("must add");
+        store
+            .add(new("jack", vec![]), Some(b"password"))
+            .expect("must add");
         let body = store.encode();
 
         // Version 3 is the last layout without the field. Its body is this
@@ -2266,12 +2281,14 @@ mod tests {
     #[test]
     fn the_first_rid_is_1000() {
         let store = seeded();
-        assert!(store
-            .authenticate(b"jack", b"password")
-            .unwrap()
-            .sid
-            .to_string()
-            .ends_with("-1000"));
+        assert!(
+            store
+                .authenticate(b"jack", b"password")
+                .unwrap()
+                .sid
+                .to_string()
+                .ends_with("-1000")
+        );
     }
 
     #[test]
@@ -2429,7 +2446,9 @@ mod tests {
     #[test]
     fn a_unix_id_is_never_reused_after_a_removal() {
         let mut store = Store::provision().expect("must provision");
-        store.add(new("keeper", vec![administrators()]), Some(b"pw")).unwrap();
+        store
+            .add(new("keeper", vec![administrators()]), Some(b"pw"))
+            .unwrap();
         store.add(new("doomed", vec![]), Some(b"pw")).unwrap();
         let doomed = store.record("doomed").unwrap().unix_id;
         store.remove("doomed").unwrap();
@@ -2527,7 +2546,10 @@ mod tests {
         for name in ["jack@local", "PEIOS\\jack", "jack/x", "jack:x", "jack,x"] {
             let mut store = Store::provision().expect("must provision");
             assert!(
-                matches!(store.add(new(name, vec![]), Some(b"pw")), Err(StoreError::Invalid(_))),
+                matches!(
+                    store.add(new(name, vec![]), Some(b"pw")),
+                    Err(StoreError::Invalid(_))
+                ),
                 "{name} must not be creatable as a principal"
             );
             assert!(
@@ -2541,10 +2563,19 @@ mod tests {
     /// passwd-format file or in a log.
     #[test]
     fn a_control_character_is_refused_in_a_name() {
-        for name in ["jack\nroot", "jack\rroot", "jack\tx", "jack\u{0}x", "jack\u{7f}"] {
+        for name in [
+            "jack\nroot",
+            "jack\rroot",
+            "jack\tx",
+            "jack\u{0}x",
+            "jack\u{7f}",
+        ] {
             let mut store = Store::provision().expect("must provision");
             assert!(
-                matches!(store.add(new(name, vec![]), Some(b"pw")), Err(StoreError::Invalid(_))),
+                matches!(
+                    store.add(new(name, vec![]), Some(b"pw")),
+                    Err(StoreError::Invalid(_))
+                ),
                 "{name:?} must not be creatable"
             );
         }
@@ -2578,7 +2609,9 @@ mod tests {
     #[test]
     fn surrounding_whitespace_is_stripped_rather_than_stored() {
         let mut store = Store::provision().expect("must provision");
-        store.add(new("  jack  ", vec![]), Some(b"pw")).expect("must add");
+        store
+            .add(new("  jack  ", vec![]), Some(b"pw"))
+            .expect("must add");
         let identity = store
             .authenticate(b"jack", b"pw")
             .expect("the stored name must be the trimmed one");
@@ -2603,7 +2636,10 @@ mod tests {
         store.create_group("developers").unwrap();
         let developers = store.resolve_group("developers").unwrap();
         store
-            .add(new("jack", vec![developers.clone(), administrators()]), Some(b"pw"))
+            .add(
+                new("jack", vec![developers.clone(), administrators()]),
+                Some(b"pw"),
+            )
             .unwrap();
 
         let identity = store.authenticate(b"jack", b"pw").unwrap();
@@ -2631,7 +2667,9 @@ mod tests {
     fn a_foreign_sid_is_carried_without_a_name_or_a_number() {
         let mut store = Store::provision().expect("must provision");
         let foreign: Sid = "S-1-5-21-9-9-9-1000".parse().unwrap();
-        store.add(new("jack", vec![foreign.clone()]), Some(b"pw")).unwrap();
+        store
+            .add(new("jack", vec![foreign.clone()]), Some(b"pw"))
+            .unwrap();
         let identity = store.authenticate(b"jack", b"pw").unwrap();
         assert_eq!(identity.groups[0].sid, foreign);
         assert_eq!(identity.groups[0].name, None);
@@ -2643,7 +2681,9 @@ mod tests {
         let mut store = Store::provision().expect("must provision");
         store.create_group("developers").unwrap();
         let developers = store.resolve_group("developers").unwrap();
-        store.add(new("jack", vec![developers]), Some(b"pw")).unwrap();
+        store
+            .add(new("jack", vec![developers]), Some(b"pw"))
+            .unwrap();
 
         assert!(matches!(
             store.delete_group("developers"),
@@ -2665,7 +2705,10 @@ mod tests {
         store.set_primary_group("jack", developers).unwrap();
 
         assert!(
-            matches!(store.delete_group("developers"), Err(StoreError::Invalid(_))),
+            matches!(
+                store.delete_group("developers"),
+                Err(StoreError::Invalid(_))
+            ),
             "deleting it would leave jack projecting a gid that names nothing"
         );
     }
@@ -2684,7 +2727,9 @@ mod tests {
         let mut store = Store::provision().expect("must provision");
         store.create_group("developers").unwrap();
         let developers = store.resolve_group("developers").unwrap();
-        store.add(new("a", vec![developers.clone()]), Some(b"pw")).unwrap();
+        store
+            .add(new("a", vec![developers.clone()]), Some(b"pw"))
+            .unwrap();
         store.add(new("b", vec![developers]), Some(b"pw")).unwrap();
         store.add(new("c", vec![]), Some(b"pw")).unwrap();
 
@@ -2786,13 +2831,23 @@ mod tests {
     #[test]
     fn a_claim_can_be_set_replaced_and_removed() {
         let mut store = seeded();
-        assert!(store.set_claim("jack", claim("Department", "Engineering")).unwrap());
         assert!(
-            !store.set_claim("jack", claim("Department", "Engineering")).unwrap(),
+            store
+                .set_claim("jack", claim("Department", "Engineering"))
+                .unwrap()
+        );
+        assert!(
+            !store
+                .set_claim("jack", claim("Department", "Engineering"))
+                .unwrap(),
             "setting a claim to what it already is must not force a write"
         );
 
-        assert!(store.set_claim("jack", claim("department", "Platform")).unwrap());
+        assert!(
+            store
+                .set_claim("jack", claim("department", "Platform"))
+                .unwrap()
+        );
         let claims = store.record("jack").unwrap().claims;
         assert_eq!(claims.len(), 1, "the name matched case-insensitively");
         assert_eq!(claims[0].values, Values::String(vec!["Platform".into()]));
@@ -2820,7 +2875,9 @@ mod tests {
     #[test]
     fn claims_reach_an_identity() {
         let mut store = seeded();
-        store.set_claim("jack", claim("Department", "Engineering")).unwrap();
+        store
+            .set_claim("jack", claim("Department", "Engineering"))
+            .unwrap();
         let identity = store.authenticate(b"jack", b"password").unwrap();
         assert_eq!(identity.claims.len(), 1);
         assert_eq!(identity.claims[0].name, "Department");
@@ -2887,13 +2944,18 @@ mod tests {
                 },
             )
             .unwrap();
-        store.set_claim("jack", claim("Department", "Engineering")).unwrap();
+        store
+            .set_claim("jack", claim("Department", "Engineering"))
+            .unwrap();
 
         let before = store.record("jack").unwrap();
         store.save(&fs, path()).expect("must save");
         let loaded = Store::load(&fs, path()).unwrap().unwrap();
         assert_eq!(loaded.record("jack").unwrap(), before);
-        assert_eq!(loaded.group_summaries().unwrap(), store.group_summaries().unwrap());
+        assert_eq!(
+            loaded.group_summaries().unwrap(),
+            store.group_summaries().unwrap()
+        );
     }
 
     #[test]
@@ -2923,7 +2985,10 @@ mod tests {
 
         store.save(&fs, path()).expect("must save");
         let loaded = Store::load(&fs, path()).unwrap().unwrap();
-        assert_eq!(loaded.record("jack").unwrap().claims, store.record("jack").unwrap().claims);
+        assert_eq!(
+            loaded.record("jack").unwrap().claims,
+            store.record("jack").unwrap().claims
+        );
     }
 
     #[test]
@@ -3114,13 +3179,13 @@ mod tests {
     #[test]
     fn a_stored_name_that_breaks_the_rules_is_refused_on_load() {
         for bad in [
-            "jack@corp",          // a reserved character
+            "jack@corp", // a reserved character
             "corp\\jack",
             "a/b",
             "jack:x",
             "jack,other",
-            "ja\u{7f}ck",          // outside 0x20-0x7e
-            "jack\nroot:x:0:0",   // the forged-passwd-line case
+            "ja\u{7f}ck",       // outside 0x20-0x7e
+            "jack\nroot:x:0:0", // the forged-passwd-line case
         ] {
             let mut store = seeded();
             store.principals[0].name = bad.to_string();
@@ -3345,7 +3410,11 @@ mod tests {
     /// A version 1 body: no Unix ID counter, no groups, and no profile or
     /// claims on a principal. Written by hand because no code produces it any
     /// more, which is exactly why the upgrade path needs a test.
-    fn version_1_body(domain: [u32; 3], next_rid: u32, principals: &[(u32, &str, Verifier)]) -> Vec<u8> {
+    fn version_1_body(
+        domain: [u32; 3],
+        next_rid: u32,
+        principals: &[(u32, &str, Verifier)],
+    ) -> Vec<u8> {
         let mut w = Writer::new();
         w.u32(domain[0]);
         w.u32(domain[1]);
@@ -3360,7 +3429,11 @@ mod tests {
             verifier.encode(&mut inner);
             w.bytes(&inner.finish());
             w.u32(1);
-            w.bytes(Sid::well_known(WellKnown::Administrators).as_ref().as_bytes());
+            w.bytes(
+                Sid::well_known(WellKnown::Administrators)
+                    .as_ref()
+                    .as_bytes(),
+            );
         }
         w.finish()
     }
@@ -3449,7 +3522,11 @@ mod tests {
     #[test]
     fn an_upgraded_store_writes_back_in_the_current_format() {
         let fs = FaultyFs::new();
-        let body = version_1_body([1, 2, 3], 1001, &[(1000, "jack", Verifier::create(b"pw").unwrap())]);
+        let body = version_1_body(
+            [1, 2, 3],
+            1001,
+            &[(1000, "jack", Verifier::create(b"pw").unwrap())],
+        );
         let store = Store::decode(1, &body).expect("must upgrade");
         store.save(&fs, path()).expect("must save");
 
@@ -3458,7 +3535,10 @@ mod tests {
             !reloaded.needs_rewrite(),
             "once written back it is a current store, not an upgraded one"
         );
-        assert_eq!(reloaded.record("jack").unwrap(), store.record("jack").unwrap());
+        assert_eq!(
+            reloaded.record("jack").unwrap(),
+            store.record("jack").unwrap()
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -3542,9 +3622,15 @@ mod tests {
         let mut store = Store::provision().expect("must provision");
         store.add(new("jack", vec![]), Some(b"pw")).unwrap();
 
-        assert!(store.add_membership("jack", administrators()).expect("must add"));
         assert!(
-            !store.add_membership("jack", administrators()).expect("must add"),
+            store
+                .add_membership("jack", administrators())
+                .expect("must add")
+        );
+        assert!(
+            !store
+                .add_membership("jack", administrators())
+                .expect("must add"),
             "granting a membership twice changes nothing"
         );
         assert_eq!(store.record("jack").unwrap().groups.len(), 1);
@@ -3554,9 +3640,11 @@ mod tests {
         store
             .add(new("other", vec![administrators()]), Some(b"pw"))
             .unwrap();
-        assert!(store
-            .remove_membership("jack", administrators().as_ref())
-            .expect("must remove"));
+        assert!(
+            store
+                .remove_membership("jack", administrators().as_ref())
+                .expect("must remove")
+        );
         assert!(store.record("jack").unwrap().groups.is_empty());
     }
 
@@ -3564,9 +3652,11 @@ mod tests {
     fn revoking_a_membership_nobody_has_changes_nothing() {
         let mut store = seeded();
         let everyone: Sid = "S-1-1-0".parse().unwrap();
-        assert!(!store
-            .remove_membership("jack", everyone.as_ref())
-            .expect("must not fail"));
+        assert!(
+            !store
+                .remove_membership("jack", everyone.as_ref())
+                .expect("must not fail")
+        );
     }
 
     #[test]

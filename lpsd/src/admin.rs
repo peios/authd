@@ -181,7 +181,11 @@ fn protect(path: &Path) {
     let administrators = Sid::well_known(WellKnown::Administrators);
 
     let descriptor = AclBuilder::new()
-        .allow(system.as_ref(), AccessMask::GENERIC_ALL.bits(), AceFlags::empty())
+        .allow(
+            system.as_ref(),
+            AccessMask::GENERIC_ALL.bits(),
+            AceFlags::empty(),
+        )
         .allow(
             administrators.as_ref(),
             AccessMask::GENERIC_ALL.bits(),
@@ -235,7 +239,9 @@ fn may_administer(stream: &UnixStream) -> bool {
     let token = match Token::open_peer(stream.as_fd()) {
         Ok(token) => token,
         Err(error) => {
-            log::warn(format_args!("admin: could not read a peer's token: {error}"));
+            log::warn(format_args!(
+                "admin: could not read a peer's token: {error}"
+            ));
             return false;
         }
     };
@@ -269,7 +275,9 @@ pub fn serve(
         return;
     }
     if let Err(error) = stream.set_write_timeout(Some(REPLY_TIMEOUT)) {
-        log::warn(format_args!("admin: could not set a write timeout: {error}"));
+        log::warn(format_args!(
+            "admin: could not set a write timeout: {error}"
+        ));
         return;
     }
 
@@ -597,7 +605,6 @@ fn request<T>(result: Result<T, libauthd::WireError>) -> Result<T, Refused> {
 fn encoded(result: Result<Vec<u8>, libauthd::WireError>) -> Result<Vec<u8>, Refused> {
     result.map_err(|_| Refused::Encode)
 }
-
 
 fn send(stream: &UnixStream, message: &[u8]) {
     if let Err(error) = send_message(stream, message) {
