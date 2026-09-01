@@ -58,6 +58,6 @@
 format = "peipkg"
 
 [package]
-version      = "{{version}}-17"
+version      = "{{version}}-18"
 architecture = "x86_64"
 license      = "MIT"
