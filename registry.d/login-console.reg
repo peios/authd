@@ -60,9 +60,11 @@
     "console but a working authority is still reachable and still worth",
     "booting.",
     "",
-    "TERM=vt220 rather than linux: a console that is a serial line is the",
-    "common case for this image (console=ttyS0). An image whose console is a",
-    "real VT wants its own seed, or an EnvVars override.",
+    "No TERM here. The image ships no console= on its command line, so the",
+    "kernel chooses the console -- a VT on a machine with a display, a serial",
+    "line otherwise -- and login derives TERM from what /dev/console resolves",
+    "to (linux for a VT, vt220 for anything else). A seed that pins TERM would",
+    "be right on one kind of machine and wrong on the other.",
     "",
     "Attaching a terminal suppresses output capture -- the pipes eventd would",
     "read are closed -- so nothing this service prints reaches the logs. That is",
@@ -104,7 +106,6 @@
         { "name": "Readiness",     "type": "dword", "data": 1 },
         { "name": "RestartPolicy", "type": "dword", "data": 2 },
         { "name": "ErrorControl",  "type": "dword", "data": 0 },
-        { "name": "Environment",   "type": "multi", "data": ["TERM=vt220"] },
         { "name": "DisplayName",   "type": "sz",    "data": "Console login" },
         { "name": "Description",   "type": "sz",    "data": "Terminal logon prompt on the system console" }
       ]
