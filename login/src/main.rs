@@ -26,22 +26,21 @@
 //! `exec` also replaces the address space, so the credential material this
 //! process handled does not survive into the user's shell.
 
-
 use std::os::fd::OwnedFd;
 use std::os::unix::net::UnixStream;
 use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Command, ExitCode};
 
+use libauthd::LOGON_SOCKET_PATH;
 use libauthd::ident;
 use libauthd::transport::{recv_message, recv_message_with_fd, send_message};
 use libauthd::wire::{
-    self, CredentialResponse, CredentialType, Denial, IdentifierType, LogonStart, LogonType,
-    MSG_ACCESS_DENIED, MSG_ACCESS_GRANTED, MSG_CREDENTIAL_REQUEST, Answer, Profile,
+    self, Answer, CredentialResponse, CredentialType, Denial, IdentifierType, LogonStart,
+    LogonType, MSG_ACCESS_DENIED, MSG_ACCESS_GRANTED, MSG_CREDENTIAL_REQUEST, Profile,
     decode_access_denied, decode_access_granted, decode_credential_request, decode_header,
     encode_credential_response, encode_logon_start,
 };
-use libauthd::LOGON_SOCKET_PATH;
 
 /// How long to wait on an existence lookup before treating it as unanswered.
 /// Short: it runs before a prompt, and a login that appears to hang is worse
@@ -560,6 +559,36 @@ fn current_tty() -> Option<String> {
         .map(str::to_string)
 }
 
+/// The terminal type to advertise when nothing set `TERM`.
+///
+/// This is the job agetty does on other systems: the process that owns the
+/// terminal knows what kind of terminal it is, and the shell it starts does
+/// not. A Linux virtual console (`/dev/ttyN`) understands the `linux`
+/// terminfo; anything else reached through a tty — a serial line, a
+/// hypervisor's paravirtual console — is some emulator on the far end, and
+/// `vt220` is the type every one of them honours.
+///
+/// `/dev/console` is a redirection: the kernel points it at whichever console
+/// it chose (the last `console=` on the command line, or its own default),
+/// and publishes that choice in sysfs. Resolve it there rather than assuming,
+/// so the same service definition is right on a display and on a serial port.
+fn default_term(tty: Option<&str>) -> String {
+    let active = std::fs::read_to_string("/sys/class/tty/console/active").unwrap_or_default();
+    term_for(tty, &active).to_string()
+}
+
+fn term_for(tty: Option<&str>, console_active: &str) -> &'static str {
+    let name = match tty {
+        Some("/dev/console") => console_active.split_whitespace().next().unwrap_or(""),
+        Some(path) => path.strip_prefix("/dev/").unwrap_or(path),
+        None => return "linux",
+    };
+    let is_vt = name
+        .strip_prefix("tty")
+        .is_some_and(|rest| !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_digit()));
+    if is_vt { "linux" } else { "vt220" }
+}
+
 /// Replace this process with the user's login shell.
 ///
 /// `argv[0]` carries a leading dash — the convention every shell reads as "this
@@ -588,11 +617,7 @@ fn current_tty() -> Option<String> {
 /// traverse but not create. The fallback below therefore now means "the
 /// authority said nothing, or could not provision it" rather than "nothing on
 /// this system ever will".
-fn exec_shell(
-    username: &str,
-    profile: &Profile,
-    preserve_environment: bool,
-) -> Result<(), String> {
+fn exec_shell(username: &str, profile: &Profile, preserve_environment: bool) -> Result<(), String> {
     // Client obligation 16: a relative `shell` is never executed and a relative
     // `home` is never resolved against login's own working directory. A `shell`
     // containing no separator is relative too, and must not be resolved against
@@ -624,7 +649,7 @@ fn exec_shell(
     ));
 
     if !preserve_environment {
-        let term = std::env::var("TERM").unwrap_or_else(|_| "linux".into());
+        let term = std::env::var("TERM").unwrap_or_else(|_| default_term(current_tty().as_deref()));
         command
             .env_clear()
             .env("HOME", home)
@@ -641,6 +666,27 @@ fn exec_shell(
 
 #[cfg(test)]
 mod tests {
+    use super::term_for;
+
+    // TERM follows the terminal, not the seed: the same login-console
+    // definition serves a display and a serial line (PEI-716).
+    #[test]
+    fn term_is_linux_on_a_virtual_console_and_vt220_elsewhere() {
+        assert_eq!(term_for(Some("/dev/tty1"), ""), "linux");
+        assert_eq!(term_for(Some("/dev/ttyS0"), ""), "vt220");
+        assert_eq!(term_for(Some("/dev/hvc0"), ""), "vt220");
+        assert_eq!(term_for(Some("/dev/pts/3"), ""), "vt220");
+        assert_eq!(term_for(None, "tty0"), "linux");
+    }
+
+    // /dev/console is whatever the kernel chose; sysfs names it first.
+    #[test]
+    fn dev_console_resolves_through_the_active_console_list() {
+        assert_eq!(term_for(Some("/dev/console"), "tty0\n"), "linux");
+        assert_eq!(term_for(Some("/dev/console"), "ttyS0 tty0\n"), "vt220");
+        assert_eq!(term_for(Some("/dev/console"), "tty0 ttyS0\n"), "linux");
+        assert_eq!(term_for(Some("/dev/console"), ""), "vt220");
+    }
 
     /// Client obligation 16: a relative `shell` is never executed and a
     /// relative `home` is never resolved against login's own cwd. A `shell`
@@ -669,10 +715,19 @@ mod tests {
     /// And an absolute one is used as given, or the check would be a rewrite.
     #[test]
     fn an_absolute_path_is_used_unchanged() {
-        assert_eq!(absolute_or_default("/bin/bash", "/bin/sh", "shell"), "/bin/bash");
-        assert_eq!(absolute_or_default("/home/jack", "/", "home directory"), "/home/jack");
+        assert_eq!(
+            absolute_or_default("/bin/bash", "/bin/sh", "shell"),
+            "/bin/bash"
+        );
+        assert_eq!(
+            absolute_or_default("/home/jack", "/", "home directory"),
+            "/home/jack"
+        );
         // A path with a space or an odd name is still absolute.
-        assert_eq!(absolute_or_default("/opt/my shell", "/bin/sh", "shell"), "/opt/my shell");
+        assert_eq!(
+            absolute_or_default("/opt/my shell", "/bin/sh", "shell"),
+            "/opt/my shell"
+        );
     }
     use super::*;
 
