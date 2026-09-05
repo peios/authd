@@ -61,6 +61,8 @@ format = "peipkg"
 # -20: login derives TERM from its terminal (linux on a VT, vt220 elsewhere)
 # and the login-console seed no longer pins TERM=vt220, so one definition
 # serves a display and a serial console. PEI-716.
-version      = "{{version}}-20"
+# -21: login classifies its terminal by device number, not ttyname(), which
+# does not resolve on the image and left every serial session with TERM=linux.
+version      = "{{version}}-21"
 architecture = "x86_64"
 license      = "MIT"
