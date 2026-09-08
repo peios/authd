@@ -1,158 +1,289 @@
-# authd — Peios' authentication daemon (the PGSS Logon authority), lpsd (the
-# local principal source), lps (its administration tool), login (the terminal
-# logon originator) and libnss_peios.so (the NSS shim through which a POSIX
-# program sees a Peios principal). All of it comes from one cargo workspace and
-# is carved into separate packages; see packages.pekit/ for why.
-#
-# The libpeios bootstrap mirrors peinit's and for the same reason: use
-# pkg-config rather than PEIOS_LIB_DIR, so peios-sys does not bake a
-# checkout-local rpath into a shipped binary. Local monorepo builds synthesize a
-# temporary peios.pc from the sibling libpeios/pkm trees when libpeios-devel is
-# not already installed in the build root.
-#
-# Milestone 1 deliberately omits the debuginfo/debugsource split peinit does.
-# It is copy-paste to add and worth adding once the shape settles; leaving it
-# out keeps the first bootable version small.
+# authd — Peios's authentication authority and the independently deployable
+# programs around it. One hermetic build produces trust-domain packages for
+# the authority, local principal source, administration client, login client,
+# NSS client, and the explicitly optional live-image account bootstrap.
 
 out_dir = "out"
 
-[build]
-command = """
+[source_package]
+name = "dev.peios.authd-source"
+
+[build.vendor]
+command = '''
+set -eu
+SRC=$(pwd -P)
+export CARGO_HOME=/tmp/cargo
+export CARGO_NET_GIT_FETCH_WITH_CLI=true
+mkdir -p "$CARGO_HOME" "$PEKIT_OUT"
+cd "$SRC"
+cargo vendor --locked "$PEKIT_OUT/vendor" > "$PEKIT_OUT/cargo-config.toml"
+test -s "$PEKIT_OUT/cargo-config.toml"
+test -n "$(find "$PEKIT_OUT/vendor" -mindepth 1 -maxdepth 1 -type d -print -quit)"
+
+'''
+
+[build.vendor.dependencies.peipkg]
+"org.rust-lang.rust" = ">= 1.98.1"
+
+[build.vendor.dependencies.apt]
+cargo           = "*"
+git             = "*"
+ca-certificates = "*"
+
+[build.main]
+needs = ["vendor"]
+command = '''
 set -eu
 set -o pipefail 2>/dev/null || true
 
-SRC="$(pwd)"
-REPO_ROOT="$(cd "$SRC/.." && pwd)"
+SRC=$(pwd -P)
+export CARGO_HOME="$PEKIT_OUT/cargo-home"
+mkdir -p "$CARGO_HOME"
+cp "$PEKIT_VENDOR_OUT/cargo-config.toml" "$CARGO_HOME/config.toml"
 
-for tool in cargo rustc gcc pkg-config; do
-  command -v "$tool" >/dev/null || { echo "missing required authd build tool: $tool" >&2; exit 1; }
+for tool in cargo rustc gcc pkg-config python3 objcopy strip readelf debugedit; do
+  command -v "$tool" >/dev/null || {
+    echo "authd: missing required build tool: $tool" >&2
+    exit 1
+  }
 done
 
-# Force the packaging-safe peios-sys path even if a developer shell happens to
-# carry the env overrides used for quick local tests.
+# Production builds consume the packaged C ABI and an exact public peios-rs
+# revision. No sibling checkout or mutable Cargo cache is visible here.
 unset PEIOS_LIB_DIR PEIOS_INCLUDE PKM_UAPI
-
-if ! pkg-config --exists peios; then
-  LIBPEIOS_ROOT="$REPO_ROOT/libpeios"
-  # The BUILT pkm headers, not pkm/uapi. The two trees disagree: pkm/uapi has
-  # an in-flight rename (KACS_TOKEN_ADJUST_SESSIONID ->
-  # KACS_TOKEN_ADJUST_INTERACTIVITY_SCOPE) that libpeios and peios-rs have not
-  # followed, so building against pkm/uapi fails with what looks like a broken
-  # peios-rs but is a header-tree mismatch.
-  PKM_UAPI_ROOT="$REPO_ROOT/pkm/out/build/headers/usr/include"
-
-  [ -f "$LIBPEIOS_ROOT/Cargo.toml" ] || {
-    echo "libpeios package metadata not found at $LIBPEIOS_ROOT" >&2
-    exit 1
-  }
-  [ -d "$LIBPEIOS_ROOT/include/peios" ] || {
-    echo "libpeios headers not found at $LIBPEIOS_ROOT/include" >&2
-    exit 1
-  }
-  [ -d "$PKM_UAPI_ROOT/pkm" ] || {
-    echo "pkm UAPI headers not found at $PKM_UAPI_ROOT" >&2
-    exit 1
-  }
-
-  cargo build --release --locked --manifest-path "$LIBPEIOS_ROOT/Cargo.toml"
-
-  PC_DIR="$PEKIT_OUT/pkgconfig"
-  mkdir -p "$PC_DIR"
-  LIBPEIOS_VERSION="$(sed -n 's/^version = "\\([^"]*\\)".*/\\1/p' "$LIBPEIOS_ROOT/Cargo.toml" | head -1)"
-  {
-    printf 'prefix=%s\\n' "$LIBPEIOS_ROOT"
-    printf 'exec_prefix=${prefix}\\n'
-    printf 'libdir=%s/target/release\\n' "$LIBPEIOS_ROOT"
-    printf 'includedir=%s/include\\n' "$LIBPEIOS_ROOT"
-    printf '\\n'
-    printf 'Name: peios\\n'
-    printf 'Description: Peios userspace C ABI library (libpeios)\\n'
-    printf 'Version: %s\\n' "$LIBPEIOS_VERSION"
-    printf 'Libs: -L${libdir} -lpeios\\n'
-    printf 'Cflags: -I${includedir} -I%s\\n' "$PKM_UAPI_ROOT"
-  } > "$PC_DIR/peios.pc"
-  export PKG_CONFIG_PATH="$PC_DIR${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
-fi
-
-# bindgen needs freestanding C headers such as stddef.h. A full clang install
-# has these in its resource dir; libclang-only hosts need GCC's include dir
-# passed explicitly.
+pkg-config --exists peios || {
+  echo "authd: libpeios-devel (peios.pc) is required" >&2
+  exit 1
+}
 export BINDGEN_EXTRA_CLANG_ARGS="-isystem $(gcc -print-file-name=include) ${BINDGEN_EXTRA_CLANG_ARGS:-}"
 
-cargo build --release --locked --bin authd --bin lpsd --bin lps --bin login --target-dir "$PEKIT_OUT/target"
-cargo build --release --locked -p nss_peios --target-dir "$PEKIT_OUT/target"
+# A release tag and every workspace crate describe the same source family.
+# Refuse a wrapper version that would create plausible but falsely versioned
+# artifacts.
+cargo metadata --locked --offline --no-deps --format-version 1 |
+  python3 -c '
+import json, os, sys
+metadata = json.load(sys.stdin)
+members = set(metadata["workspace_members"])
+versions = sorted({p["version"] for p in metadata["packages"] if p["id"] in members})
+expected = os.environ["PEKIT_VERSION"]
+if versions != [expected]:
+    raise SystemExit(f"authd: workspace versions {versions!r} do not equal package version {expected!r}")
+'
+
+# Stable DWARF names keep checkout and build-root paths out of the binaries.
+# Put broad mappings first so the more specific source/vendor mappings win.
+export RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }--remap-path-prefix=$PEKIT_WORKSPACE_ROOT=/usr/src/debug/dev.peios.authd/.workspace --remap-path-prefix=$PEKIT_OUT_BASE=/usr/src/debug/dev.peios.authd/.build --remap-path-prefix=$SRC=/usr/src/debug/dev.peios.authd --remap-path-prefix=$PEKIT_VENDOR_OUT/vendor=/usr/src/debug/dev.peios.authd/vendor"
+
+# Test the exact locked graph before installing any payload.
+cargo test --release --workspace --locked --offline --target-dir "$PEKIT_OUT/target"
+cargo build --release --locked --offline \
+  --bin authd --bin lpsd --bin lps --bin login \
+  --target-dir "$PEKIT_OUT/target"
+cargo build --release --locked --offline -p nss_peios --target-dir "$PEKIT_OUT/target"
 
 mkdir -p "$PEKIT_OUT/usr/sbin" "$PEKIT_OUT/usr/bin"
-install -m 0755 "$PEKIT_OUT/target/release/authd" "$PEKIT_OUT/usr/sbin/authd"
-install -m 0755 "$PEKIT_OUT/target/release/lpsd" "$PEKIT_OUT/usr/sbin/lpsd"
-install -m 0755 "$PEKIT_OUT/target/release/login" "$PEKIT_OUT/usr/bin/login"
-install -m 0755 "$PEKIT_OUT/target/release/lps" "$PEKIT_OUT/usr/bin/lps"
+cp "$PEKIT_OUT/target/release/authd" "$PEKIT_OUT/usr/sbin/authd"
+cp "$PEKIT_OUT/target/release/lpsd" "$PEKIT_OUT/usr/sbin/lpsd"
+cp "$PEKIT_OUT/target/release/login" "$PEKIT_OUT/usr/bin/login"
+cp "$PEKIT_OUT/target/release/lps" "$PEKIT_OUT/usr/bin/lps"
+test -x "$PEKIT_OUT/usr/sbin/authd"
+test -x "$PEKIT_OUT/usr/sbin/lpsd"
+test -x "$PEKIT_OUT/usr/bin/login"
+test -x "$PEKIT_OUT/usr/bin/lps"
 
-# glibc dlopens an NSS module by name — `libnss_peios.so.2`, where the 2 is the
-# NSS interface version rather than anything about this module. On Peios the
-# name is not derived from nsswitch.conf: glibc is patched so the identity
-# databases reach this module and nothing else (pkgs/glibc/patches/nss).
-#
-# Two things about the path. The SONAME cargo produces is not the name that gets
-# loaded, so the rename is what makes it findable at all. And it goes in the
-# triplet directory rather than /usr/lib, because that is glibc's configured
-# --libdir and therefore where its dlopen search path looks — the same place
-# libpeios installs, for the same reason.
+# glibc loads this exact NSS ABI name from its configured triplet libdir.
 mkdir -p "$PEKIT_OUT/usr/lib/x86_64-linux-peios"
-install -m 0644 "$PEKIT_OUT/target/release/libnss_peios.so" "$PEKIT_OUT/usr/lib/x86_64-linux-peios/libnss_peios.so.2"
+cp "$PEKIT_OUT/target/release/libnss_peios.so" \
+  "$PEKIT_OUT/usr/lib/x86_64-linux-peios/libnss_peios.so.2"
+test -s "$PEKIT_OUT/usr/lib/x86_64-linux-peios/libnss_peios.so.2"
 
-# The script that creates the first account on a fresh image, run by the
-# oneshot service lpsd-first-account.reg defines. It carries a password that
-# ships in the image and is therefore public, which is why it and its service
-# are separately opt-in-able from lpsd itself.
-mkdir -p "$PEKIT_OUT/usr/libexec/lpsd"
-install -m 0755 "$SRC/libexec/first-account" "$PEKIT_OUT/usr/libexec/lpsd/first-account"
+# Registry seeds are inert vendor inputs. Keep the passwordless live-image
+# bootstrap in its own package so the production principal source cannot
+# introduce it merely by being installed.
+mkdir -p "$PEKIT_OUT/usr/share/regim" "$PEKIT_OUT/usr/libexec/lpsd"
+for seed in \
+  lpsd-authd-registration.reg \
+  authd-policy.reg \
+  authd-service.reg \
+  lpsd-service.reg \
+  login-console.reg \
+  lpsd-first-account.reg
+do
+  cp "$SRC/registry.d/$seed" "$PEKIT_OUT/usr/share/regim/$seed"
+done
+cp "$SRC/libexec/first-account" "$PEKIT_OUT/usr/libexec/lpsd/first-account"
+test -x "$PEKIT_OUT/usr/libexec/lpsd/first-account"
 
-# lpsd-authd-registration.reg registers lpsd as a principal source (it was
-# `lpsd.reg` until the service definition below made "the lpsd seed"
-# ambiguous). Packages may
-# write registry.d/ but not the auto-apply queue, so shipping this only *offers*
-# the seed: an image opts in with `[registry] autoapply` in its peiso.toml. The
-# package proposes, the image decides — which is what stops installing a package
-# from silently granting it the right to assert identity.
-#
-# lpsd-first-account.reg is the second, separately opt-in-able half: a oneshot
-# service that creates a development account so an image with no operator can be
-# logged into. Deliberately a distinct file rather than more values in the
-# registration seed,
-# so that "lpsd may assert identity" and "this image ships a known credential"
-# are two decisions an image makes independently.
-#
-# authd-policy.reg is the third: the default local policy — which privileges
-# and integrity level each principal gets. Separate again, and for a sharper
-# reason than the other two. Because authd treats the policy key as the WHOLE
-# answer whenever it exists, this file is not a suggestion an image can half
-# take: applying it means adopting these defaults entire, and a hardened image
-# is expected to ship its own file in place of it rather than edit around it.
-#
-# The three *-service.reg / login-console.reg seeds are a different kind of
-# thing from the three above: they are peinit service definitions — what to
-# start, in what order, on which terminal. They exist as seeds because peinit
-# used to carry authd, lpsd and login as compiled-in definitions injected by
-# `peios.login=1`, and no longer does. registryd is the only service peinit
-# still defines itself, because it is the only one whose definition cannot live
-# in the registry it serves.
-#
-# Same opt-in rule as the rest: shipping a definition offers it, and only an
-# image naming it in `[registry] autoapply` starts anything.
-mkdir -p "$PEKIT_OUT/usr/share/regim"
-install -m 0644 "$SRC/registry.d/lpsd-authd-registration.reg" "$PEKIT_OUT/usr/share/regim/lpsd-authd-registration.reg"
-install -m 0644 "$SRC/registry.d/lpsd-first-account.reg" "$PEKIT_OUT/usr/share/regim/lpsd-first-account.reg"
-install -m 0644 "$SRC/registry.d/authd-policy.reg" "$PEKIT_OUT/usr/share/regim/authd-policy.reg"
-install -m 0644 "$SRC/registry.d/authd-service.reg" "$PEKIT_OUT/usr/share/regim/authd-service.reg"
-install -m 0644 "$SRC/registry.d/lpsd-service.reg" "$PEKIT_OUT/usr/share/regim/lpsd-service.reg"
-install -m 0644 "$SRC/registry.d/login-console.reg" "$PEKIT_OUT/usr/share/regim/login-console.reg"
-"""
+# Split each independently installable ELF's symbols separately, while sharing
+# one exact debug-source tree for the source release and vendored Rust closure.
+: > "$PEKIT_OUT/.debug-sources"
+split_debug() {
+  component=$1
+  elf=$2
+  list="$PEKIT_OUT/.debug-$component"
+  debugedit -b "$SRC" -d /usr/src/debug/dev.peios.authd -l "$list" -n "$elf"
+  cat "$list" >> "$PEKIT_OUT/.debug-sources"
+  build_id=$(readelf -n "$elf" | sed -n 's/^[[:space:]]*Build ID: //p' | head -1)
+  [ -n "$build_id" ] || {
+    echo "authd: $elf has no build ID" >&2
+    exit 1
+  }
+  first=$(printf %s "$build_id" | cut -c1-2)
+  rest=$(printf %s "$build_id" | cut -c3-)
+  debug="$PEKIT_OUT/debug/$component/usr/lib/debug/.build-id/$first/$rest.debug"
+  mkdir -p "$(dirname "$debug")"
+  objcopy --only-keep-debug "$elf" "$debug"
+  strip --strip-unneeded "$elf"
+  objcopy --add-gnu-debuglink="$debug" "$elf"
+  rm -f "$list"
+}
 
-[build.dependencies.peipkg]
-cargo = "*"
-rust = "*"
-gcc = "*"
-pkgconf-pkg-config = "*"
-libpeios-devel = "*"
-kernel-headers = "*"
+split_debug authd "$PEKIT_OUT/usr/sbin/authd"
+split_debug lpsd "$PEKIT_OUT/usr/sbin/lpsd"
+split_debug lps "$PEKIT_OUT/usr/bin/lps"
+split_debug login "$PEKIT_OUT/usr/bin/login"
+split_debug nss "$PEKIT_OUT/usr/lib/x86_64-linux-peios/libnss_peios.so.2"
+
+DEBUG_ROOT="$PEKIT_OUT/usr/src/debug/dev.peios.authd"
+mkdir -p "$DEBUG_ROOT"
+tr '\0' '\n' < "$PEKIT_OUT/.debug-sources" | LC_ALL=C sort -u | while IFS= read -r rel; do
+  [ -n "$rel" ] || continue
+  case "$rel" in */) continue ;; esac
+  case "$rel" in
+    vendor/*) origin="$PEKIT_VENDOR_OUT/$rel" ;;
+    *)        origin="$SRC/$rel" ;;
+  esac
+  [ -f "$origin" ] || continue
+  mkdir -p "$DEBUG_ROOT/$(dirname "$rel")"
+  cp "$origin" "$DEBUG_ROOT/$rel"
+done
+rm -f "$PEKIT_OUT/.debug-sources"
+test -n "$(find "$DEBUG_ROOT" -type f -print -quit)"
+
+# Fail closed on distribution hardening, split-debug, and path-leak policy.
+for record in \
+  "authd:$PEKIT_OUT/usr/sbin/authd:exe" \
+  "lpsd:$PEKIT_OUT/usr/sbin/lpsd:exe" \
+  "lps:$PEKIT_OUT/usr/bin/lps:exe" \
+  "login:$PEKIT_OUT/usr/bin/login:exe" \
+  "nss:$PEKIT_OUT/usr/lib/x86_64-linux-peios/libnss_peios.so.2:dso"
+do
+  component=${record%%:*}
+  remain=${record#*:}
+  elf=${remain%:*}
+  kind=${record##*:}
+
+  readelf -h "$elf" | grep -Eq 'Type:[[:space:]]+DYN'
+  readelf -lW "$elf" | grep -q 'GNU_RELRO'
+  readelf -lW "$elf" | grep -Eq 'GNU_STACK[[:space:]].*RW[[:space:]]'
+  readelf -dW "$elf" | grep -q 'BIND_NOW'
+  readelf -dW "$elf" | grep -q 'RELR'
+  ! readelf -dW "$elf" | grep -Eq '(RPATH|RUNPATH)'
+  ! readelf -SW "$elf" | grep -q '\.debug_info'
+  if [ "$kind" = exe ]; then
+    readelf -dW "$elf" | grep -Eq 'FLAGS_1.*PIE'
+  else
+    readelf -dW "$elf" | grep -Fq 'Library soname: [libnss_peios.so.2]'
+  fi
+
+  build_id=$(readelf -n "$elf" | sed -n 's/^[[:space:]]*Build ID: //p' | head -1)
+  debug="$PEKIT_OUT/debug/$component/usr/lib/debug/.build-id/$(printf %s "$build_id" | cut -c1-2)/$(printf %s "$build_id" | cut -c3-).debug"
+  test -s "$debug"
+  readelf -SW "$debug" | grep -q '\.debug_info'
+  test "$(readelf -n "$debug" | sed -n 's/^[[:space:]]*Build ID: //p' | head -1)" = "$build_id"
+  for forbidden in "$SRC" "$PEKIT_VENDOR_OUT" "$PEKIT_OUT_BASE" "$PEKIT_WORKSPACE_ROOT"; do
+    ! grep -aF "$forbidden" "$elf" "$debug" >/dev/null
+  done
+done
+
+# Installed-payload smoke: public client CLI, prohibited login bypass, NSS ABI,
+# seed syntax, and live-account script syntax all come from staged files.
+"$PEKIT_OUT/usr/bin/lps" --help > "$PEKIT_OUT/lps-help"
+grep -q 'usage: lps' "$PEKIT_OUT/lps-help"
+if "$PEKIT_OUT/usr/bin/login" -f peios >"$PEKIT_OUT/login-out" 2>"$PEKIT_OUT/login-err"; then
+  echo 'authd: login unexpectedly accepted -f' >&2
+  exit 1
+fi
+grep -q 'not supported' "$PEKIT_OUT/login-err"
+readelf -Ws "$PEKIT_OUT/usr/lib/x86_64-linux-peios/libnss_peios.so.2" |
+  grep -q '_nss_peios_getpwnam_r'
+python3 - "$PEKIT_OUT/usr/share/regim" <<'PY'
+import json, pathlib, sys
+root = pathlib.Path(sys.argv[1])
+files = sorted(root.glob("*.reg"))
+assert len(files) == 6, files
+for path in files:
+    value = json.loads(path.read_text())
+    assert isinstance(value.get("keys"), list) and value["keys"], path
+PY
+/usr/bin/sh -n "$PEKIT_OUT/usr/libexec/lpsd/first-account"
+rm -f "$PEKIT_OUT/lps-help" "$PEKIT_OUT/login-out" "$PEKIT_OUT/login-err"
+'''
+
+[build.main.dependencies.peipkg]
+"org.git.kernel.dash"      = "*"
+peiosutils                  = "*"
+"org.gnu.findutils"        = "*"
+"org.gnu.grep"             = "*"
+"org.gnu.sed"              = "*"
+"org.rust-lang.rust"       = ">= 1.98.1"
+"org.pkgconf.pkgconf"      = "*"
+"org.gnu.binutils"         = "*"
+"org.sourceware.debugedit" = "*"
+"org.python.python3"       = "*"
+"org.llvm.clang"           = ">= 22"
+libpeios-devel              = "*"
+kernel-headers              = "*"
+
+[build.main.dependencies.apt]
+dash         = "*"
+coreutils    = "*"
+findutils    = "*"
+grep         = "*"
+sed          = "*"
+cargo        = "*"
+rustc        = "*"
+gcc          = "*"
+pkg-config   = "*"
+libclang-dev = "*"
+binutils     = "*"
+debugedit    = "*"
+python3      = "*"
+
+[test]
+needs = ["vendor"]
+command = '''
+set -eu
+export CARGO_HOME="$PEKIT_OUT/cargo-home"
+mkdir -p "$CARGO_HOME"
+cp "$PEKIT_VENDOR_OUT/cargo-config.toml" "$CARGO_HOME/config.toml"
+unset PEIOS_LIB_DIR PEIOS_INCLUDE PKM_UAPI
+pkg-config --exists peios || {
+  echo "authd: libpeios-devel (peios.pc) is required" >&2
+  exit 1
+}
+export BINDGEN_EXTRA_CLANG_ARGS="-isystem $(gcc -print-file-name=include) ${BINDGEN_EXTRA_CLANG_ARGS:-}"
+cargo test --workspace --locked --offline
+'''
+
+[test.dependencies.peipkg]
+"org.git.kernel.dash" = "*"
+peiosutils             = "*"
+"org.rust-lang.rust"  = ">= 1.98.1"
+"org.pkgconf.pkgconf" = "*"
+"org.llvm.clang"      = ">= 22"
+libpeios-devel         = "*"
+kernel-headers         = "*"
+
+[test.dependencies.apt]
+dash         = "*"
+coreutils    = "*"
+cargo        = "*"
+rustc        = "*"
+gcc          = "*"
+pkg-config   = "*"
+libclang-dev = "*"
+
+[clean]
+command = "cargo clean"

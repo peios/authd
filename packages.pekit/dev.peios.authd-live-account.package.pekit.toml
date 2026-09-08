@@ -1,0 +1,17 @@
+# An intentionally passwordless administrator for disposable live/development
+# images. Keeping it separate makes the unsafe policy impossible to acquire by
+# installing the production lpsd package alone.
+[package]
+name         = "dev.peios.authd-live-account"
+architecture = "noarch"
+description  = "Passwordless Peios live-image development account bootstrap"
+
+[dependencies]
+"dev.peios.authd-lpsd" = "{{version}}"
+"dev.peios.authd-lps"  = "{{version}}"
+sh                       = "*"
+
+[files]
+"@source:LICENSE"                              = "usr/share/licenses/dev.peios.authd-live-account/LICENSE"
+":usr/share/regim/lpsd-first-account.reg"      = "usr/share/regim/lpsd-first-account.reg"
+":usr/libexec/lpsd/first-account"              = "usr/libexec/lpsd/first-account"

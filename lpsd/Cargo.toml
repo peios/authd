@@ -1,6 +1,6 @@
 [package]
 name = "lpsd"
-version = "0.0.1"
+version = "0.0.14"
 edition = "2024"
 license = "MIT"
 description = "Peios' local principal source daemon — the local half of PSI."
@@ -16,7 +16,7 @@ path = "src/main.rs"
 # thing an offline attack is run against.
 [dependencies]
 libauthd = { path = "../libauthd" }
-peios = { path = "../../peios-rs/peios" }
+peios = { git = "https://github.com/peios/peios-rs.git", rev = "6b6a05ca94b651f83f9cdbbea0dbfc03d5208686" }
 # The password verifier. This is the one dependency lpsd exists to have: a
 # memory-hard KDF is not something to own outright, because the value is in the
 # scrutiny the implementation has had, not in the algorithm being hard to write.

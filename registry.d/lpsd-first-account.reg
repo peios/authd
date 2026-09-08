@@ -2,8 +2,8 @@
   "_comment": [
     "A oneshot service that creates the development account on a fresh machine.",
     "",
-    "!! THE PASSWORD IT SETS SHIPS IN THE IMAGE AND IS THEREFORE PUBLIC. !!",
-    "See /usr/libexec/lpsd/first-account, which holds it. This belongs on a live",
+    "!! THE ACCOUNT HAS NO CREDENTIAL AND IS THEREFORE OPEN TO ANY CALLER. !!",
+    "See /usr/libexec/lpsd/first-account. This belongs on a live",
     "or development image and nowhere else; a production image simply does not",
     "list this file in [registry] autoapply, provisions an empty store, and has",
     "an administrator run `lps add` for the first account.",
@@ -28,7 +28,7 @@
     "installed system loses both this key and the script when the installer",
     "commits the filesystem to disk.",
     "",
-    "Shipped by the lpsd package into /usr/share/peios/registry.d/; it applies",
+    "Shipped by dev.peios.authd-live-account into /usr/share/regim/; it applies",
     "only if an image opts in via [registry] autoapply in its peiso.toml."
   ],
   "keys": [

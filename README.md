@@ -11,7 +11,8 @@ Closest prior art is Windows' LSA.
 | `authd` | `/usr/sbin/authd` | The authority. Holds `SeCreateTokenPrivilege`, runs at `PeiosTcb`, listens on `/run/logon.sock` (PGSS Logon) and `/run/psi.sock` (PSI). |
 | `lpsd` | `/usr/sbin/lpsd` | The local principal source. Owns this machine's accounts and every local credential verifier. Runs below authd and holds none of its privileges. |
 | `lps` | `/usr/bin/lps` | Administers `lpsd`'s store over `/run/lpsd/admin.sock`. A client with no state and no privilege of its own. |
-| `login` | `/usr/sbin/login` | A PGSS Logon client. Collects a credential, receives a token, installs it, execs a shell. |
+| `login` | `/usr/bin/login` | A PGSS Logon client. Collects a credential, receives a token, installs it, execs a shell. |
+| `nss` | `/usr/lib/x86_64-linux-peios/libnss_peios.so.2` | The NSS client through which POSIX programs resolve Peios principals. |
 | `libauthd` | — | The wire formats: PGSS Logon, PSI, and LPS. |
 | `libtty` | — | Terminal handling for credential collection. |
 
@@ -40,6 +41,14 @@ cargo test
 ```
 
 Packaged with pekit; `pekit.toml` carries the build and the registry seeds it offers (`registry.d/`). Seeds are *offered*, not applied — an image opts in via `[registry] autoapply`, so installing a package never silently grants it the right to assert identity.
+
+The five runtime trust domains are independently installable as
+`dev.peios.authd`, `dev.peios.authd-lpsd`, `dev.peios.authd-lps`,
+`dev.peios.authd-login`, and `dev.peios.authd-nss`. The passwordless
+administrator bootstrap used by disposable live images is a sixth, noarch
+package, `dev.peios.authd-live-account`; it is deliberately absent from the
+production lpsd package. Each ELF component has matching debuginfo, while the
+family shares one debugsource and corresponding-source package.
 
 ## Documentation
 
