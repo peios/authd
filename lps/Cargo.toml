@@ -1,6 +1,6 @@
 [package]
 name = "lps"
-version = "0.0.1"
+version = "0.0.14"
 edition = "2024"
 license = "MIT"
 description = "Administer Peios' local principal store."
@@ -16,4 +16,4 @@ path = "src/main.rs"
 [dependencies]
 libauthd = { path = "../libauthd" }
 libtty = { path = "../libtty" }
-peios = { path = "../../peios-rs/peios" }
+peios = { git = "https://github.com/peios/peios-rs.git", rev = "6b6a05ca94b651f83f9cdbbea0dbfc03d5208686" }

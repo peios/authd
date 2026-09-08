@@ -1,0 +1,8 @@
+[package]
+name         = "dev.peios.authd-debugsource"
+architecture = "noarch"
+description  = "Peios authentication stack debug sources"
+
+[files]
+"@source:LICENSE"   = "usr/share/licenses/dev.peios.authd-debugsource/LICENSE"
+":usr/src/debug/**" = "usr/src/debug"

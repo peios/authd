@@ -1,0 +1,10 @@
+[package]
+name        = "dev.peios.authd-lps-debuginfo"
+description = "Peios local principal administration tool debugging symbols"
+
+[dependencies]
+"dev.peios.authd-lps" = "{{version}}"
+
+[files]
+"@source:LICENSE"               = "usr/share/licenses/dev.peios.authd-lps-debuginfo/LICENSE"
+":debug/lps/usr/lib/debug/**"   = "usr/lib/debug"

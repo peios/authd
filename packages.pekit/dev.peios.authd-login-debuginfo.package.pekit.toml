@@ -1,0 +1,10 @@
+[package]
+name        = "dev.peios.authd-login-debuginfo"
+description = "Peios terminal logon originator debugging symbols"
+
+[dependencies]
+"dev.peios.authd-login" = "{{version}}"
+
+[files]
+"@source:LICENSE"                 = "usr/share/licenses/dev.peios.authd-login-debuginfo/LICENSE"
+":debug/login/usr/lib/debug/**"   = "usr/lib/debug"

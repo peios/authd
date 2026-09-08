@@ -1,0 +1,19 @@
+# Terminal PGSS Logon originator. It speaks the authority protocol but is not
+# coupled to one particular authority package.
+[package]
+name        = "dev.peios.authd-login"
+description = "Peios terminal logon originator"
+
+[provides]
+login = "{{version}}-1"
+
+[replaces]
+login = "<= 0.0.13-21"
+
+[dependencies]
+sh = "*"
+
+[files]
+"@source:LICENSE"                         = "usr/share/licenses/dev.peios.authd-login/LICENSE"
+":usr/bin/login"                           = "usr/bin/login"
+":usr/share/regim/login-console.reg"       = "usr/share/regim/login-console.reg"

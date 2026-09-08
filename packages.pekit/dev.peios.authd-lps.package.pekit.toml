@@ -1,0 +1,14 @@
+# Stateless administration client for the local principal source.
+[package]
+name        = "dev.peios.authd-lps"
+description = "Peios local principal store administration tool"
+
+[provides]
+lps = "{{version}}-1"
+
+[replaces]
+lps = "<= 0.0.13-21"
+
+[files]
+"@source:LICENSE" = "usr/share/licenses/dev.peios.authd-lps/LICENSE"
+":usr/bin/lps"     = "usr/bin/lps"

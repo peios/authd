@@ -1,0 +1,10 @@
+[package]
+name        = "dev.peios.authd-debuginfo"
+description = "Peios authentication authority debugging symbols"
+
+[dependencies]
+"dev.peios.authd" = "{{version}}"
+
+[files]
+"@source:LICENSE"                 = "usr/share/licenses/dev.peios.authd-debuginfo/LICENSE"
+":debug/authd/usr/lib/debug/**"   = "usr/lib/debug"

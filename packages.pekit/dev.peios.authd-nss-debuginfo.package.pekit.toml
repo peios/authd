@@ -1,0 +1,10 @@
+[package]
+name        = "dev.peios.authd-nss-debuginfo"
+description = "Peios NSS principal-resolution module debugging symbols"
+
+[dependencies]
+"dev.peios.authd-nss" = "{{version}}"
+
+[files]
+"@source:LICENSE"               = "usr/share/licenses/dev.peios.authd-nss-debuginfo/LICENSE"
+":debug/nss/usr/lib/debug/**"   = "usr/lib/debug"

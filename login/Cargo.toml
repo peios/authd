@@ -1,6 +1,6 @@
 [package]
 name = "login"
-version = "0.0.1"
+version = "0.0.14"
 edition = "2024"
 license = "MIT"
 description = "Peios /bin/login — a PGSS Logon originator for terminal sessions."
@@ -17,4 +17,4 @@ libc = "0.2"
 # without echoing it, and the termios guard that restores echo afterwards is
 # exactly the sort of thing that should exist once.
 libtty = { path = "../libtty" }
-peios = { path = "../../peios-rs/peios" }
+peios = { git = "https://github.com/peios/peios-rs.git", rev = "6b6a05ca94b651f83f9cdbbea0dbfc03d5208686" }

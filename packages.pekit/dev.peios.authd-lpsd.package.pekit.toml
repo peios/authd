@@ -1,0 +1,17 @@
+# Local Principal Source Daemon. Credential verification and state stay out of
+# the token-minting authority's process and package.
+[package]
+name        = "dev.peios.authd-lpsd"
+description = "Peios local principal source daemon and identity database"
+
+[provides]
+lpsd = "{{version}}-1"
+
+[replaces]
+lpsd = "<= 0.0.13-21"
+
+[files]
+"@source:LICENSE"                                   = "usr/share/licenses/dev.peios.authd-lpsd/LICENSE"
+":usr/sbin/lpsd"                                    = "usr/sbin/lpsd"
+":usr/share/regim/lpsd-service.reg"                 = "usr/share/regim/lpsd-service.reg"
+":usr/share/regim/lpsd-authd-registration.reg"      = "usr/share/regim/lpsd-authd-registration.reg"

@@ -1,0 +1,17 @@
+# The PGSS Logon authority. It can mint identity and deliberately contains no
+# credential verifier or session launcher.
+[package]
+name        = "dev.peios.authd"
+description = "Peios authentication authority - the PGSS Logon authority"
+
+[provides]
+authd = "{{version}}-1"
+
+[replaces]
+authd = "<= 0.0.13-21"
+
+[files]
+"@source:LICENSE"                      = "usr/share/licenses/dev.peios.authd/LICENSE"
+":usr/sbin/authd"                       = "usr/sbin/authd"
+":usr/share/regim/authd-policy.reg"     = "usr/share/regim/authd-policy.reg"
+":usr/share/regim/authd-service.reg"    = "usr/share/regim/authd-service.reg"

@@ -1,0 +1,14 @@
+# NSS client loaded into POSIX processes by Peios's glibc identity path.
+[package]
+name        = "dev.peios.authd-nss"
+description = "Peios NSS principal-resolution module"
+
+[provides]
+nss-peios = "{{version}}-1"
+
+[replaces]
+nss-peios = "<= 0.0.13-21"
+
+[files]
+"@source:LICENSE"                                               = "usr/share/licenses/dev.peios.authd-nss/LICENSE"
+":usr/lib/x86_64-linux-peios/libnss_peios.so.2"                 = "usr/lib/x86_64-linux-peios/libnss_peios.so.2"
