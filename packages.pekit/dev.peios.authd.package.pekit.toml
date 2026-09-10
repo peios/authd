@@ -4,11 +4,7 @@
 name        = "dev.peios.authd"
 description = "Peios authentication authority - the PGSS Logon authority"
 
-[provides]
-authd = "{{version}}-1"
 
-[replaces]
-authd = "<= 0.0.13-21"
 
 [files]
 "@source:LICENSE"                      = "usr/share/licenses/dev.peios.authd/LICENSE"
