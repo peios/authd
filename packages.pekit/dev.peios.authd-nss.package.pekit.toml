@@ -3,11 +3,7 @@
 name        = "dev.peios.authd-nss"
 description = "Peios NSS principal-resolution module"
 
-[provides]
-nss-peios = "{{version}}-1"
 
-[replaces]
-nss-peios = "<= 0.0.13-21"
 
 [files]
 "@source:LICENSE"                                               = "usr/share/licenses/dev.peios.authd-nss/LICENSE"

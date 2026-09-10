@@ -4,11 +4,7 @@
 name        = "dev.peios.authd-login"
 description = "Peios terminal logon originator"
 
-[provides]
-login = "{{version}}-1"
 
-[replaces]
-login = "<= 0.0.13-21"
 
 [dependencies]
 sh = "*"

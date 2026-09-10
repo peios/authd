@@ -223,7 +223,7 @@ rm -f "$PEKIT_OUT/lps-help" "$PEKIT_OUT/login-out" "$PEKIT_OUT/login-err"
 
 [build.main.dependencies.peipkg]
 "org.git.kernel.dash"      = "*"
-peiosutils                  = "*"
+"dev.peios.peiosutils"                  = "*"
 "org.gnu.findutils"        = "*"
 "org.gnu.grep"             = "*"
 "org.gnu.sed"              = "*"
@@ -233,8 +233,8 @@ peiosutils                  = "*"
 "org.sourceware.debugedit" = "*"
 "org.python.python3"       = "*"
 "org.llvm.clang"           = ">= 22"
-libpeios-devel              = "*"
-kernel-headers              = "*"
+"dev.peios.libpeios-devel"              = "*"
+"dev.peios.kernel-headers"              = "*"
 
 [build.main.dependencies.apt]
 dash         = "*"
@@ -269,12 +269,12 @@ cargo test --workspace --locked --offline
 
 [test.dependencies.peipkg]
 "org.git.kernel.dash" = "*"
-peiosutils             = "*"
+"dev.peios.peiosutils"             = "*"
 "org.rust-lang.rust"  = ">= 1.98.1"
 "org.pkgconf.pkgconf" = "*"
 "org.llvm.clang"      = ">= 22"
-libpeios-devel         = "*"
-kernel-headers         = "*"
+"dev.peios.libpeios-devel"         = "*"
+"dev.peios.kernel-headers"         = "*"
 
 [test.dependencies.apt]
 dash         = "*"

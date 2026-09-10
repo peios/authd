@@ -4,11 +4,7 @@
 name        = "dev.peios.authd-lpsd"
 description = "Peios local principal source daemon and identity database"
 
-[provides]
-lpsd = "{{version}}-1"
 
-[replaces]
-lpsd = "<= 0.0.13-21"
 
 [files]
 "@source:LICENSE"                                   = "usr/share/licenses/dev.peios.authd-lpsd/LICENSE"
