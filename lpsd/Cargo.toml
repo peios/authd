@@ -1,6 +1,6 @@
 [package]
 name = "lpsd"
-version = "0.0.17"
+version = "0.0.18"
 edition = "2024"
 license = "MIT"
 description = "Peios' local principal source daemon — the local half of PSI."

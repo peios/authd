@@ -1,8 +1,9 @@
 # Terminal PGSS Logon originator. It speaks the authority protocol but is not
 # coupled to one particular authority package.
+side_effects = ["man-db"]
+
 [package]
 name         = "dev.peios.authd-login"
-side_effects = ["man-db"]
 description  = "Peios terminal logon originator"
 
 
