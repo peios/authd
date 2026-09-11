@@ -404,10 +404,11 @@ pub fn mint(minting: Minting<'_>) -> peios::Result<Grant> {
     }
     builder.owner_index(owner_index);
 
-    // The DACL an object created by this token gets when nothing else supplies
-    // one. Left unset, the kernel applies its own default; policy overrides it
-    // rather than the other way round, so an unconfigured machine keeps
-    // whatever the kernel considers safe.
+    // The DACL an object created by this token gets when it has no parent to
+    // inherit from. Left unset, the kernel supplies nothing: such an object
+    // gets a null DACL, which grants everything to everybody. The shipped
+    // policy therefore names one on the Everyone record (authd/registry.d),
+    // and this is only ever absent on a machine whose policy dropped it.
     if let Some(dacl) = &policy.default_dacl {
         builder.default_dacl(dacl);
     }
