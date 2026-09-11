@@ -1,8 +1,9 @@
 # Local Principal Source Daemon. Credential verification and state stay out of
 # the token-minting authority's process and package.
 [package]
-name        = "dev.peios.authd-lpsd"
-description = "Peios local principal source daemon and identity database"
+name         = "dev.peios.authd-lpsd"
+side_effects = ["man-db"]
+description  = "Peios local principal source daemon and identity database"
 
 
 
