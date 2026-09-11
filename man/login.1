@@ -1,0 +1,67 @@
+.TH LOGIN 1 "September 2026" "authd" "User Commands"
+.SH NAME
+login \- start a Peios terminal logon session
+.SH SYNOPSIS
+.B login
+.RB [ \-p ]
+.RB [ \-H ]
+.RB [ \-h
+.IR host ]
+.RI [ username ]
+.br
+.B login
+.RB [ \-p ]
+.RB [ \-H ]
+.RB [ \-h
+.IR host ]
+.BR \-\-try " " username
+.br
+.B login
+.RB [ \-p ]
+.RB [ \-H ]
+.RB [ \-h
+.IR host ]
+.BR \-\-try-no-password " " username
+.SH DESCRIPTION
+.B login
+collects credentials through the terminal, asks the Peios authentication
+authority for a primary token, installs the granted token on itself, and
+replaces itself with the principal's login shell.
+.PP
+With no
+.I username
+it prompts for one.  Supplying a name selects that principal directly.
+.SH OPTIONS
+.TP
+.B \-p
+Preserve the inherited environment instead of constructing a fresh login
+environment.
+.TP
+.B \-H
+Accept the conventional request to suppress a hostname banner.  The current
+client emits no such banner, so this option has no further effect.
+.TP
+.BI \-h " host"
+Record the remote peer on whose behalf this interactive logon is originated.
+.TP
+.BI \-\-try " username"
+Attempt the named principal first and fall back to the normal prompt after a
+non-fatal denial.
+.TP
+.BI \-\-try-no-password " username"
+Attempt the named principal while advertising that the client can collect no
+credentials.  If authentication requires interaction, fall back silently to
+the normal prompt.
+.TP
+.B \-\-
+End option processing.
+.SH SECURITY
+The traditional
+.B \-f
+authentication bypass is deliberately unsupported.  Authentication decisions
+are made by the authority from the verified peer and cannot be asserted by a
+command-line flag.
+.SH SEE ALSO
+.BR authd (8),
+.BR lps (1),
+.BR lpsd (8)

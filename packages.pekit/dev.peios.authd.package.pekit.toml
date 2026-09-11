@@ -9,5 +9,6 @@ description = "Peios authentication authority - the PGSS Logon authority"
 [files]
 "@source:LICENSE"                      = "usr/share/licenses/dev.peios.authd/LICENSE"
 ":usr/sbin/authd"                       = "usr/sbin/authd"
+":usr/share/man/man8/authd.8.gz"        = "usr/share/man/man8/authd.8.gz"
 ":usr/share/regim/authd-policy.reg"     = "usr/share/regim/authd-policy.reg"
 ":usr/share/regim/authd-service.reg"    = "usr/share/regim/authd-service.reg"

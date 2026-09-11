@@ -1,6 +1,6 @@
 [package]
 name = "authd"
-version = "0.0.14"
+version = "0.0.15"
 edition = "2024"
 license = "MIT"
 description = "Peios' authentication daemon — the PGSS Logon authority."
@@ -16,7 +16,7 @@ path = "src/main.rs"
 [dependencies]
 libauthd = { path = "../libauthd" }
 libc = "0.2"
-peios = { git = "https://github.com/peios/peios-rs.git", rev = "6b6a05ca94b651f83f9cdbbea0dbfc03d5208686" }
+peios = { git = "https://github.com/peios/peios-rs.git", rev = "f4309f78fbaa878a14429a5e07d778dba9ddfab7" }
 # Deriving a service's SID from its name, which is how a principal source is
 # identified. Pure computation with no I/O and no unsafe; peinit carries the
 # same dependency for the same derivation. The duplication wants resolving by

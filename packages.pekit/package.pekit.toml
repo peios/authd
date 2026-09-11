@@ -59,13 +59,8 @@
 format = "peipkg"
 
 [package]
-# -20: login derives TERM from its terminal (linux on a VT, vt220 elsewhere)
-# and the login-console seed no longer pins TERM=vt220, so one definition
-# serves a display and a serial console. PEI-716.
-# 0.0.14-1 is the first production package family: qualified names, hermetic
-# public source/dependencies, live-account isolation, conventional source and
-# per-component debug artifacts, and native hardening/payload gates.
 version      = "{{version}}-1"
 architecture = "x86_64"
 license      = "MIT"
 license_class = "free"
+homepage     = "https://github.com/peios/authd"

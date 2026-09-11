@@ -1,0 +1,87 @@
+.TH LPS 1 "September 2026" "authd" "User Commands"
+.SH NAME
+lps \- administer the Peios local principal store
+.SH SYNOPSIS
+.B lps
+.I command
+.RI [ arguments ]
+.SH DESCRIPTION
+.B lps
+is the administration client for
+.BR lpsd (8).
+It does not open the principal database itself; every operation is authorized
+and performed by the daemon over
+.IR /run/lpsd/admin.sock .
+.SH COMMANDS
+.TP
+.B list
+List every principal.
+.TP
+.BI show " name"
+Show one principal in full.
+.TP
+.B domain
+Print the machine's domain SID.
+.TP
+.BI add " [name] [options]"
+Create a principal.  Options are
+.BR \-\-group ,
+.BR \-\-primary-group ,
+.BR \-\-home ,
+.BR \-\-shell ,
+.BR \-\-display-name ,
+.BR \-\-disabled ,
+.BR \-\-no-password ,
+and
+.BR \-\-no-prompt .
+.TP
+.BI remove " name"
+Delete a principal.  RIDs are never reused; disabling an account is usually
+safer because descriptors may continue to name its SID.
+.TP
+.BI enable " name"
+Permit a principal to log on.
+.TP
+.BI disable " name"
+Refuse logon while retaining the principal and SID.
+.TP
+.BI password " name"
+Set a principal's password.
+.TP
+.BI set " name [options]"
+Change profile fields using
+.BR \-\-home ,
+.BR \-\-shell ,
+.BR \-\-display-name ,
+or
+.BR \-\-primary-group .
+.TP
+.B group list
+List local groups.
+.TP
+.BI group\ create " name"
+Create a local group.
+.TP
+.BI group\ delete " name"
+Delete an unused local group.
+.TP
+.BI group\ add " name group"
+Add a principal to a group.
+.TP
+.BI group\ remove " name group"
+Remove a principal from a group.
+.TP
+.BI claim\ set " name claim type [value ...]"
+Set a claim.  Supported types are int64, uint64, boolean, string, sid, and
+octet.
+.TP
+.BI claim\ remove " name claim"
+Remove a claim.
+.SH SECURITY
+.B \-\-no-password
+creates a principal that authenticates with no credential.  It is intended for
+explicit disposable-image bootstrap policy, not normal production accounts.
+.SH SEE ALSO
+.BR login (1),
+.BR authd (8),
+.BR lpsd (8)

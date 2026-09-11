@@ -9,5 +9,6 @@ description = "Peios local principal source daemon and identity database"
 [files]
 "@source:LICENSE"                                   = "usr/share/licenses/dev.peios.authd-lpsd/LICENSE"
 ":usr/sbin/lpsd"                                    = "usr/sbin/lpsd"
+":usr/share/man/man8/lpsd.8.gz"                     = "usr/share/man/man8/lpsd.8.gz"
 ":usr/share/regim/lpsd-service.reg"                 = "usr/share/regim/lpsd-service.reg"
 ":usr/share/regim/lpsd-authd-registration.reg"      = "usr/share/regim/lpsd-authd-registration.reg"
