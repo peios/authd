@@ -36,6 +36,20 @@
     "the compiled floor. That keeps the floor to exactly 'what a logon needs to",
     "function' rather than 'what is nice to have'.",
     "",
+    "DefaultDacl is the DACL an object gets when the token creates it with no",
+    "parent to inherit from -- an abstract socket, a key under a container",
+    "written without inheritable ACEs. The kernel has no fallback of its own:",
+    "a token without one leaves such an object with a NULL DACL, which grants",
+    "everything to everybody. The value is the same shape authd stamps on a",
+    "home directory: the owner, SYSTEM and Administrators, full control, and",
+    "nobody else. S-1-3-4 is OWNER RIGHTS, resolved against the object's owner",
+    "at check time; it is spelled as a literal because libpeios' SDDL parser",
+    "has no alias for it, and it has to be OWNER RIGHTS rather than CREATOR",
+    "OWNER because the file-creation path copies a default DACL verbatim and",
+    "substitutes no placeholders. One record suffices: an administrator's",
+    "token still owns what it creates, so the shape is right for them too, and",
+    "every token authd mints for a service logon carries Everyone as well.",
+    "",
     "-- Administrators --------------------------------------------------------",
     "",
     "The operational set: what administering a machine actually requires.",
@@ -144,6 +158,11 @@
             "SeChangeNotifyPrivilege",
             "SeCreateSymbolicLinkPrivilege"
           ]
+        },
+        {
+          "name": "DefaultDacl",
+          "type": "sz",
+          "data": "D:(A;;GA;;;S-1-3-4)(A;;GA;;;SY)(A;;GA;;;BA)"
         }
       ]
     },

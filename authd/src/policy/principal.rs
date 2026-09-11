@@ -606,9 +606,10 @@ fn default_dacl(records: &[Record], user: &SidRef, groups: &[&SidRef]) -> Option
             Some(existing) if existing.as_bytes() == named.as_bytes() => {}
             Some(_) => {
                 log::warn(format_args!(
-                    "policy names two different default DACLs for this logon; using \
-                     the system default, because group records have no order to break \
-                     the tie with"
+                    "policy names two different default DACLs for this logon; minting \
+                     the token with none, because group records have no order to break \
+                     the tie with -- an object it creates with no parent to inherit \
+                     from will get a null DACL"
                 ));
                 return None;
             }
@@ -644,7 +645,8 @@ fn default_dacl_of(entry: &Key, name: &str) -> Option<Acl> {
         Err(error) => {
             log::warn(format_args!(
                 "{KEY}\\{name}\\{DEFAULT_DACL_VALUE} is not a usable SDDL DACL \
-                 ({text:?}: {error}); objects will take the system default"
+                 ({text:?}: {error}); tokens will carry no default DACL and an \
+                 object created with no parent to inherit from gets a null DACL"
             ));
             None
         }
@@ -1193,6 +1195,35 @@ mod tests {
         assert!(
             checked > 10,
             "expected the seed to name privileges; found {checked}, so the scan is broken"
+        );
+    }
+
+    /// The seed names a default DACL on Everyone, and it has to be one the
+    /// parser accepts: a value that fails to parse is dropped with a warning
+    /// (`default_dacl_of`), which would silently reopen the null-DACL case
+    /// this value exists to close. It must grant the owner through OWNER
+    /// RIGHTS, because the kernel copies a default DACL onto a new file
+    /// verbatim: a CREATOR OWNER placeholder would name nobody.
+    #[test]
+    fn the_seed_ships_a_default_dacl_that_parses_and_names_owner_rights() {
+        const SEED: &str = include_str!("../../../registry.d/authd-policy.reg");
+
+        let value = SEED
+            .split("\"name\": \"DefaultDacl\"")
+            .nth(1)
+            .and_then(|rest| rest.split("\"data\": \"").nth(1))
+            .and_then(|rest| rest.split('"').next())
+            .expect("the seed names a DefaultDacl value on a record");
+
+        let acl = sddl::parse_acl(value).expect("the seed's DefaultDacl is valid SDDL");
+        assert!(!acl.as_bytes().is_empty());
+        assert!(
+            value.contains("S-1-3-4"),
+            "the default DACL must grant the owner through OWNER RIGHTS: {value}"
+        );
+        assert!(
+            !value.contains("S-1-3-0") && !value.contains(";CO)"),
+            "CREATOR OWNER is never substituted in a default DACL: {value}"
         );
     }
 
