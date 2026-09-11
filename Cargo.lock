@@ -25,7 +25,7 @@ dependencies = [
 
 [[package]]
 name = "authd"
-version = "0.0.14"
+version = "0.0.15"
 dependencies = [
  "libauthd",
  "libc",
@@ -172,7 +172,7 @@ dependencies = [
 
 [[package]]
 name = "libauthd"
-version = "0.0.14"
+version = "0.0.15"
 dependencies = [
  "libc",
 ]
@@ -195,7 +195,7 @@ dependencies = [
 
 [[package]]
 name = "libtty"
-version = "0.0.14"
+version = "0.0.15"
 dependencies = [
  "libauthd",
  "libc",
@@ -209,7 +209,7 @@ checksum = "f9f8bd3e56ce4dfc153cf470fffbfa98c7620958b312ca5c3a4b8d5181fd13c6"
 
 [[package]]
 name = "login"
-version = "0.0.14"
+version = "0.0.15"
 dependencies = [
  "libauthd",
  "libc",
@@ -219,7 +219,7 @@ dependencies = [
 
 [[package]]
 name = "lps"
-version = "0.0.14"
+version = "0.0.15"
 dependencies = [
  "libauthd",
  "libtty",
@@ -228,7 +228,7 @@ dependencies = [
 
 [[package]]
 name = "lpsd"
-version = "0.0.14"
+version = "0.0.15"
 dependencies = [
  "argon2",
  "libauthd",
@@ -260,7 +260,7 @@ dependencies = [
 
 [[package]]
 name = "nss_peios"
-version = "0.0.14"
+version = "0.0.15"
 dependencies = [
  "libauthd",
  "libc",
@@ -280,7 +280,7 @@ dependencies = [
 [[package]]
 name = "peios"
 version = "0.4.0"
-source = "git+https://github.com/peios/peios-rs.git?rev=6b6a05ca94b651f83f9cdbbea0dbfc03d5208686#6b6a05ca94b651f83f9cdbbea0dbfc03d5208686"
+source = "git+https://github.com/peios/peios-rs.git?rev=f4309f78fbaa878a14429a5e07d778dba9ddfab7#f4309f78fbaa878a14429a5e07d778dba9ddfab7"
 dependencies = [
  "bitflags",
  "libc",
@@ -290,7 +290,7 @@ dependencies = [
 [[package]]
 name = "peios-sys"
 version = "0.3.0"
-source = "git+https://github.com/peios/peios-rs.git?rev=6b6a05ca94b651f83f9cdbbea0dbfc03d5208686#6b6a05ca94b651f83f9cdbbea0dbfc03d5208686"
+source = "git+https://github.com/peios/peios-rs.git?rev=f4309f78fbaa878a14429a5e07d778dba9ddfab7#f4309f78fbaa878a14429a5e07d778dba9ddfab7"
 dependencies = [
  "bindgen",
  "pkg-config",

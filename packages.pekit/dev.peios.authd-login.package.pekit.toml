@@ -12,4 +12,5 @@ sh = "*"
 [files]
 "@source:LICENSE"                         = "usr/share/licenses/dev.peios.authd-login/LICENSE"
 ":usr/bin/login"                           = "usr/bin/login"
+":usr/share/man/man1/login.1.gz"           = "usr/share/man/man1/login.1.gz"
 ":usr/share/regim/login-console.reg"       = "usr/share/regim/login-console.reg"

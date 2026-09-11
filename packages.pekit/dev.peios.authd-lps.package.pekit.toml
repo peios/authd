@@ -6,5 +6,6 @@ description = "Peios local principal store administration tool"
 
 
 [files]
-"@source:LICENSE" = "usr/share/licenses/dev.peios.authd-lps/LICENSE"
-":usr/bin/lps"     = "usr/bin/lps"
+"@source:LICENSE"                 = "usr/share/licenses/dev.peios.authd-lps/LICENSE"
+":usr/bin/lps"                     = "usr/bin/lps"
+":usr/share/man/man1/lps.1.gz"         = "usr/share/man/man1/lps.1.gz"

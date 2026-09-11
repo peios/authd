@@ -75,8 +75,7 @@ if versions != [expected]:
 # Put broad mappings first so the more specific source/vendor mappings win.
 export RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }--remap-path-prefix=$PEKIT_WORKSPACE_ROOT=/usr/src/debug/dev.peios.authd/.workspace --remap-path-prefix=$PEKIT_OUT_BASE=/usr/src/debug/dev.peios.authd/.build --remap-path-prefix=$SRC=/usr/src/debug/dev.peios.authd --remap-path-prefix=$PEKIT_VENDOR_OUT/vendor=/usr/src/debug/dev.peios.authd/vendor"
 
-# Test the exact locked graph before installing any payload.
-cargo test --release --workspace --locked --offline --target-dir "$PEKIT_OUT/target"
+# The exact locked graph is exercised by the gated test target below.
 cargo build --release --locked --offline \
   --bin authd --bin lpsd --bin lps --bin login \
   --target-dir "$PEKIT_OUT/target"
@@ -91,6 +90,15 @@ test -x "$PEKIT_OUT/usr/sbin/authd"
 test -x "$PEKIT_OUT/usr/sbin/lpsd"
 test -x "$PEKIT_OUT/usr/bin/login"
 test -x "$PEKIT_OUT/usr/bin/lps"
+
+# Install deterministic compressed manual pages. Keeping these beside the
+# source makes each public executable self-documenting without depending on
+# generated help output or a networked documentation build.
+mkdir -p "$PEKIT_OUT/usr/share/man/man1" "$PEKIT_OUT/usr/share/man/man8"
+gzip -n -9 -c "$SRC/man/lps.1" > "$PEKIT_OUT/usr/share/man/man1/lps.1.gz"
+gzip -n -9 -c "$SRC/man/login.1" > "$PEKIT_OUT/usr/share/man/man1/login.1.gz"
+gzip -n -9 -c "$SRC/man/authd.8" > "$PEKIT_OUT/usr/share/man/man8/authd.8.gz"
+gzip -n -9 -c "$SRC/man/lpsd.8" > "$PEKIT_OUT/usr/share/man/man8/lpsd.8.gz"
 
 # glibc loads this exact NSS ABI name from its configured triplet libdir.
 mkdir -p "$PEKIT_OUT/usr/lib/x86_64-linux-peios"
@@ -161,6 +169,64 @@ done
 rm -f "$PEKIT_OUT/.debug-sources"
 test -n "$(find "$DEBUG_ROOT" -type f -print -quit)"
 
+'''
+
+# authd alone is part of the Peios trusted computing base: it holds the two
+# privileges that mint identity. The tier is selected by the signing key.
+[build.main.sign.pip]
+"usr/sbin/authd" = "tcb.priv"
+
+[build.main.dependencies.peipkg]
+"org.git.kernel.dash"         = "*"
+"dev.peios.peiosutils"        = "*"
+"org.gnu.findutils"           = "*"
+"org.gnu.grep"                = "*"
+"org.gnu.sed"                 = "*"
+"org.gnu.gzip"                = "*"
+"org.rust-lang.rust"          = ">= 1.98.1"
+"org.pkgconf.pkgconf"         = "*"
+"org.gnu.binutils"            = "*"
+"org.sourceware.debugedit"    = "*"
+"org.python.python3"          = "*"
+"org.llvm.clang"              = ">= 22"
+"dev.peios.libpeios-devel"    = "*"
+"dev.peios.kernel-headers"    = "*"
+
+[build.main.dependencies.apt]
+dash         = "*"
+coreutils    = "*"
+findutils    = "*"
+grep         = "*"
+sed          = "*"
+gzip         = "*"
+cargo        = "*"
+rustc        = "*"
+gcc          = "*"
+pkg-config   = "*"
+libclang-dev = "*"
+binutils     = "*"
+debugedit    = "*"
+python3      = "*"
+
+[test]
+gate = true
+needs = ["main"]
+command = '''
+set -eu
+export CARGO_HOME="$PEKIT_OUT/cargo-home"
+mkdir -p "$CARGO_HOME"
+cp "$PEKIT_VENDOR_OUT/cargo-config.toml" "$CARGO_HOME/config.toml"
+unset PEIOS_LIB_DIR PEIOS_INCLUDE PKM_UAPI
+pkg-config --exists peios || {
+  echo "authd: libpeios-devel (peios.pc) is required" >&2
+  exit 1
+}
+export BINDGEN_EXTRA_CLANG_ARGS="-isystem $(gcc -print-file-name=include) ${BINDGEN_EXTRA_CLANG_ARGS:-}"
+cargo test --release --workspace --locked --offline --target-dir "$PEKIT_OUT/target"
+
+# Validate the exact staged package output produced by build.main.
+SRC=$(pwd -P)
+PEKIT_OUT="$PEKIT_MAIN_OUT"
 # Fail closed on distribution hardening, split-debug, and path-leak policy.
 for record in \
   "authd:$PEKIT_OUT/usr/sbin/authd:exe" \
@@ -216,32 +282,64 @@ assert len(files) == 6, files
 for path in files:
     value = json.loads(path.read_text())
     assert isinstance(value.get("keys"), list) and value["keys"], path
+
+# These are security boundaries, not documentation: prove the shipped seeds
+# retain exactly the authority each process needs and no SYSTEM defaults.
+expected = {
+    "authd-service.reg": [
+        "SeChangeNotifyPrivilege", "SeCreateTokenPrivilege", "SeTcbPrivilege"
+    ],
+    "lpsd-service.reg": ["SeChangeNotifyPrivilege"],
+    "login-console.reg": [
+        "SeChangeNotifyPrivilege", "SeAssignPrimaryTokenPrivilege"
+    ],
+    "lpsd-first-account.reg": ["SeChangeNotifyPrivilege"],
+}
+for filename, privileges in expected.items():
+    value = json.loads((root / filename).read_text())
+    services = [key for key in value["keys"] if "\\Services\\" in key["path"]]
+    assert len(services) == 1, (filename, services)
+    values = {entry["name"]: entry for entry in services[0].get("values", [])}
+    required = values["RequiredPrivileges"]
+    assert required["type"] == "multi", (filename, required)
+    assert required["data"] == privileges, (filename, required["data"])
 PY
 /usr/bin/sh -n "$PEKIT_OUT/usr/libexec/lpsd/first-account"
+for manual in \
+  "$PEKIT_OUT/usr/share/man/man1/lps.1.gz" \
+  "$PEKIT_OUT/usr/share/man/man1/login.1.gz" \
+  "$PEKIT_OUT/usr/share/man/man8/authd.8.gz" \
+  "$PEKIT_OUT/usr/share/man/man8/lpsd.8.gz"
+do
+  gzip -t "$manual"
+  gzip -cd "$manual" | grep '^\.TH ' >/dev/null
+done
 rm -f "$PEKIT_OUT/lps-help" "$PEKIT_OUT/login-out" "$PEKIT_OUT/login-err"
 '''
 
-[build.main.dependencies.peipkg]
-"org.git.kernel.dash"      = "*"
-"dev.peios.peiosutils"                  = "*"
-"org.gnu.findutils"        = "*"
-"org.gnu.grep"             = "*"
-"org.gnu.sed"              = "*"
-"org.rust-lang.rust"       = ">= 1.98.1"
-"org.pkgconf.pkgconf"      = "*"
-"org.gnu.binutils"         = "*"
-"org.sourceware.debugedit" = "*"
-"org.python.python3"       = "*"
-"org.llvm.clang"           = ">= 22"
-"dev.peios.libpeios-devel"              = "*"
-"dev.peios.kernel-headers"              = "*"
+[test.dependencies.peipkg]
+"org.git.kernel.dash"         = "*"
+"dev.peios.peiosutils"        = "*"
+"org.gnu.findutils"           = "*"
+"org.gnu.grep"                = "*"
+"org.gnu.sed"                 = "*"
+"org.gnu.gzip"                = "*"
+"org.rust-lang.rust"          = ">= 1.98.1"
+"org.pkgconf.pkgconf"         = "*"
+"org.gnu.binutils"            = "*"
+"org.sourceware.debugedit"    = "*"
+"org.python.python3"          = "*"
+"org.llvm.clang"              = ">= 22"
+"dev.peios.libpeios-devel"    = "*"
+"dev.peios.kernel-headers"    = "*"
 
-[build.main.dependencies.apt]
+[test.dependencies.apt]
 dash         = "*"
 coreutils    = "*"
 findutils    = "*"
 grep         = "*"
 sed          = "*"
+gzip         = "*"
 cargo        = "*"
 rustc        = "*"
 gcc          = "*"
@@ -250,40 +348,3 @@ libclang-dev = "*"
 binutils     = "*"
 debugedit    = "*"
 python3      = "*"
-
-[test]
-needs = ["vendor"]
-command = '''
-set -eu
-export CARGO_HOME="$PEKIT_OUT/cargo-home"
-mkdir -p "$CARGO_HOME"
-cp "$PEKIT_VENDOR_OUT/cargo-config.toml" "$CARGO_HOME/config.toml"
-unset PEIOS_LIB_DIR PEIOS_INCLUDE PKM_UAPI
-pkg-config --exists peios || {
-  echo "authd: libpeios-devel (peios.pc) is required" >&2
-  exit 1
-}
-export BINDGEN_EXTRA_CLANG_ARGS="-isystem $(gcc -print-file-name=include) ${BINDGEN_EXTRA_CLANG_ARGS:-}"
-cargo test --workspace --locked --offline
-'''
-
-[test.dependencies.peipkg]
-"org.git.kernel.dash" = "*"
-"dev.peios.peiosutils"             = "*"
-"org.rust-lang.rust"  = ">= 1.98.1"
-"org.pkgconf.pkgconf" = "*"
-"org.llvm.clang"      = ">= 22"
-"dev.peios.libpeios-devel"         = "*"
-"dev.peios.kernel-headers"         = "*"
-
-[test.dependencies.apt]
-dash         = "*"
-coreutils    = "*"
-cargo        = "*"
-rustc        = "*"
-gcc          = "*"
-pkg-config   = "*"
-libclang-dev = "*"
-
-[clean]
-command = "cargo clean"

@@ -1,6 +1,6 @@
 [package]
 name = "libtty"
-version = "0.0.14"
+version = "0.0.15"
 edition = "2024"
 license = "MIT"
 description = "Terminal input for Peios' authentication tools, including reading a secret without echoing it."

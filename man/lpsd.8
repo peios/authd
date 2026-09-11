@@ -1,0 +1,39 @@
+.TH LPSD 8 "September 2026" "authd" "System Administration"
+.SH NAME
+lpsd \- Peios local principal source daemon
+.SH SYNOPSIS
+.B /usr/sbin/lpsd
+.SH DESCRIPTION
+.B lpsd
+owns the local principal database, verifies local credentials, and registers
+with the Peios authentication authority as a Principal Source Interface
+provider.  It cannot mint or install tokens.
+.PP
+The daemon also serves the local administration protocol used by
+.BR lps (1)
+on
+.IR /run/lpsd/admin.sock .
+It reports ready only after its source registration has been acknowledged by
+.BR authd (8).
+.PP
+The service is normally started by peinit from the registry definition shipped
+in
+.IR /usr/share/regim/lpsd-service.reg .
+It takes no command-line options.
+.SH FILES
+.TP
+.I /var/state/lpsd
+Persistent local-principal state.
+.TP
+.I /run/lpsd/admin.sock
+Local administration socket.
+.TP
+.I /run/psi.sock
+Authentication-authority source socket.
+.TP
+.I /usr/share/regim/lpsd-authd-registration.reg
+Seed which registers lpsd with the authority.
+.SH SEE ALSO
+.BR authd (8),
+.BR lps (1),
+.BR login (1)
