@@ -1,7 +1,8 @@
 # Stateless administration client for the local principal source.
 [package]
-name        = "dev.peios.authd-lps"
-description = "Peios local principal store administration tool"
+name         = "dev.peios.authd-lps"
+side_effects = ["man-db"]
+description  = "Peios local principal store administration tool"
 
 
 

@@ -1,8 +1,9 @@
 # The PGSS Logon authority. It can mint identity and deliberately contains no
 # credential verifier or session launcher.
 [package]
-name        = "dev.peios.authd"
-description = "Peios authentication authority - the PGSS Logon authority"
+name         = "dev.peios.authd"
+side_effects = ["man-db"]
+description  = "Peios authentication authority - the PGSS Logon authority"
 
 
 
