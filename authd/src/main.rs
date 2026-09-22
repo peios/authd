@@ -59,6 +59,7 @@
 //! more than one configured source sends every logon to the first (PEI-304).
 
 mod attest;
+mod change;
 mod conversation;
 mod derive;
 mod domain;
@@ -217,14 +218,23 @@ fn main() -> ExitCode {
 /// which is what `unix_stream_connect` checks, plus `READ_ATTRIBUTES` and
 /// `SYNCHRONIZE` so that stat and open behave.
 ///
-/// **`/run/logon.sock`** admits the originators: SYSTEM, which is what the
-/// compiled-in `login` runs as, and Administrators. Which principals may
-/// originate logons is genuinely site policy — §2.4's rationale is a
-/// graphical greeter, a web console, a remote access daemon — so this one
-/// alone is overridable, by `LogonSocketDescriptor` on the policy key. The
-/// descriptor is the outer gate; `may_originate`/`may_request` still decide
-/// per peer and per logon type behind it, so widening the socket without
-/// granting the peer a `LogonTypes` record changes nothing.
+/// **`/run/logon.sock`** admits SYSTEM, which is what the compiled-in `login`
+/// runs as, and Administrators, with full access — and every authenticated
+/// principal with exactly what a connect needs, the same mask ident.sock
+/// grants, so that each can change its own credential (PGSS §2.20).
+///
+/// That last grant is not a grant to originate logons. The descriptor no
+/// longer tells an originator from anybody else, and was never what decided
+/// it: `may_originate`/`may_request` decide per peer and per logon type behind
+/// it, from the peer's token and its `LogonTypes` record, and a peer with no
+/// record originates nothing however it reached the socket. Anonymous is not an
+/// authenticated principal and is not admitted: it has no credential to change.
+///
+/// Which principals may reach the socket is still site policy — §2.4's
+/// rationale is a graphical greeter, a web console, a remote access daemon — so
+/// this one alone is overridable, by `LogonSocketDescriptor` on the policy key.
+/// A site that writes one without the Authenticated Users entry has turned off
+/// self-service credential change for everyone it leaves out.
 ///
 /// **`/run/psi.sock`** is authd's own protocol, so the requirement is ours
 /// to state: SYSTEM and Administrators, constant. Every source is a SYSTEM
@@ -237,7 +247,7 @@ fn main() -> ExitCode {
 /// nor narrow them later.
 fn protect_the_sockets() {
     const IDENT_SDDL: &str = "O:SYG:SYD:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;0x100082;;;WD)";
-    const LOGON_SDDL: &str = "O:SYG:SYD:P(A;;GA;;;SY)(A;;GA;;;BA)";
+    const LOGON_SDDL: &str = "O:SYG:SYD:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;0x100082;;;AU)";
     const PSI_SDDL: &str = "O:SYG:SYD:P(A;;GA;;;SY)(A;;GA;;;BA)";
 
     stamp(
@@ -252,7 +262,8 @@ fn protect_the_sockets() {
     stamp(
         LOGON_SOCKET_PATH,
         logon_sddl,
-        "only SYSTEM and Administrators will reach the logon socket",
+        "only SYSTEM and Administrators will reach the logon socket, and nobody else \
+         will be able to change their own password",
     );
 
     stamp(

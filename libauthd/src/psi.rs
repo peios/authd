@@ -68,7 +68,17 @@
 //!     |<--------- CredentialRequest -----------|   (repeatable)
 //!     |--------- CredentialResponse ---------->|
 //!     |<------ Assertion | Refusal ------------|
+//!     |
+//!     |---------- ChangeCredential ----------->|   conversation M
+//!     |<--------- CredentialRequest -----------|   (the same rounds)
+//!     |--------- CredentialResponse ---------->|
+//!     |<--- CredentialChanged | Refusal -------|
 //! ```
+//!
+//! A change is a conversation of its own kind rather than an `Authenticate`
+//! that ends differently. It asserts nobody and so has nothing authd could
+//! mint from, and keeping the two apart by message type is what keeps the path
+//! that mints unreachable from the one that must not.
 
 use crate::claim::Claim;
 use crate::frame::{self, Framing, Writer};
@@ -78,8 +88,8 @@ use crate::frame::{self, Framing, Writer};
 use crate::ident::{Fields, Kind, Outcome, Value, Withheld};
 use crate::secret::Secret;
 use crate::wire::{
-    CredentialRequest, CredentialResponse, Denial, LogonStart, LogonTypes, Profile,
-    MAX_REASON_BYTES, WireError,
+    CredentialChangeStart, CredentialRequest, CredentialResponse, Denial, LogonStart, LogonTypes,
+    Profile, MAX_REASON_BYTES, WireError,
 };
 
 /// Four literal bytes opening every message: **P**eios **P**rincipal **S**ource
@@ -116,6 +126,7 @@ pub const MSG_CREDENTIAL_RESPONSE: u16 = 0x0003;
 pub const MSG_ABANDON: u16 = 0x0004;
 pub const MSG_QUERY: u16 = 0x0005;
 pub const MSG_ENUMERATE_SOURCE: u16 = 0x0006;
+pub const MSG_CHANGE_CREDENTIAL: u16 = 0x0007;
 // source -> authd. The high bit marks a message sent by the authority, as in
 // PGSS Logon — here the source is the authority for its own principals.
 pub const MSG_REGISTER: u16 = 0x8001;
@@ -125,6 +136,7 @@ pub const MSG_REFUSAL: u16 = 0x8004;
 pub const MSG_QUERY_RESULT: u16 = 0x8005;
 pub const MSG_ENUMERATE_RESULT: u16 = 0x8006;
 pub const MSG_CHANGED: u16 = 0x8007;
+pub const MSG_CREDENTIAL_CHANGED: u16 = 0x8008;
 
 /// Bounded so a source name is usable as a KACS session auth-package name.
 pub const MAX_SOURCE_NAME_BYTES: usize = 32;
@@ -173,6 +185,8 @@ impl Capabilities {
     pub const MEMBERS: Capabilities = Capabilities(1 << 2);
     /// Sends [`Changed`].
     pub const PUSHES_CHANGES: Capabilities = Capabilities(1 << 3);
+    /// Answers [`ChangeCredential`].
+    pub const CHANGES_CREDENTIALS: Capabilities = Capabilities(1 << 4);
 
     pub const fn empty() -> Capabilities {
         Capabilities(0)
@@ -358,6 +372,30 @@ pub struct Assertion {
 pub struct Refusal {
     pub denial: Denial,
     pub reason: String,
+}
+
+/// authd asking a source to change a principal's own credential. Opens a
+/// conversation. PSPU §2.21.
+///
+/// PGSS Logon's [`CredentialChangeStart`] nested whole, as [`Authenticate`]
+/// nests `LogonStart`, plus the one thing only authd knows.
+///
+/// The interrogation that follows is the ordinary one — [`CredentialRequest`]
+/// and [`CredentialResponse`], relayed — and it ends in
+/// [`MSG_CREDENTIAL_CHANGED`] or a [`Refusal`]. Never in an [`Assertion`]: a
+/// change establishes nothing authd could mint from.
+#[derive(Debug)]
+pub struct ChangeCredential {
+    pub start: CredentialChangeStart,
+    /// The principal whose credential changes, as binary SID bytes: the user
+    /// of the **verified** peer's token, taken from the client's socket and
+    /// never from a message body.
+    ///
+    /// It is both who is asking and who is being changed. PGSS Logon gives a
+    /// client no way to name anyone else, so a source asked to change any
+    /// principal but this one is being asked something the protocol cannot
+    /// express, and must not do it.
+    pub principal: Vec<u8>,
 }
 
 // ---------------------------------------------------------------------------
@@ -822,6 +860,49 @@ pub fn decode_refusal(buf: &[u8]) -> Result<Refusal, WireError> {
 /// Not politeness: without it a source accumulates conversation state for
 /// logons that will never terminate, which is a slow resource leak reachable by
 /// anyone who can open the logon socket and walk away.
+pub fn encode_change_credential(
+    conversation: u64,
+    change: &ChangeCredential,
+) -> Result<Vec<u8>, WireError> {
+    let mut w = begin(MSG_CHANGE_CREDENTIAL, conversation);
+    let body = w.open();
+
+    // Nested for the reason `Authenticate` nests its `LogonStart`: the start is
+    // PGSS Logon's and grows on PGSS Logon's schedule, and a field appended
+    // there must not displace `principal`.
+    let nested = w.open();
+    crate::wire::write_credential_change_start_body(&mut w, &change.start)?;
+    w.close(nested);
+
+    w.bytes(&change.principal, MAX_SID_BYTES)?;
+    w.close(body);
+    w.finish()
+}
+
+pub fn decode_change_credential(buf: &[u8]) -> Result<ChangeCredential, WireError> {
+    let mut b = open_body(buf, MSG_CHANGE_CREDENTIAL)?;
+    let start = crate::wire::read_credential_change_start_body(&mut b.open()?)?;
+    Ok(ChangeCredential {
+        start,
+        principal: b.bytes(MAX_SID_BYTES)?.to_vec(),
+    })
+}
+
+/// The source's success terminal for a [`ChangeCredential`]: the new credential
+/// is the one it will verify from now on. No fields.
+pub fn encode_credential_changed(conversation: u64) -> Result<Vec<u8>, WireError> {
+    let mut w = begin(MSG_CREDENTIAL_CHANGED, conversation);
+    let body = w.open();
+    w.close(body);
+    w.finish()
+}
+
+/// Anything in the body is a field appended by a newer source, and skipped.
+pub fn decode_credential_changed(buf: &[u8]) -> Result<(), WireError> {
+    open_body(buf, MSG_CREDENTIAL_CHANGED)?;
+    Ok(())
+}
+
 pub fn encode_abandon(conversation: u64) -> Result<Vec<u8>, WireError> {
     let mut w = begin(MSG_ABANDON, conversation);
     let body = w.open();
@@ -1179,6 +1260,87 @@ mod tests {
         let decoded = decode_authenticate(&bytes).expect("older decoder must cope");
         assert_eq!(decoded.start.identifier, b"jack");
         assert_eq!(decoded.originator, originator);
+    }
+
+    fn change() -> ChangeCredential {
+        ChangeCredential {
+            start: CredentialChangeStart {
+                supported_credential_types: vec![CredentialType::Password],
+            },
+            principal: vec![1, 5, 0, 0, 0, 0, 0, 5, 21, 0, 0, 0, 1, 0, 0, 0],
+        }
+    }
+
+    #[test]
+    fn change_credential_carries_the_start_and_the_principal() {
+        let bytes = encode_change_credential(9, &change()).unwrap();
+        let envelope = decode_envelope(&bytes).unwrap();
+        assert_eq!(envelope.msg_type, MSG_CHANGE_CREDENTIAL);
+        assert_eq!(envelope.conversation, 9);
+
+        let decoded = decode_change_credential(&bytes).unwrap();
+        assert_eq!(
+            decoded.start.supported_credential_types,
+            vec![CredentialType::Password]
+        );
+        assert_eq!(decoded.principal, change().principal);
+    }
+
+    /// The same property the nesting buys `Authenticate`: PGSS Logon appending a
+    /// field to its start must not displace `principal`.
+    #[test]
+    fn a_field_appended_to_the_change_start_does_not_displace_the_principal() {
+        let mut bytes = encode_change_credential(1, &change()).unwrap();
+
+        let nested_len_at = HEADER_BYTES + 4;
+        let nested_len =
+            u32::from_le_bytes(bytes[nested_len_at..nested_len_at + 4].try_into().unwrap())
+                as usize;
+        let insert_at = nested_len_at + 4 + nested_len;
+        for (i, byte) in [0xde, 0xad, 0xbe, 0xef].into_iter().enumerate() {
+            bytes.insert(insert_at + i, byte);
+        }
+        let bump = |buf: &mut Vec<u8>, at: usize| {
+            let old = u32::from_le_bytes(buf[at..at + 4].try_into().unwrap());
+            buf[at..at + 4].copy_from_slice(&(old + 4).to_le_bytes());
+        };
+        bump(&mut bytes, nested_len_at);
+        bump(&mut bytes, HEADER_BYTES);
+        let total = bytes.len() as u32;
+        bytes[8..12].copy_from_slice(&total.to_le_bytes());
+
+        let decoded = decode_change_credential(&bytes).expect("older decoder must cope");
+        assert_eq!(decoded.principal, change().principal);
+    }
+
+    /// A change must not decode as an authentication, nor its success as an
+    /// assertion: the conversation that mints and the one that must not are
+    /// told apart by message type alone.
+    #[test]
+    fn a_change_is_neither_an_authenticate_nor_an_assertion() {
+        let bytes = encode_change_credential(3, &change()).unwrap();
+        assert!(decode_authenticate(&bytes).is_err());
+
+        let changed = encode_credential_changed(3).unwrap();
+        assert_eq!(
+            decode_envelope(&changed).unwrap().msg_type,
+            MSG_CREDENTIAL_CHANGED
+        );
+        assert!(decode_credential_changed(&changed).is_ok());
+        assert!(decode_assertion(&changed).is_err());
+    }
+
+    #[test]
+    fn the_change_capability_is_its_own_bit() {
+        let every_other = Capabilities::QUERIES
+            | Capabilities::ENUMERATES
+            | Capabilities::MEMBERS
+            | Capabilities::PUSHES_CHANGES;
+        assert!(!every_other.contains(Capabilities::CHANGES_CREDENTIALS));
+        assert!(
+            (every_other | Capabilities::CHANGES_CREDENTIALS)
+                .contains(Capabilities::CHANGES_CREDENTIALS)
+        );
     }
 
     #[test]
@@ -1544,6 +1706,8 @@ mod tests {
             )
             .unwrap(),
             encode_abandon(1).unwrap(),
+            encode_change_credential(1, &change()).unwrap(),
+            encode_credential_changed(1).unwrap(),
         ];
         for message in &messages {
             for cut in 0..message.len() {
@@ -1557,6 +1721,8 @@ mod tests {
                 let _ = decode_assertion(prefix);
                 let _ = decode_refusal(prefix);
                 let _ = decode_abandon(prefix);
+                let _ = decode_change_credential(prefix);
+                let _ = decode_credential_changed(prefix);
             }
         }
     }

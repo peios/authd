@@ -78,6 +78,14 @@ pub const MSG_ACCESS_DENIED: u16 = 0x8003;
 // rather than tidy.
 pub const MSG_SERVICE_ATTEST: u16 = 0x0020;
 
+// Changing the caller's own credential. PGSS Logon §2.20. The start opens a
+// conversation that carries the same `MSG_CREDENTIAL_REQUEST` /
+// `MSG_CREDENTIAL_RESPONSE` rounds a logon does, and ends in
+// `MSG_CREDENTIAL_CHANGED` or `MSG_ACCESS_DENIED` — never in
+// `MSG_ACCESS_GRANTED`, because a change mints nothing.
+pub const MSG_CREDENTIAL_CHANGE_START: u16 = 0x0030;
+pub const MSG_CREDENTIAL_CHANGED: u16 = 0x8030;
+
 pub const MAX_IDENTIFIER_BYTES: usize = 1024;
 pub const MAX_CREDENTIAL_BYTES: usize = 32 * 1024;
 pub const MAX_PROMPTS: usize = 16;
@@ -494,6 +502,45 @@ pub struct ServiceAttest {
     pub service: String,
 }
 
+/// Opens a conversation that changes the caller's own credential. Client to
+/// authority. PGSS Logon §2.20.
+///
+/// # No field names the principal
+///
+/// The principal whose credential changes is the one the connected peer's token
+/// names, and the authority establishes it from the socket. A field naming
+/// somebody would let anything able to reach the socket ask to change anybody's
+/// credential, with only knowledge of that credential in the way — a guessing
+/// surface over every account on the machine, open to every principal the
+/// socket admits.
+///
+/// # Why this is not a `LogonStart`
+///
+/// A logon ends in a token and a session; a change ends in neither. Opening
+/// both with one message would put the path that mints on the same dispatch as
+/// the path that must not, separated only by a field — and it would make every
+/// peer permitted to change its own password look, at the first message, like
+/// a peer asking to originate a logon.
+#[derive(Debug)]
+pub struct CredentialChangeStart {
+    /// Every [`CredentialType`] this client can render.
+    ///
+    /// The capability rule is [`LogonStart::supported_credential_types`]'s,
+    /// unchanged: an authority must not prompt for a type absent from it, and a
+    /// value this build does not recognise is dropped rather than refused.
+    /// Unlike that field it is not optional — the message is newer than the
+    /// field, so there is no older client whose silence needs a default.
+    pub supported_credential_types: Vec<CredentialType>,
+}
+
+/// The credential was changed. Authority to client. PGSS Logon §2.20.
+///
+/// The successful terminal of a change conversation, and deliberately empty.
+/// No token and no session accompany it: the caller already holds a session,
+/// and the change created nothing it could be handed.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct CredentialChanged;
+
 // ---------------------------------------------------------------------------
 // Bodies
 //
@@ -530,11 +577,7 @@ pub(crate) fn read_logon_start_body(b: &mut Reader<'_>) -> Result<LogonStart, Wi
     let supported_credential_types = if b.at_end() {
         vec![CredentialType::Password]
     } else {
-        b.bytes(MAX_SUPPORTED_CREDENTIAL_TYPES)?
-            .iter()
-            // Unrecognised values are dropped, not rejected: see the field docs.
-            .filter_map(|value| CredentialType::from_u8(*value))
-            .collect()
+        read_supported_credential_types(b)?
     };
 
     Ok(LogonStart {
@@ -556,12 +599,43 @@ pub(crate) fn write_logon_start_body(w: &mut Writer, start: &LogonStart) -> Resu
         start.remote_host.as_deref().unwrap_or(""),
         MAX_REMOTE_HOST_BYTES,
     )?;
-    let supported: Vec<u8> = start
-        .supported_credential_types
+    write_supported_credential_types(w, &start.supported_credential_types)
+}
+
+/// A capability list, dropping any value this build does not recognise.
+///
+/// Dropped rather than refused because the list is a statement about the
+/// client, not an instruction to it: an authority that ignores a type it has
+/// never heard of merely declines to use it. See
+/// [`LogonStart::supported_credential_types`].
+fn read_supported_credential_types(b: &mut Reader<'_>) -> Result<Vec<CredentialType>, WireError> {
+    Ok(b.bytes(MAX_SUPPORTED_CREDENTIAL_TYPES)?
         .iter()
-        .map(|t| *t as u8)
-        .collect();
+        .filter_map(|value| CredentialType::from_u8(*value))
+        .collect())
+}
+
+fn write_supported_credential_types(
+    w: &mut Writer,
+    types: &[CredentialType],
+) -> Result<(), WireError> {
+    let supported: Vec<u8> = types.iter().map(|t| *t as u8).collect();
     w.bytes(&supported, MAX_SUPPORTED_CREDENTIAL_TYPES)
+}
+
+pub(crate) fn read_credential_change_start_body(
+    b: &mut Reader<'_>,
+) -> Result<CredentialChangeStart, WireError> {
+    Ok(CredentialChangeStart {
+        supported_credential_types: read_supported_credential_types(b)?,
+    })
+}
+
+pub(crate) fn write_credential_change_start_body(
+    w: &mut Writer,
+    start: &CredentialChangeStart,
+) -> Result<(), WireError> {
+    write_supported_credential_types(w, &start.supported_credential_types)
 }
 
 pub(crate) fn read_credential_request_body(
@@ -755,6 +829,36 @@ pub fn encode_service_attest(attest: &ServiceAttest) -> Result<Vec<u8>, WireErro
     w.finish()
 }
 
+pub fn decode_credential_change_start(buf: &[u8]) -> Result<CredentialChangeStart, WireError> {
+    read_credential_change_start_body(&mut frame::open_body(
+        &FRAMING,
+        buf,
+        MSG_CREDENTIAL_CHANGE_START,
+    )?)
+}
+
+pub fn encode_credential_change_start(start: &CredentialChangeStart) -> Result<Vec<u8>, WireError> {
+    let mut w = Writer::new(&FRAMING, MSG_CREDENTIAL_CHANGE_START);
+    let body = w.open();
+    write_credential_change_start_body(&mut w, start)?;
+    w.close(body);
+    w.finish()
+}
+
+/// Decode a [`CredentialChanged`]. Anything in its body is a field appended by
+/// a newer authority, and skipped.
+pub fn decode_credential_changed(buf: &[u8]) -> Result<CredentialChanged, WireError> {
+    frame::open_body(&FRAMING, buf, MSG_CREDENTIAL_CHANGED)?;
+    Ok(CredentialChanged)
+}
+
+pub fn encode_credential_changed(_: &CredentialChanged) -> Result<Vec<u8>, WireError> {
+    let mut w = Writer::new(&FRAMING, MSG_CREDENTIAL_CHANGED);
+    let body = w.open();
+    w.close(body);
+    w.finish()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -880,6 +984,95 @@ mod tests {
             encode_service_attest(&attest),
             Err(WireError::TooLong)
         ));
+    }
+
+    #[test]
+    fn credential_change_start_round_trips() {
+        let start = CredentialChangeStart {
+            supported_credential_types: vec![CredentialType::Password],
+        };
+        let decoded =
+            decode_credential_change_start(&encode_credential_change_start(&start).unwrap())
+                .unwrap();
+        assert_eq!(
+            decoded.supported_credential_types,
+            vec![CredentialType::Password]
+        );
+    }
+
+    /// The capability list is mandatory here. The message is newer than the
+    /// field, so there is no older client whose silence a default would be
+    /// honouring — and reading silence as `Password` would let a truncated
+    /// message prompt a client that never said it could render one.
+    #[test]
+    fn a_credential_change_start_without_its_capability_list_is_malformed() {
+        let mut w = Writer::new(&FRAMING, MSG_CREDENTIAL_CHANGE_START);
+        let body = w.open();
+        w.close(body);
+        let bytes = w.finish().unwrap();
+        assert!(decode_credential_change_start(&bytes).is_err());
+    }
+
+    /// The same rule as `LogonStart`'s list: a type this build has never heard
+    /// of is dropped, and the intersection survives.
+    #[test]
+    fn an_unknown_capability_in_a_change_start_is_dropped() {
+        let mut w = Writer::new(&FRAMING, MSG_CREDENTIAL_CHANGE_START);
+        let body = w.open();
+        w.bytes(
+            &[CredentialType::Password as u8, 99],
+            MAX_SUPPORTED_CREDENTIAL_TYPES,
+        )
+        .unwrap();
+        w.close(body);
+        let bytes = w.finish().unwrap();
+        assert_eq!(
+            decode_credential_change_start(&bytes)
+                .unwrap()
+                .supported_credential_types,
+            vec![CredentialType::Password]
+        );
+    }
+
+    /// A change start must not decode as a logon start or the reverse: the path
+    /// that mints and the path that must not are told apart by message type,
+    /// and a decoder accepting either for either would erase that.
+    #[test]
+    fn a_change_start_and_a_logon_start_do_not_decode_as_each_other() {
+        let change = encode_credential_change_start(&CredentialChangeStart {
+            supported_credential_types: vec![CredentialType::Password],
+        })
+        .unwrap();
+        let logon = encode_logon_start(&start()).unwrap();
+        assert!(decode_logon_start(&change).is_err());
+        assert!(decode_credential_change_start(&logon).is_err());
+    }
+
+    #[test]
+    fn credential_changed_round_trips() {
+        let bytes = encode_credential_changed(&CredentialChanged).unwrap();
+        assert_eq!(
+            decode_credential_changed(&bytes).unwrap(),
+            CredentialChanged
+        );
+        assert!(
+            decode_access_granted(&bytes).is_err(),
+            "a change's terminal must never read as a grant"
+        );
+    }
+
+    /// Empty today, so anything a newer authority appends must be stepped over.
+    #[test]
+    fn a_field_appended_to_credential_changed_is_skipped() {
+        let mut w = Writer::new(&FRAMING, MSG_CREDENTIAL_CHANGED);
+        let body = w.open();
+        w.u32(0xdead_beef);
+        w.close(body);
+        let bytes = w.finish().unwrap();
+        assert_eq!(
+            decode_credential_changed(&bytes).unwrap(),
+            CredentialChanged
+        );
     }
 
     #[test]
@@ -1221,6 +1414,11 @@ mod tests {
                 reason: "x".into(),
             })
             .unwrap(),
+            encode_credential_change_start(&CredentialChangeStart {
+                supported_credential_types: vec![CredentialType::Password],
+            })
+            .unwrap(),
+            encode_credential_changed(&CredentialChanged).unwrap(),
         ];
         for message in &messages {
             for cut in 0..message.len() {
@@ -1230,6 +1428,8 @@ mod tests {
                 let _ = decode_credential_response(prefix);
                 let _ = decode_access_granted(prefix);
                 let _ = decode_access_denied(prefix);
+                let _ = decode_credential_change_start(prefix);
+                let _ = decode_credential_changed(prefix);
             }
         }
     }

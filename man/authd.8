@@ -10,6 +10,9 @@ is the Peios authentication authority.  It accepts logon requests on
 coordinates credential verification with registered principal sources on
 .IR /run/psi.sock ,
 and returns a KACS primary token and profile for an authenticated principal.
+The same socket also lets any authenticated principal change its own
+credential, relayed to the principal source that holds it; see
+.BR passwd (1).
 Identity queries are served separately on
 .IR /run/ident.sock .
 .PP
@@ -33,7 +36,9 @@ policy is read from
 .SH FILES
 .TP
 .I /run/logon.sock
-PGSS Logon client socket.
+PGSS Logon client socket.  SYSTEM and Administrators may connect, and so may
+every authenticated principal, to change its own credential.  Reaching it
+does not permit originating a logon; that is decided per peer.
 .TP
 .I /run/psi.sock
 Principal Source Interface registration socket.
@@ -46,4 +51,5 @@ Default machine authentication-policy seed.
 .SH SEE ALSO
 .BR login (1),
 .BR lps (1),
+.BR passwd (1),
 .BR lpsd (8)
