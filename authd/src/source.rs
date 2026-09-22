@@ -45,7 +45,7 @@ use std::time::Duration;
 
 use libauthd::psi;
 use libauthd::transport::send_message;
-use libauthd::wire::{CredentialRequest, CredentialResponse, LogonStart};
+use libauthd::wire::{CredentialChangeStart, CredentialRequest, CredentialResponse, LogonStart};
 use peios::security::{Sid, SidRef};
 
 use crate::log;
@@ -74,6 +74,10 @@ pub enum Inbound {
     Assert(psi::Assertion),
     /// Refused, with a reason to relay.
     Refuse(psi::Refusal),
+    /// The credential a change conversation asked about has been changed. The
+    /// only successful end of a [`Conversation::change_credential`], and never
+    /// of anything else — it carries nobody to mint for.
+    Changed,
     /// Answers to a lookup, one per key, in the order they were asked.
     Results(psi::QueryResult),
     /// One page of an enumeration.
@@ -334,6 +338,28 @@ impl Conversation {
             },
         )
         .map_err(|_| io::Error::other("could not encode an authenticate"))?;
+        self.source.send(&message)
+    }
+
+    /// Ask the source to change a principal's own credential. PSPU §2.21.
+    ///
+    /// `principal` is the verified peer's user SID. It is the only principal
+    /// the source may change, and it did not come from any message.
+    pub fn change_credential(
+        &self,
+        start: &CredentialChangeStart,
+        principal: &[u8],
+    ) -> io::Result<()> {
+        let message = psi::encode_change_credential(
+            self.id,
+            &psi::ChangeCredential {
+                start: CredentialChangeStart {
+                    supported_credential_types: start.supported_credential_types.clone(),
+                },
+                principal: principal.to_vec(),
+            },
+        )
+        .map_err(|_| io::Error::other("could not encode a credential change"))?;
         self.source.send(&message)
     }
 
@@ -1148,6 +1174,9 @@ fn decode(source: &Arc<Source>, envelope: &psi::Envelope, buf: &[u8]) -> Option<
         psi::MSG_REFUSAL => psi::decode_refusal(buf).map(Inbound::Refuse),
         psi::MSG_QUERY_RESULT => psi::decode_query_result(buf).map(Inbound::Results),
         psi::MSG_ENUMERATE_RESULT => psi::decode_enumerate_result(buf).map(Inbound::Page),
+        psi::MSG_CREDENTIAL_CHANGED => {
+            psi::decode_credential_changed(buf).map(|()| Inbound::Changed)
+        }
         other => {
             log::warn(format_args!(
                 "psi: {}: unexpected message type {other:#06x}",

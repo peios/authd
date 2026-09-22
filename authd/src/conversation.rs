@@ -33,19 +33,31 @@
 //! So the client proposes and the authority constrains, against a peer identity
 //! taken from the connected socket and never from the message body. That
 //! identity is then forwarded to the source, which cannot learn it for itself.
+//!
+//! # Not every connection here is an originator
+//!
+//! The socket also admits every authenticated principal, so that each can
+//! change its own credential (PGSS §2.20, served by [`crate::change`]). Reaching
+//! the socket therefore says nothing about whether a peer may originate a
+//! logon: that is [`may_originate`], decided per peer after the opening message,
+//! exactly as it was when the socket admitted originators alone. The same
+//! relay carries both kinds of conversation; [`Purpose`] is what stops either
+//! ending the way only the other may.
 
 use std::io;
 use std::os::fd::AsFd;
 use std::os::unix::net::UnixStream;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use libauthd::transport::{recv_message, send_message, send_message_with_fd};
 use libauthd::wire::{
-    self, AccessDenied, AccessGranted, CredentialRequest, CredentialResponse, Denial, LogonStart,
-    LogonType, MSG_CREDENTIAL_RESPONSE, MSG_LOGON_START, MSG_SERVICE_ATTEST, ServiceAttest,
-    decode_credential_response, decode_header, decode_logon_start, decode_service_attest,
-    encode_access_denied, encode_access_granted, encode_credential_request,
+    self, AccessDenied, AccessGranted, CredentialChangeStart, CredentialRequest,
+    CredentialResponse, CredentialType, Denial, LogonStart, LogonType, MSG_CREDENTIAL_CHANGE_START,
+    MSG_CREDENTIAL_RESPONSE, MSG_LOGON_START, MSG_SERVICE_ATTEST, ServiceAttest,
+    decode_credential_change_start, decode_credential_response, decode_header, decode_logon_start,
+    decode_service_attest, encode_access_denied, encode_access_granted, encode_credential_request,
 };
 use peios::security::{Sid, SidRef};
 
@@ -99,6 +111,79 @@ const CLIENT_WRITE_TIMEOUT: Duration = Duration::from_secs(10);
 /// finite because a wedged source must not wedge every logon behind it.
 const SOURCE_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// How many conversations peers that may **not** originate logons may hold at
+/// once.
+///
+/// The socket admits every authenticated principal so that each can change its
+/// own credential, so anyone signed in can open a connection here and sit at a
+/// prompt. Drawing on the one shared ceiling, enough of them would hold every
+/// slot there is and the console's `login` would find the authority full. So
+/// they draw on this instead, and peers that may originate logons never do: no
+/// number of ordinary principals can take the last slot from one that can.
+///
+/// Well under `MAX_CONCURRENT_CONVERSATIONS`, which still bounds the total —
+/// and held there at compile time, because a budget that reached it would
+/// leave originators nothing.
+const MAX_NON_ORIGINATOR_CONVERSATIONS: usize = 16;
+const _: () = assert!(MAX_NON_ORIGINATOR_CONVERSATIONS < crate::MAX_CONCURRENT_CONVERSATIONS);
+
+static NON_ORIGINATORS: AtomicUsize = AtomicUsize::new(0);
+
+/// One of the [`MAX_NON_ORIGINATOR_CONVERSATIONS`], held for a conversation's
+/// lifetime and returned on drop — so an early return on any path gives it
+/// back.
+struct NonOriginatorSlot;
+
+impl NonOriginatorSlot {
+    fn take() -> Option<Self> {
+        NON_ORIGINATORS
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |held| {
+                (held < MAX_NON_ORIGINATOR_CONVERSATIONS).then_some(held + 1)
+            })
+            .ok()
+            .map(|_| Self)
+    }
+}
+
+impl Drop for NonOriginatorSlot {
+    fn drop(&mut self) {
+        NON_ORIGINATORS.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// What a relayed conversation is for.
+///
+/// Decides which terminal a source may end it with. The relay is shared, and
+/// this is what keeps a change conversation from ending in an assertion authd
+/// would mint from, and a logon from ending in a change that grants nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Purpose {
+    /// A logon, which ends in an [`Ended::Asserted`] and a token.
+    Logon,
+    /// A change of the caller's own credential (PGSS §2.20), which ends in
+    /// [`Ended::Changed`] and nothing else.
+    Change,
+}
+
+impl Purpose {
+    /// How the principal is told what took too long or failed.
+    fn noun(self) -> &'static str {
+        match self {
+            Self::Logon => "logon",
+            Self::Change => "change",
+        }
+    }
+}
+
+/// How a relayed conversation ended, where it did not end in a denial the relay
+/// has already sent.
+pub(crate) enum Ended {
+    /// The source said who the principal is. Only ever for [`Purpose::Logon`].
+    Asserted(libauthd::psi::Assertion),
+    /// The source changed the credential. Only ever for [`Purpose::Change`].
+    Changed,
+}
+
 /// Serve one connection to completion.
 pub fn serve(registry: Arc<Registry>, stream: UnixStream) {
     if let Err(error) = stream.set_read_timeout(Some(CLIENT_TIMEOUT)) {
@@ -136,6 +221,28 @@ fn run(registry: &Registry, stream: &UnixStream, deadline: Instant) -> io::Resul
         }
     };
 
+    // Decided before the peer has sent a byte, because it chooses the budget
+    // the connection draws on and a connection holds its slot while it waits.
+    let originator = may_originate(&peer);
+    let _slot = if originator {
+        None
+    } else {
+        match NonOriginatorSlot::take() {
+            Some(slot) => Some(slot),
+            None => {
+                log::warn(format_args!(
+                    "refused {peer}: {MAX_NON_ORIGINATOR_CONVERSATIONS} conversations from \
+                     non-originators already in flight"
+                ));
+                return deny(
+                    stream,
+                    Denial::AuthorityUnavailable,
+                    "The authority is busy. Try again shortly.",
+                );
+            }
+        }
+    };
+
     let start = match read_opening(stream) {
         Ok(Opening::Logon(start)) => start,
         // A service attestation is not a conversation: it carries no
@@ -146,10 +253,17 @@ fn run(registry: &Registry, stream: &UnixStream, deadline: Instant) -> io::Resul
         Ok(Opening::Attest(attest)) => {
             return crate::attest::serve(registry, stream, &peer, &attest);
         }
+        // A credential change is a conversation, but not a logon: the peer
+        // asks about itself and nothing is minted, so the originator checks
+        // below are not its gate. Dispatched here for the same reason as an
+        // attestation.
+        Ok(Opening::Change(start)) => {
+            return crate::change::serve(registry, stream, &peer, &start, deadline);
+        }
         Err(denial) => return deny(stream, denial.0, denial.1),
     };
 
-    if !may_originate(&peer) {
+    if !originator {
         log::warn(format_args!(
             "refused logon from {peer}: not a permitted originator"
         ));
@@ -236,16 +350,40 @@ fn run(registry: &Registry, stream: &UnixStream, deadline: Instant) -> io::Resul
         );
     }
 
-    relay(stream, &start, &mut conversation, deadline)
+    match relay(
+        stream,
+        &start.supported_credential_types,
+        &mut conversation,
+        deadline,
+        Purpose::Logon,
+    )? {
+        Some(Ended::Asserted(assertion)) => grant(stream, &start, &conversation, &assertion),
+        // `relay` ends a logon in an assertion or in a denial it has already
+        // sent. Answered anyway rather than trusted, so that a mistake there
+        // costs a denial and never a connection closed with nothing said.
+        Some(Ended::Changed) => deny(
+            stream,
+            Denial::Internal,
+            "The authority could not complete the logon.",
+        ),
+        None => Ok(()),
+    }
 }
 
-/// Carry messages between the client and the source until one of them finishes.
-fn relay(
+/// Carry messages between the client and the source until one of them
+/// finishes.
+///
+/// Returns how the conversation ended, or `None` where it ended in a denial
+/// that has already been sent. `supported` is the client's capability list,
+/// from whichever message opened the conversation.
+pub(crate) fn relay(
     stream: &UnixStream,
-    start: &LogonStart,
+    supported: &[CredentialType],
     conversation: &mut Conversation,
     deadline: Instant,
-) -> io::Result<()> {
+    purpose: Purpose,
+) -> io::Result<Option<Ended>> {
+    let noun = purpose.noun();
     for _ in 0..MAX_ROUNDS {
         // The wall-clock bound, checked once per round. Per-read timeouts
         // cannot see a client that keeps resetting them.
@@ -253,10 +391,10 @@ fn relay(
             log::warn(format_args!(
                 "conversation exceeded {CONVERSATION_DEADLINE:?}"
             ));
-            return deny(
+            return denied(
                 stream,
                 Denial::ConversationLimit,
-                "The logon took too long.",
+                &format!("The {noun} took too long."),
             );
         }
         let inbound = match conversation.recv(SOURCE_TIMEOUT) {
@@ -266,7 +404,7 @@ fn relay(
                     "source {} did not answer in time",
                     conversation.source_name()
                 ));
-                return deny(
+                return denied(
                     stream,
                     Denial::AuthorityUnavailable,
                     "The authority did not respond.",
@@ -274,10 +412,10 @@ fn relay(
             }
             Err(Stalled::SourceGone) => {
                 log::warn(format_args!(
-                    "source {} disconnected mid-logon",
+                    "source {} disconnected mid-{noun}",
                     conversation.source_name()
                 ));
-                return deny(
+                return denied(
                     stream,
                     Denial::AuthorityUnavailable,
                     "The authority became unavailable.",
@@ -287,7 +425,7 @@ fn relay(
 
         match inbound {
             Inbound::Request(request) => {
-                if let Some(offending) = unrenderable_prompt(start, &request) {
+                if let Some(offending) = unrenderable_prompt(supported, &request) {
                     // The source asked for something this client told us it
                     // cannot render. Relaying it would force the client to
                     // hard-fail — and a client that guessed instead might echo
@@ -297,7 +435,7 @@ fn relay(
                          not advertise; refusing to relay",
                         conversation.source_name()
                     ));
-                    return deny(
+                    return denied(
                         stream,
                         Denial::Internal,
                         "The authority asked for something this client cannot provide.",
@@ -308,7 +446,7 @@ fn relay(
                         "source {} repeated credential_ref {repeated}; refusing to relay",
                         conversation.source_name()
                     ));
-                    return deny(
+                    return denied(
                         stream,
                         Denial::Internal,
                         "The authority asked an ambiguous question.",
@@ -322,12 +460,12 @@ fn relay(
                 // which the round-trip discipline exists to forbid. Checked
                 // per prompt rather than once, since round 2's answer can be
                 // pipelined behind round 1's as easily as round 1's behind
-                // LogonStart.
+                // the opening message.
                 if client_already_answered(stream) {
                     log::warn(format_args!(
                         "client answered before being asked; refusing the conversation"
                     ));
-                    return deny(
+                    return denied(
                         stream,
                         Denial::MalformedRequest,
                         "A response arrived before the request for it.",
@@ -337,16 +475,16 @@ fn relay(
                 let answers = match ask_client(stream, &request) {
                     Ok(answers) => answers,
                     Err(ClientFailed::Protocol(denial, reason)) => {
-                        return deny(stream, denial, reason);
+                        return denied(stream, denial, reason);
                     }
                     Err(ClientFailed::Io(error)) if is_read_timeout(&error) => {
                         log::warn(format_args!(
                             "client did not answer within {CLIENT_TIMEOUT:?}"
                         ));
-                        return deny(
+                        return denied(
                             stream,
                             Denial::ConversationLimit,
-                            "The logon took too long to answer.",
+                            &format!("The {noun} took too long to answer."),
                         );
                     }
                     Err(ClientFailed::Io(error)) => return Err(error),
@@ -355,33 +493,66 @@ fn relay(
                 conversation.credential_response(&answers)?;
             }
 
+            // Each terminal is accepted only for the purpose it belongs to. An
+            // assertion on a change would be an identity nobody asked to have
+            // minted, and a change on a logon would be a success with nothing
+            // to grant — both mean the source has confused two of its own
+            // conversations, and nothing else it says on this one is to be
+            // believed.
             Inbound::Assert(assertion) => {
                 conversation.finished();
-                return grant(stream, start, conversation, &assertion);
+                if purpose != Purpose::Logon {
+                    log::error(format_args!(
+                        "source {} answered a {noun} with an assertion",
+                        conversation.source_name()
+                    ));
+                    return denied(
+                        stream,
+                        Denial::Internal,
+                        &format!("The authority could not complete the {noun}."),
+                    );
+                }
+                return Ok(Some(Ended::Asserted(assertion)));
+            }
+
+            Inbound::Changed => {
+                conversation.finished();
+                if purpose != Purpose::Change {
+                    log::error(format_args!(
+                        "source {} answered a {noun} with a credential change",
+                        conversation.source_name()
+                    ));
+                    return denied(
+                        stream,
+                        Denial::Internal,
+                        &format!("The authority could not complete the {noun}."),
+                    );
+                }
+                return Ok(Some(Ended::Changed));
             }
 
             Inbound::Refuse(refusal) => {
                 conversation.finished();
                 log::info(format_args!(
-                    "logon denied by {}: {:?}",
+                    "{noun} denied by {}: {:?}",
                     conversation.source_name(),
                     refusal.denial
                 ));
-                return deny(stream, refusal.denial, &refusal.reason);
+                return denied(stream, refusal.denial, &refusal.reason);
             }
-            // A lookup answer, on a logon conversation. authd allocated this
-            // identifier for a logon and asked no question a query could answer,
-            // so the source has confused two of its own conversations — which
-            // means anything else it says on this one is suspect too.
+            // A lookup answer, on a conversation authd opened for something
+            // else. It asked no question a query could answer, so the source
+            // has confused two of its own conversations — which means anything
+            // else it says on this one is suspect too.
             Inbound::Results(_) | Inbound::Page(_) => {
                 log::error(format_args!(
-                    "source {} answered a logon with a lookup result",
+                    "source {} answered a {noun} with a lookup result",
                     conversation.source_name()
                 ));
-                return deny(
+                return denied(
                     stream,
                     Denial::Internal,
-                    "The authority could not complete the logon.",
+                    &format!("The authority could not complete the {noun}."),
                 );
             }
         }
@@ -391,11 +562,16 @@ fn relay(
         "source {} exceeded {MAX_ROUNDS} rounds",
         conversation.source_name()
     ));
-    deny(
+    denied(
         stream,
         Denial::ConversationLimit,
-        "The logon took too many steps.",
+        &format!("The {noun} took too many steps."),
     )
+}
+
+/// Send a denial and report the conversation as ended by it.
+fn denied(stream: &UnixStream, denial: Denial, reason: &str) -> io::Result<Option<Ended>> {
+    deny(stream, denial, reason).map(|()| None)
 }
 
 /// PSI rules 4 and 5, applied before rule 2.
@@ -481,14 +657,14 @@ fn foreign_membership<'a>(user: &SidRef, groups: &[&'a SidRef]) -> Option<&'a Si
 
 /// The first prompt asking for something the client cannot render, if any.
 fn unrenderable_prompt(
-    start: &LogonStart,
+    supported: &[CredentialType],
     request: &CredentialRequest,
-) -> Option<wire::CredentialType> {
+) -> Option<CredentialType> {
     request
         .prompts
         .iter()
         .map(|prompt| prompt.credential_type)
-        .find(|wanted| !start.supported_credential_types.contains(wanted))
+        .find(|wanted| !supported.contains(wanted))
 }
 
 /// Whether a request repeats a `credential_ref`.
@@ -899,7 +1075,7 @@ fn grant(
     Ok(())
 }
 
-fn deny(stream: &UnixStream, denial: Denial, reason: &str) -> io::Result<()> {
+pub(crate) fn deny(stream: &UnixStream, denial: Denial, reason: &str) -> io::Result<()> {
     let message = encode_access_denied(&AccessDenied {
         denial,
         reason: reason.to_string(),
@@ -914,6 +1090,9 @@ enum Opening {
     Logon(LogonStart),
     /// A service attestation, which will not. See [`crate::attest`].
     Attest(ServiceAttest),
+    /// A change of the caller's own credential, which will exchange
+    /// credentials and mint nothing. See [`crate::change`].
+    Change(CredentialChangeStart),
 }
 
 /// Read and validate the opening message.
@@ -953,9 +1132,12 @@ fn read_opening(stream: &UnixStream) -> Result<Opening, (Denial, &'static str)> 
         MSG_SERVICE_ATTEST => decode_service_attest(received.expose())
             .map(Opening::Attest)
             .map_err(|_| (Denial::MalformedRequest, "Malformed ServiceAttest.")),
+        MSG_CREDENTIAL_CHANGE_START => decode_credential_change_start(received.expose())
+            .map(Opening::Change)
+            .map_err(|_| (Denial::MalformedRequest, "Malformed CredentialChangeStart.")),
         _ => Err((
             Denial::MalformedRequest,
-            "A connection must open with LogonStart or ServiceAttest.",
+            "A connection must open with LogonStart, CredentialChangeStart or ServiceAttest.",
         )),
     }
 }
@@ -1213,7 +1395,13 @@ mod tests {
     #[test]
     fn an_advertised_credential_type_is_relayed() {
         let start = start_supporting(vec![CredentialType::Password]);
-        assert!(unrenderable_prompt(&start, &requesting(&[CredentialType::Password])).is_none());
+        assert!(
+            unrenderable_prompt(
+                &start.supported_credential_types,
+                &requesting(&[CredentialType::Password])
+            )
+            .is_none()
+        );
     }
 
     /// The relay's one refusal to carry: a client that advertised nothing must
@@ -1222,7 +1410,10 @@ mod tests {
     fn an_unadvertised_credential_type_is_caught() {
         let start = start_supporting(Vec::new());
         assert_eq!(
-            unrenderable_prompt(&start, &requesting(&[CredentialType::Password])),
+            unrenderable_prompt(
+                &start.supported_credential_types,
+                &requesting(&[CredentialType::Password])
+            ),
             Some(CredentialType::Password)
         );
     }
@@ -1232,7 +1423,29 @@ mod tests {
         // Messages without prompts are how an authority says something without
         // asking for anything.
         let start = start_supporting(Vec::new());
-        assert!(unrenderable_prompt(&start, &requesting(&[])).is_none());
+        assert!(unrenderable_prompt(&start.supported_credential_types, &requesting(&[])).is_none());
+    }
+
+    /// Slots are returned when their holder goes, on every path, and the budget
+    /// refuses at its ceiling rather than growing past it.
+    #[test]
+    fn the_non_originator_budget_is_bounded_and_returned() {
+        let held: Vec<NonOriginatorSlot> = (0..MAX_NON_ORIGINATOR_CONVERSATIONS)
+            .map_while(|_| NonOriginatorSlot::take())
+            .collect();
+        assert_eq!(held.len(), MAX_NON_ORIGINATOR_CONVERSATIONS);
+        assert!(NonOriginatorSlot::take().is_none(), "the ceiling must hold");
+        drop(held);
+        assert!(
+            NonOriginatorSlot::take().is_some(),
+            "dropped slots must come back"
+        );
+    }
+
+    #[test]
+    fn a_purpose_describes_itself_to_the_principal() {
+        assert_eq!(Purpose::Logon.noun(), "logon");
+        assert_eq!(Purpose::Change.noun(), "change");
     }
 
     fn sid(text: &str) -> Sid {

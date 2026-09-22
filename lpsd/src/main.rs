@@ -73,12 +73,14 @@ use std::process::ExitCode;
 use crate::fs::RealFs;
 use crate::store::{Store, StoreError};
 
+use libauthd::PSI_SOCKET_PATH;
 use libauthd::psi;
 use libauthd::transport::{recv_message, send_message};
 use libauthd::wire::{
-    CredentialRequest, CredentialType, Denial, IdentifierType, Message, MessageSeverity, Prompt,
+    CredentialRequest, CredentialResponse, CredentialType, Denial, IdentifierType, Message,
+    MessageSeverity, Prompt,
 };
-use libauthd::{PSI_SOCKET_PATH, Secret};
+use peios::security::SidRef;
 
 /// What lpsd calls itself when registering.
 ///
@@ -88,8 +90,20 @@ use libauthd::{PSI_SOCKET_PATH, Secret};
 const SOURCE_NAME: &str = "lpsd";
 
 /// The prompt reference for the password. Unique within a conversation, and
-/// echoed back by the client unchanged.
+/// echoed back by the client unchanged. Also the current password's, in a
+/// change: it is the same question.
 const PASSWORD_REF: u32 = 1;
+
+/// The prompt references for a new password and its confirmation.
+const NEW_PASSWORD_REF: u32 = 2;
+const AGAIN_REF: u32 = 3;
+
+/// How many times a change will ask for a new password before giving up.
+///
+/// Each asking is a round, and authd bounds rounds too; this keeps lpsd's own
+/// count well inside that, so the principal is told why it ended rather than
+/// meeting authd's generic limit.
+const MAX_NEW_PASSWORD_ATTEMPTS: u32 = 3;
 
 /// How many logons lpsd will track at once.
 ///
@@ -98,11 +112,37 @@ const PASSWORD_REF: u32 = 1;
 const MAX_CONVERSATIONS: usize = 256;
 
 /// What lpsd remembers between asking and being answered.
-struct Pending {
-    /// The identifier authd passed through. Held so the answer is verified
-    /// against the name the conversation opened with, never against anything
-    /// in the response — which the client controls.
-    identifier: Vec<u8>,
+enum Pending {
+    /// A logon, waiting for its password.
+    Logon {
+        /// The identifier authd passed through. Held so the answer is verified
+        /// against the name the conversation opened with, never against
+        /// anything in the response — which the client controls.
+        identifier: Vec<u8>,
+    },
+    /// A principal changing their own password (PSPU §2.21).
+    Change(Change),
+}
+
+/// A change of a principal's own password, between rounds.
+struct Change {
+    /// Who, as the store resolved them from the SID authd vouched for — never
+    /// from anything in a response.
+    rid: u32,
+    name: String,
+    stage: Stage,
+}
+
+enum Stage {
+    /// Asked for the current password.
+    Current,
+    /// The current password held; asked for the new one.
+    New {
+        /// What held, so the store can refuse if it has changed since.
+        proof: store::Proof,
+        /// How many new passwords have been refused so far.
+        attempts: u32,
+    },
 }
 
 fn main() -> ExitCode {
@@ -316,7 +356,8 @@ fn register(stream: &UnixStream, store: &Store) -> io::Result<psi::Registered> {
         capabilities: psi::Capabilities::QUERIES
             | psi::Capabilities::ENUMERATES
             | psi::Capabilities::MEMBERS
-            | psi::Capabilities::PUSHES_CHANGES,
+            | psi::Capabilities::PUSHES_CHANGES
+            | psi::Capabilities::CHANGES_CREDENTIALS,
         // Zero, and correct rather than lazy: lpsd pushes an invalidation on
         // every write, so an entry stays good until it says otherwise. A time
         // limit would only make authd re-ask for answers it already knows are
@@ -368,7 +409,7 @@ fn pump(
         if ready.admin {
             match listener.accept() {
                 Ok((connection, _)) => admin::serve(connection, store, registered, |store| {
-                    let saved = store.save(&RealFs, Path::new(store::STORE_PATH));
+                    let saved = save_store(store);
                     if saved.is_ok() {
                         // Here rather than after `serve` returns, because a
                         // failed save rolls the store back and there is then
@@ -427,6 +468,13 @@ fn pump(
                 received.expose(),
                 registered.unix_id_count,
             )?,
+            psi::MSG_CHANGE_CREDENTIAL => begin_change(
+                stream,
+                store,
+                &mut pending,
+                envelope.conversation,
+                received.expose(),
+            )?,
             psi::MSG_CREDENTIAL_RESPONSE => answer(
                 stream,
                 store,
@@ -434,6 +482,7 @@ fn pump(
                 envelope.conversation,
                 received.expose(),
                 registered.unix_id_count,
+                &save_store,
             )?,
             psi::MSG_ABANDON => {
                 pending.remove(&envelope.conversation);
@@ -457,6 +506,15 @@ fn pump(
             }
         }
     }
+}
+
+/// Write the store where it lives.
+///
+/// Both of lpsd's writers come through here: an administrative change, and a
+/// principal changing their own password. Passed down rather than called
+/// directly so that the paths reaching it can be tested without a disk.
+fn save_store(store: &Store) -> Result<(), StoreError> {
+    store.save(&RealFs, Path::new(store::STORE_PATH))
 }
 
 /// Answer a lookup. One message in, one message out; the conversation is over.
@@ -643,7 +701,7 @@ fn begin(
                 ));
             }
             let identifier = request.start.identifier.clone();
-            pending.insert(conversation, Pending { identifier });
+            pending.insert(conversation, Pending::Logon { identifier });
 
             ask(stream, conversation, &request.start.identifier)
         }
@@ -696,18 +754,22 @@ fn ask(stream: &UnixStream, conversation: u64, identifier: &[u8]) -> io::Result<
     send_message(stream, &message)
 }
 
-/// Verify an answer and reach a terminal state.
+/// Handle an answer: verify it and reach a terminal state, or ask the next
+/// question.
+#[allow(clippy::too_many_arguments)]
 fn answer(
     stream: &UnixStream,
-    store: &Store,
+    store: &mut Store,
     pending: &mut HashMap<u64, Pending>,
     conversation: u64,
     buf: &[u8],
     unix_id_count: u32,
+    save: &dyn Fn(&Store) -> Result<(), StoreError>,
 ) -> io::Result<()> {
-    // Removed rather than borrowed: a conversation gets exactly one answer, and
-    // taking the state out means a client that sends two cannot retry against
-    // remembered context.
+    // Removed rather than borrowed: a round gets exactly one answer, and taking
+    // the state out means a client that sends two cannot retry against
+    // remembered context. A change that goes on to another round puts back
+    // only what that round needs.
     let Some(state) = pending.remove(&conversation) else {
         log::warn(format_args!(
             "an answer arrived for unknown conversation {conversation}"
@@ -724,15 +786,51 @@ fn answer(
         );
     };
 
-    let empty = Secret::empty();
-    let secret = response
+    match state {
+        Pending::Logon { identifier } => answer_logon(
+            stream,
+            store,
+            conversation,
+            &identifier,
+            &response,
+            unix_id_count,
+        ),
+        Pending::Change(change) => answer_change(
+            stream,
+            store,
+            pending,
+            conversation,
+            change,
+            &response,
+            save,
+        ),
+    }
+}
+
+/// The material answering one prompt, or empty if it went unanswered.
+///
+/// PGSS §2.8: a missing answer is a failed exchange, not a protocol violation,
+/// and an empty one fails every check a missing one should.
+fn answered(response: &CredentialResponse, credential_ref: u32) -> &[u8] {
+    response
         .answers
         .iter()
-        .find(|answer| answer.credential_ref == PASSWORD_REF)
-        .map(|answer| answer.data.expose())
-        .unwrap_or_else(|| empty.expose());
+        .find(|answer| answer.credential_ref == credential_ref)
+        .map_or(&[], |answer| answer.data.expose())
+}
 
-    match store.authenticate(&state.identifier, secret) {
+/// Verify a logon's password and reach a terminal state.
+fn answer_logon(
+    stream: &UnixStream,
+    store: &Store,
+    conversation: u64,
+    identifier: &[u8],
+    response: &CredentialResponse,
+    unix_id_count: u32,
+) -> io::Result<()> {
+    let secret = answered(response, PASSWORD_REF);
+
+    match store.authenticate(identifier, secret) {
         Some(identity) => {
             log::info(format_args!(
                 "authenticated {} as {} in {} group(s)",
@@ -749,7 +847,7 @@ fn answer(
             // it must never reach the caller.
             log::warn(format_args!(
                 "authentication failed for {}",
-                String::from_utf8_lossy(&state.identifier)
+                String::from_utf8_lossy(identifier)
             ));
             refuse(
                 stream,
@@ -759,6 +857,307 @@ fn answer(
             )
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Changing one's own password (PSPU §2.21)
+// ---------------------------------------------------------------------------
+
+/// Open a change: resolve whose password it is, and ask for the current one.
+///
+/// Whose is the SID authd took from the caller's token. It is the only
+/// principal this conversation can touch, and nothing the client says later
+/// can name another.
+fn begin_change(
+    stream: &UnixStream,
+    store: &Store,
+    pending: &mut HashMap<u64, Pending>,
+    conversation: u64,
+    buf: &[u8],
+) -> io::Result<()> {
+    let Ok(request) = psi::decode_change_credential(buf) else {
+        return refuse(
+            stream,
+            conversation,
+            Denial::MalformedRequest,
+            "Malformed credential change.",
+        );
+    };
+
+    if pending.len() >= MAX_CONVERSATIONS {
+        return refuse(
+            stream,
+            conversation,
+            Denial::AuthorityUnavailable,
+            "Too many conversations in flight.",
+        );
+    }
+    // The same rule as a logon's: an identifier still in use is the
+    // authority's mistake, and continuing would abandon the first silently.
+    if pending.contains_key(&conversation) {
+        return Err(io::Error::other(
+            "the authority reused a conversation identifier that is still live",
+        ));
+    }
+
+    let Some(principal) = SidRef::from_bytes(&request.principal) else {
+        return refuse(
+            stream,
+            conversation,
+            Denial::MalformedRequest,
+            "The principal is not a SID.",
+        );
+    };
+
+    let target = match store.change_target(principal) {
+        Ok(target) => target,
+        Err(refused) => {
+            log::info(format_args!(
+                "refused a password change for {principal}: {refused:?}"
+            ));
+            return refuse_change(stream, conversation, &refused);
+        }
+    };
+
+    // Checked once the principal is known, as on a logon, so the refusal says
+    // what is actually wrong. Every client that can change a password at all
+    // can render one; this is for the one that cannot.
+    if !request
+        .start
+        .supported_credential_types
+        .contains(&CredentialType::Password)
+    {
+        return refuse(
+            stream,
+            conversation,
+            Denial::AccountRestricted,
+            "This client cannot collect the password this account uses.",
+        );
+    }
+
+    let message = format!("Changing the password for {}", target.name);
+    pending.insert(
+        conversation,
+        Pending::Change(Change {
+            rid: target.rid,
+            name: target.name,
+            stage: Stage::Current,
+        }),
+    );
+    ask_for(
+        stream,
+        conversation,
+        Message {
+            severity: MessageSeverity::Info,
+            text: message,
+        },
+        &[(PASSWORD_REF, "Current password")],
+    )
+}
+
+/// Take one round of a change forward.
+fn answer_change(
+    stream: &UnixStream,
+    store: &mut Store,
+    pending: &mut HashMap<u64, Pending>,
+    conversation: u64,
+    change: Change,
+    response: &CredentialResponse,
+    save: &dyn Fn(&Store) -> Result<(), StoreError>,
+) -> io::Result<()> {
+    let Change { rid, name, stage } = change;
+    match stage {
+        Stage::Current => match store.prove_current(rid, answered(response, PASSWORD_REF)) {
+            Ok(proof) => {
+                pending.insert(
+                    conversation,
+                    Pending::Change(Change {
+                        rid,
+                        name,
+                        stage: Stage::New { proof, attempts: 0 },
+                    }),
+                );
+                ask_for_new(stream, conversation, None)
+            }
+            Err(refused) => {
+                log::warn(format_args!(
+                    "password change for {name} refused: {refused:?}"
+                ));
+                refuse_change(stream, conversation, &refused)
+            }
+        },
+
+        Stage::New { proof, attempts } => {
+            let new = answered(response, NEW_PASSWORD_REF);
+            let again = answered(response, AGAIN_REF);
+
+            // Said as an error and asked again, rather than refused, because
+            // the principal has proved who they are and a typo is not worth
+            // making them do it twice.
+            let problem = if new.is_empty() {
+                Some("An empty password is not a password.")
+            } else if new != again {
+                Some("The passwords do not match.")
+            } else {
+                None
+            };
+            if let Some(problem) = problem {
+                let attempts = attempts + 1;
+                if attempts >= MAX_NEW_PASSWORD_ATTEMPTS {
+                    log::info(format_args!(
+                        "password change for {name} abandoned after {attempts} attempts"
+                    ));
+                    return refuse(
+                        stream,
+                        conversation,
+                        Denial::ConversationLimit,
+                        "Too many attempts. The password is unchanged.",
+                    );
+                }
+                pending.insert(
+                    conversation,
+                    Pending::Change(Change {
+                        rid,
+                        name,
+                        stage: Stage::New { proof, attempts },
+                    }),
+                );
+                return ask_for_new(stream, conversation, Some(problem));
+            }
+
+            commit_change(stream, store, conversation, rid, &name, &proof, new, save)
+        }
+    }
+}
+
+/// Replace the password and make it durable, or change nothing.
+///
+/// The same discipline as an administrative change: applied in memory, written
+/// to disk, and only then reported — rolled back if the write fails, so success
+/// means the next logon checks the new password and failure means it still
+/// checks the old one.
+///
+/// No change notification follows. A password is nothing a query can observe,
+/// so there is no answer an authority could be holding that this makes stale.
+#[allow(clippy::too_many_arguments)]
+fn commit_change(
+    stream: &UnixStream,
+    store: &mut Store,
+    conversation: u64,
+    rid: u32,
+    name: &str,
+    proof: &store::Proof,
+    new: &[u8],
+    save: &dyn Fn(&Store) -> Result<(), StoreError>,
+) -> io::Result<()> {
+    let snapshot = store.clone();
+    if let Err(refused) = store.change_proven_password(rid, proof, new) {
+        log::warn(format_args!(
+            "password change for {name} refused: {refused:?}"
+        ));
+        return refuse_change(stream, conversation, &refused);
+    }
+    if let Err(error) = save(store) {
+        *store = snapshot;
+        log::error(format_args!(
+            "could not save a password change for {name}: {error}; it was not applied"
+        ));
+        return refuse(
+            stream,
+            conversation,
+            Denial::Internal,
+            "The new password could not be saved. The password is unchanged.",
+        );
+    }
+
+    log::info(format_args!("{name} changed their own password"));
+    let message = psi::encode_credential_changed(conversation)
+        .map_err(|_| io::Error::other("could not encode a credential change"))?;
+    send_message(stream, &message)
+}
+
+/// Ask for a new password and its confirmation, saying what was wrong with the
+/// last one if anything was.
+fn ask_for_new(stream: &UnixStream, conversation: u64, problem: Option<&str>) -> io::Result<()> {
+    let messages: Vec<Message> = problem
+        .map(|text| Message {
+            severity: MessageSeverity::Error,
+            text: text.to_string(),
+        })
+        .into_iter()
+        .collect();
+    send_request(
+        stream,
+        conversation,
+        messages,
+        &[
+            (NEW_PASSWORD_REF, "New password"),
+            (AGAIN_REF, "Retype new password"),
+        ],
+    )
+}
+
+fn ask_for(
+    stream: &UnixStream,
+    conversation: u64,
+    message: Message,
+    prompts: &[(u32, &str)],
+) -> io::Result<()> {
+    send_request(stream, conversation, vec![message], prompts)
+}
+
+/// Send a round of password prompts.
+fn send_request(
+    stream: &UnixStream,
+    conversation: u64,
+    messages: Vec<Message>,
+    prompts: &[(u32, &str)],
+) -> io::Result<()> {
+    let request = CredentialRequest {
+        messages,
+        prompts: prompts
+            .iter()
+            .map(|(credential_ref, name)| Prompt {
+                credential_ref: *credential_ref,
+                credential_type: CredentialType::Password,
+                credential_name: (*name).to_string(),
+            })
+            .collect(),
+    };
+    let message = psi::encode_credential_request(conversation, &request)
+        .map_err(|_| io::Error::other("could not encode a credential request"))?;
+    send_message(stream, &message)
+}
+
+/// End a change with the refusal that says what stopped it.
+///
+/// The caller is already signed in as this principal, so none of this is an
+/// existence oracle, and the reasons say plainly what is wrong — except for a
+/// password that did not verify, which keeps §2.10's one wording whichever
+/// password it was.
+fn refuse_change(
+    stream: &UnixStream,
+    conversation: u64,
+    refused: &store::ChangeRefused,
+) -> io::Result<()> {
+    let (denial, reason) = match refused {
+        store::ChangeRefused::NoSuchPrincipal => {
+            (Denial::AccountRestricted, "This account no longer exists.")
+        }
+        store::ChangeRefused::Disabled => (Denial::AccountRestricted, "This account is disabled."),
+        store::ChangeRefused::NoCredential => (
+            Denial::AccountRestricted,
+            "This account has no password to change. An administrator can set one with lps password.",
+        ),
+        store::ChangeRefused::WrongPassword | store::ChangeRefused::Superseded => {
+            (Denial::AuthenticationFailed, "Authentication failed.")
+        }
+        store::ChangeRefused::Rejected(_) => (
+            Denial::Internal,
+            "The new password could not be set. The password is unchanged.",
+        ),
+    };
+    refuse(stream, conversation, denial, reason)
 }
 
 /// Tell the authority who this is.
@@ -844,5 +1243,337 @@ fn notify_ready() {
     };
     if let Err(error) = socket.send_to(b"READY=1", &path) {
         log::warn(format_args!("could not signal readiness: {error}"));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! The change conversation, driven over a socketpair as authd would drive
+    //! it — everything but the disk, which each test supplies.
+
+    use super::*;
+    use crate::store::NewPrincipal;
+    use libauthd::Secret;
+    use libauthd::wire::{Answer, CredentialChangeStart};
+
+    const CONVERSATION: u64 = 7;
+
+    fn saved(_: &Store) -> Result<(), StoreError> {
+        Ok(())
+    }
+
+    fn unsaveable(_: &Store) -> Result<(), StoreError> {
+        Err(StoreError::Io(io::Error::other("the disk is full")))
+    }
+
+    /// What lpsd sent back for one step.
+    #[derive(Debug)]
+    enum Sent {
+        Request(CredentialRequest),
+        Changed,
+        Refused(Denial),
+    }
+
+    struct Harness {
+        store: Store,
+        pending: HashMap<u64, Pending>,
+        lpsd: UnixStream,
+        authd: UnixStream,
+    }
+
+    impl Harness {
+        fn with(name: &str, password: Option<&[u8]>) -> Self {
+            let mut store = Store::provision().expect("must provision");
+            store
+                .add(NewPrincipal::named(name), password)
+                .expect("must add");
+            let (lpsd, authd) = UnixStream::pair().expect("socketpair");
+            Self {
+                store,
+                pending: HashMap::new(),
+                lpsd,
+                authd,
+            }
+        }
+
+        fn sid_of(&self, name: &str) -> Vec<u8> {
+            self.store
+                .record(name)
+                .expect("must read")
+                .sid
+                .as_ref()
+                .as_bytes()
+                .to_vec()
+        }
+
+        fn open_with(&mut self, principal: Vec<u8>, supported: Vec<CredentialType>) -> Sent {
+            let message = psi::encode_change_credential(
+                CONVERSATION,
+                &psi::ChangeCredential {
+                    start: CredentialChangeStart {
+                        supported_credential_types: supported,
+                    },
+                    principal,
+                },
+            )
+            .expect("encodes");
+            begin_change(
+                &self.lpsd,
+                &self.store,
+                &mut self.pending,
+                CONVERSATION,
+                &message,
+            )
+            .expect("served");
+            self.sent()
+        }
+
+        fn open(&mut self, name: &str) -> Sent {
+            let sid = self.sid_of(name);
+            self.open_with(sid, vec![CredentialType::Password])
+        }
+
+        fn reply(
+            &mut self,
+            answers: &[(u32, &[u8])],
+            save: &dyn Fn(&Store) -> Result<(), StoreError>,
+        ) -> Sent {
+            let message = psi::encode_credential_response(
+                CONVERSATION,
+                &CredentialResponse {
+                    answers: answers
+                        .iter()
+                        .map(|(credential_ref, data)| Answer {
+                            credential_ref: *credential_ref,
+                            data: Secret::from_slice(data),
+                        })
+                        .collect(),
+                },
+            )
+            .expect("encodes");
+            answer(
+                &self.lpsd,
+                &mut self.store,
+                &mut self.pending,
+                CONVERSATION,
+                message.expose(),
+                1_000_000,
+                save,
+            )
+            .expect("served");
+            self.sent()
+        }
+
+        fn sent(&self) -> Sent {
+            let received = recv_message(&psi::FRAMING, &self.authd).expect("a reply");
+            let envelope = psi::decode_envelope(received.expose()).expect("an envelope");
+            assert_eq!(envelope.conversation, CONVERSATION);
+            match envelope.msg_type {
+                psi::MSG_CREDENTIAL_REQUEST => Sent::Request(
+                    psi::decode_credential_request(received.expose()).expect("a request"),
+                ),
+                psi::MSG_CREDENTIAL_CHANGED => Sent::Changed,
+                psi::MSG_REFUSAL => Sent::Refused(
+                    psi::decode_refusal(received.expose())
+                        .expect("a refusal")
+                        .denial,
+                ),
+                other => panic!("unexpected message {other:#06x}"),
+            }
+        }
+
+        fn authenticates(&self, name: &str, password: &[u8]) -> bool {
+            self.store.authenticate(name.as_bytes(), password).is_some()
+        }
+    }
+
+    fn refs(sent: &Sent) -> Vec<u32> {
+        match sent {
+            Sent::Request(request) => request.prompts.iter().map(|p| p.credential_ref).collect(),
+            other => panic!("expected a request, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_change_proves_the_current_password_and_replaces_it() {
+        let mut h = Harness::with("jack", Some(b"old"));
+
+        let first = h.open("jack");
+        assert_eq!(
+            refs(&first),
+            vec![PASSWORD_REF],
+            "the current password first"
+        );
+        let Sent::Request(request) = &first else {
+            unreachable!()
+        };
+        assert!(request.messages[0].text.contains("jack"));
+
+        let second = h.reply(&[(PASSWORD_REF, b"old")], &saved);
+        assert_eq!(refs(&second), vec![NEW_PASSWORD_REF, AGAIN_REF]);
+
+        let last = h.reply(&[(NEW_PASSWORD_REF, b"new"), (AGAIN_REF, b"new")], &saved);
+        assert!(matches!(last, Sent::Changed));
+        assert!(h.authenticates("jack", b"new"));
+        assert!(!h.authenticates("jack", b"old"));
+        assert!(
+            h.pending.is_empty(),
+            "a finished change must leave nothing behind"
+        );
+    }
+
+    #[test]
+    fn a_wrong_current_password_ends_the_change() {
+        let mut h = Harness::with("jack", Some(b"old"));
+        h.open("jack");
+        assert!(matches!(
+            h.reply(&[(PASSWORD_REF, b"guess")], &saved),
+            Sent::Refused(Denial::AuthenticationFailed)
+        ));
+        assert!(h.pending.is_empty());
+        assert!(h.authenticates("jack", b"old"));
+    }
+
+    /// A typo in the new password is asked again, with the reason, rather than
+    /// making the principal prove themselves twice.
+    #[test]
+    fn a_mismatch_is_asked_again() {
+        let mut h = Harness::with("jack", Some(b"old"));
+        h.open("jack");
+        h.reply(&[(PASSWORD_REF, b"old")], &saved);
+
+        let again = h.reply(&[(NEW_PASSWORD_REF, b"new"), (AGAIN_REF, b"nwe")], &saved);
+        let Sent::Request(request) = &again else {
+            panic!("expected to be asked again, got {again:?}")
+        };
+        assert_eq!(request.messages[0].severity, MessageSeverity::Error);
+        assert_eq!(refs(&again), vec![NEW_PASSWORD_REF, AGAIN_REF]);
+
+        assert!(matches!(
+            h.reply(&[(NEW_PASSWORD_REF, b"new"), (AGAIN_REF, b"new")], &saved),
+            Sent::Changed
+        ));
+        assert!(h.authenticates("jack", b"new"));
+    }
+
+    /// A missing answer is a failed attempt like an empty one, not a protocol
+    /// violation (PGSS §2.8).
+    #[test]
+    fn an_empty_or_missing_new_password_is_asked_again() {
+        let mut h = Harness::with("jack", Some(b"old"));
+        h.open("jack");
+        h.reply(&[(PASSWORD_REF, b"old")], &saved);
+        assert!(matches!(h.reply(&[], &saved), Sent::Request(_)));
+        assert!(matches!(
+            h.reply(&[(NEW_PASSWORD_REF, b""), (AGAIN_REF, b"")], &saved),
+            Sent::Request(_)
+        ));
+    }
+
+    #[test]
+    fn too_many_attempts_end_the_change_with_the_password_unchanged() {
+        let mut h = Harness::with("jack", Some(b"old"));
+        h.open("jack");
+        h.reply(&[(PASSWORD_REF, b"old")], &saved);
+
+        let mut last = None;
+        for _ in 0..MAX_NEW_PASSWORD_ATTEMPTS {
+            last = Some(h.reply(&[(NEW_PASSWORD_REF, b"a"), (AGAIN_REF, b"b")], &saved));
+        }
+        assert!(matches!(
+            last,
+            Some(Sent::Refused(Denial::ConversationLimit))
+        ));
+        assert!(h.pending.is_empty());
+        assert!(h.authenticates("jack", b"old"));
+    }
+
+    /// Durable or nothing: a change the disk would not take is rolled back, and
+    /// the principal is told it did not happen.
+    #[test]
+    fn a_change_that_cannot_be_saved_changes_nothing() {
+        let mut h = Harness::with("jack", Some(b"old"));
+        h.open("jack");
+        h.reply(&[(PASSWORD_REF, b"old")], &saved);
+        assert!(matches!(
+            h.reply(
+                &[(NEW_PASSWORD_REF, b"new"), (AGAIN_REF, b"new")],
+                &unsaveable
+            ),
+            Sent::Refused(Denial::Internal)
+        ));
+        assert!(h.authenticates("jack", b"old"));
+        assert!(!h.authenticates("jack", b"new"));
+    }
+
+    /// There is no current password to prove, so the account's token alone
+    /// would be setting a credential for it.
+    #[test]
+    fn a_passwordless_principal_is_refused_before_anything_is_asked() {
+        let mut h = Harness::with("kiosk", None);
+        assert!(matches!(
+            h.open("kiosk"),
+            Sent::Refused(Denial::AccountRestricted)
+        ));
+        assert!(h.pending.is_empty());
+    }
+
+    #[test]
+    fn a_principal_that_is_not_a_sid_is_malformed() {
+        let mut h = Harness::with("jack", Some(b"old"));
+        assert!(matches!(
+            h.open_with(vec![1, 2, 3], vec![CredentialType::Password]),
+            Sent::Refused(Denial::MalformedRequest)
+        ));
+    }
+
+    #[test]
+    fn a_client_that_cannot_render_a_password_is_refused() {
+        let mut h = Harness::with("jack", Some(b"old"));
+        let sid = h.sid_of("jack");
+        assert!(matches!(
+            h.open_with(sid, Vec::new()),
+            Sent::Refused(Denial::AccountRestricted)
+        ));
+        assert!(h.pending.is_empty());
+    }
+
+    /// An abandon mid-change drops what the first round established, so a
+    /// late answer cannot complete it.
+    #[test]
+    fn an_abandoned_change_cannot_be_completed() {
+        let mut h = Harness::with("jack", Some(b"old"));
+        h.open("jack");
+        h.reply(&[(PASSWORD_REF, b"old")], &saved);
+        h.pending.remove(&CONVERSATION);
+
+        let message = psi::encode_credential_response(
+            CONVERSATION,
+            &CredentialResponse {
+                answers: vec![
+                    Answer {
+                        credential_ref: NEW_PASSWORD_REF,
+                        data: Secret::from_slice(b"new"),
+                    },
+                    Answer {
+                        credential_ref: AGAIN_REF,
+                        data: Secret::from_slice(b"new"),
+                    },
+                ],
+            },
+        )
+        .expect("encodes");
+        answer(
+            &h.lpsd,
+            &mut h.store,
+            &mut h.pending,
+            CONVERSATION,
+            message.expose(),
+            1_000_000,
+            &saved,
+        )
+        .expect("served");
+        assert!(h.authenticates("jack", b"old"));
+        assert!(!h.authenticates("jack", b"new"));
     }
 }

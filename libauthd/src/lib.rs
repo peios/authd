@@ -94,8 +94,9 @@ pub mod wire;
 pub use claim::Claim;
 pub use secret::Secret;
 pub use wire::{
-    AccessDenied, AccessGranted, Answer, CredentialRequest, CredentialResponse, CredentialType,
-    Denial, IdentifierType, LogonStart, LogonType, Message, MessageSeverity, Prompt, WireError,
+    AccessDenied, AccessGranted, Answer, CredentialChangeStart, CredentialChanged,
+    CredentialRequest, CredentialResponse, CredentialType, Denial, IdentifierType, LogonStart,
+    LogonType, Message, MessageSeverity, Prompt, WireError,
 };
 
 /// The socket a PGSS Logon authority listens on.

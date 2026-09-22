@@ -1,6 +1,6 @@
 //! Service attestation: a token for a service, with no credential behind it.
 //!
-//! Implements PGSS Logon §2.19; the obligations are §2.20 items 51-60.
+//! Implements PGSS Logon §2.19; the obligations are §2.21 items 51-60.
 //!
 //! A service identity has no credential and must never acquire one. A machine
 //! that could authenticate its own services would have to hold their secret,

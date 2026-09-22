@@ -24,12 +24,13 @@
 //!
 //! # What this is not
 //!
-//! Not `passwd`. Changing your *own* password will go over PGSS Logon, so that
-//! it is a property of being a principal source rather than something each
-//! source's administration tool reinvents — a domain principal will change
-//! their password exactly as a local one does. `lps password` here is an
-//! administrator resetting somebody else's, which is a different operation and
-//! genuinely local.
+//! Not `passwd`. Changing your *own* password goes over PGSS Logon (§2.20),
+//! through the authority to whichever source holds you, so that it is a
+//! property of being a principal source rather than something each source's
+//! administration tool reinvents — a domain principal changes their password
+//! exactly as a local one does. `lps password` here is an administrator
+//! resetting somebody else's, which is a different operation and genuinely
+//! local.
 
 mod format;
 mod interactive;

@@ -490,6 +490,41 @@ pub enum CredentialRequirement {
     None(Box<Identity>),
 }
 
+/// The principal a change of their own password is for. See
+/// [`Store::change_target`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChangeTarget {
+    pub rid: u32,
+    /// The canonical spelling, for the prompt and the log.
+    pub name: String,
+}
+
+/// That a principal's current password held, and against which verifier. See
+/// [`Store::prove_current`].
+///
+/// Holds a verifier, which is not password-equivalent, rather than the password
+/// itself — nothing credential-bearing has to outlive the round that proved it.
+#[derive(Debug, Clone)]
+pub struct Proof(Verifier);
+
+/// Why a principal's own password was not changed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ChangeRefused {
+    /// No principal here has that SID — removed since they signed in.
+    NoSuchPrincipal,
+    /// Disabled. Signing in is refused, and so is changing what they would sign
+    /// in with.
+    Disabled,
+    /// No password to change: passwordless, or a service principal.
+    NoCredential,
+    /// The current password did not verify.
+    WrongPassword,
+    /// The password changed after it was proved, so the proof no longer stands.
+    Superseded,
+    /// The new password was refused, or could not be made into a verifier.
+    Rejected(String),
+}
+
 /// Refuse an empty password.
 ///
 /// An empty password and no password are two spellings of "type nothing" that
@@ -1240,6 +1275,100 @@ impl Store {
 
         self.groups.remove(at);
         Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Changing one's own password
+    //
+    // PSPU §2.21. Three steps rather than one call, because the conversation
+    // they serve spans rounds: which principal (from the SID authd vouched
+    // for), then proof of the current password, then — a round later — the
+    // new one. The store is not held across rounds, so each step re-checks
+    // what the previous one established.
+    // -----------------------------------------------------------------------
+
+    /// Who a change is for, from the SID the authority took from the caller's
+    /// token.
+    ///
+    /// No decoy and no single code path here, unlike [`Store::authenticate`]:
+    /// the caller is already signed in as this principal, so there is no
+    /// existence to hide from them. What is refused is refused plainly.
+    pub fn change_target(&self, sid: &SidRef) -> Result<ChangeTarget, ChangeRefused> {
+        let rid = self
+            .rid_in_domain(sid)
+            .ok_or(ChangeRefused::NoSuchPrincipal)?;
+        let principal = self.changeable(rid)?;
+        Ok(ChangeTarget {
+            rid,
+            name: principal.name.clone(),
+        })
+    }
+
+    /// Verify the principal's current password.
+    ///
+    /// The [`Proof`] names the verifier the password matched, and
+    /// [`Store::change_proven_password`] refuses unless that verifier is still
+    /// the one in place. So a password an administrator reset between the two
+    /// rounds cannot be overwritten on the strength of the password it
+    /// replaced.
+    pub fn prove_current(&self, rid: u32, secret: &[u8]) -> Result<Proof, ChangeRefused> {
+        let principal = self.changeable(rid)?;
+        let verifier = principal
+            .verifier
+            .as_ref()
+            .ok_or(ChangeRefused::NoCredential)?;
+        if !verifier.verify(secret) {
+            return Err(ChangeRefused::WrongPassword);
+        }
+        Ok(Proof(verifier.clone()))
+    }
+
+    /// Replace a principal's password, given proof of the current one.
+    ///
+    /// Everything [`Store::change_target`] checked is checked again: the
+    /// principal may have been disabled, removed or made passwordless since the
+    /// round that proved them.
+    pub fn change_proven_password(
+        &mut self,
+        rid: u32,
+        proof: &Proof,
+        password: &[u8],
+    ) -> Result<(), ChangeRefused> {
+        refuse_empty_password(Some(password))
+            .map_err(|error| ChangeRefused::Rejected(error.to_string()))?;
+        self.changeable(rid)?;
+        let at = self
+            .principals
+            .iter()
+            .position(|p| p.rid == rid)
+            .ok_or(ChangeRefused::NoSuchPrincipal)?;
+        if self.principals[at].verifier.as_ref() != Some(&proof.0) {
+            return Err(ChangeRefused::Superseded);
+        }
+        let verifier = Verifier::create(password)
+            .map_err(|error| ChangeRefused::Rejected(error.to_string()))?;
+        self.principals[at].verifier = Some(verifier);
+        Ok(())
+    }
+
+    /// The principal with `rid`, if their own password may be changed at all.
+    fn changeable(&self, rid: u32) -> Result<&Principal, ChangeRefused> {
+        let principal = self
+            .principals
+            .iter()
+            .find(|p| p.rid == rid)
+            .ok_or(ChangeRefused::NoSuchPrincipal)?;
+        if !principal.enabled {
+            return Err(ChangeRefused::Disabled);
+        }
+        // Passwordless, and every service principal: there is no current
+        // password to prove, so a self-service change would be the account's
+        // token alone setting a credential for it. An administrator can give
+        // one with `lps password`; the account holder cannot.
+        if principal.verifier.is_none() {
+            return Err(ChangeRefused::NoCredential);
+        }
+        Ok(principal)
     }
 
     // -----------------------------------------------------------------------
@@ -3573,6 +3702,140 @@ mod tests {
         store.set_password("jack", b"different").expect("must set");
         let after = store.record("jack").expect("must read");
         assert_eq!(before, after);
+    }
+
+    // -----------------------------------------------------------------------
+    // Changing one's own password
+    // -----------------------------------------------------------------------
+
+    fn sid_named(store: &Store, name: &str) -> Sid {
+        store.record(name).expect("must read").sid
+    }
+
+    #[test]
+    fn a_proven_change_replaces_the_password() {
+        let mut store = seeded();
+        let target = store
+            .change_target(sid_named(&store, "jack").as_ref())
+            .expect("jack may change his own password");
+        assert_eq!(target.name, "jack");
+
+        let proof = store
+            .prove_current(target.rid, b"password")
+            .expect("the current password holds");
+        store
+            .change_proven_password(target.rid, &proof, b"different")
+            .expect("must change");
+
+        assert!(store.authenticate(b"jack", b"password").is_none());
+        assert!(store.authenticate(b"jack", b"different").is_some());
+    }
+
+    #[test]
+    fn a_wrong_current_password_proves_nothing() {
+        let store = seeded();
+        let target = store
+            .change_target(sid_named(&store, "jack").as_ref())
+            .unwrap();
+        assert_eq!(
+            store.prove_current(target.rid, b"guess").unwrap_err(),
+            ChangeRefused::WrongPassword
+        );
+    }
+
+    /// The case the proof carries a verifier for: an administrator resets the
+    /// password between the round that proved the old one and the round that
+    /// supplies the new one. The reset must win.
+    #[test]
+    fn a_reset_between_the_rounds_supersedes_the_proof() {
+        let mut store = seeded();
+        let target = store
+            .change_target(sid_named(&store, "jack").as_ref())
+            .unwrap();
+        let proof = store.prove_current(target.rid, b"password").unwrap();
+
+        store.set_password("jack", b"reset-by-admin").unwrap();
+
+        assert_eq!(
+            store
+                .change_proven_password(target.rid, &proof, b"mine")
+                .unwrap_err(),
+            ChangeRefused::Superseded
+        );
+        assert!(store.authenticate(b"jack", b"reset-by-admin").is_some());
+    }
+
+    #[test]
+    fn a_passwordless_principal_cannot_give_itself_a_password() {
+        let mut store = seeded();
+        store.add(new("kiosk", vec![]), None).unwrap();
+        assert_eq!(
+            store
+                .change_target(sid_named(&store, "kiosk").as_ref())
+                .unwrap_err(),
+            ChangeRefused::NoCredential
+        );
+    }
+
+    #[test]
+    fn a_disabled_principal_cannot_change_its_password() {
+        let mut store = seeded();
+        store.add(new("guest", vec![]), Some(b"pw")).unwrap();
+        let sid = sid_named(&store, "guest");
+        let target = store.change_target(sid.as_ref()).unwrap();
+        let proof = store.prove_current(target.rid, b"pw").unwrap();
+
+        store.set_enabled("guest", false).unwrap();
+
+        assert_eq!(
+            store.change_target(sid.as_ref()).unwrap_err(),
+            ChangeRefused::Disabled
+        );
+        assert_eq!(
+            store
+                .change_proven_password(target.rid, &proof, b"new")
+                .unwrap_err(),
+            ChangeRefused::Disabled,
+            "disabling between the rounds must stop the change"
+        );
+    }
+
+    #[test]
+    fn a_removed_principal_has_nothing_to_change() {
+        let mut store = seeded();
+        store.add(new("guest", vec![]), Some(b"pw")).unwrap();
+        let sid = sid_named(&store, "guest");
+        store.remove("guest").unwrap();
+        assert_eq!(
+            store.change_target(sid.as_ref()).unwrap_err(),
+            ChangeRefused::NoSuchPrincipal
+        );
+    }
+
+    /// A SID outside this store's domain is nobody here, whatever its RID.
+    #[test]
+    fn a_foreign_sid_is_nobody_here() {
+        let store = seeded();
+        let rid = sid_named(&store, "jack").as_ref().rid();
+        let foreign: Sid = format!("S-1-5-21-1-2-3-{rid}").parse().unwrap();
+        assert_eq!(
+            store.change_target(foreign.as_ref()).unwrap_err(),
+            ChangeRefused::NoSuchPrincipal
+        );
+    }
+
+    #[test]
+    fn an_empty_new_password_is_refused() {
+        let mut store = seeded();
+        let target = store
+            .change_target(sid_named(&store, "jack").as_ref())
+            .unwrap();
+        let proof = store.prove_current(target.rid, b"password").unwrap();
+        assert!(matches!(
+            store.change_proven_password(target.rid, &proof, b""),
+            Err(ChangeRefused::Rejected(_))
+        ));
+        assert!(store.authenticate(b"jack", b"password").is_some());
     }
 
     #[test]
