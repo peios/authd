@@ -5,11 +5,15 @@ side_effects = ["man-db"]
 [package]
 name         = "dev.peios.authd-lpsd"
 description  = "Peios local principal source daemon and identity database"
+# The crate closure lpsd links; build.main's collect-rust-licences --check
+# holds this to what those crates declare.
+license      = "((MIT OR Apache-2.0) AND Unicode-3.0) AND Apache-2.0 AND (Apache-2.0 OR MIT) AND BSD-3-Clause AND ISC AND MIT AND (MIT OR Unlicense)"
 
 
 
 [files]
 "@source:LICENSE"                                   = "usr/share/licenses/dev.peios.authd-lpsd/LICENSE"
+":licenses/lpsd/**"                                 = "usr/share/licenses/dev.peios.authd-lpsd/third-party"
 ":usr/sbin/lpsd"                                    = "usr/sbin/lpsd"
 ":usr/share/man/man8/lpsd.8.gz"                     = "usr/share/man/man8/lpsd.8.gz"
 ":usr/share/regim/lpsd-service.reg"                 = "usr/share/regim/lpsd-service.reg"

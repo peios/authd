@@ -2,9 +2,13 @@
 [package]
 name        = "dev.peios.authd-nss"
 description = "Peios NSS principal-resolution module"
+# The crate closure the module links; build.main's collect-rust-licences
+# --check holds this to what those crates declare.
+license     = "(Apache-2.0 OR MIT) AND MIT"
 
 
 
 [files]
 "@source:LICENSE"                                               = "usr/share/licenses/dev.peios.authd-nss/LICENSE"
 ":usr/lib/x86_64-linux-peios/libnss_peios.so.2"                 = "usr/lib/x86_64-linux-peios/libnss_peios.so.2"
+":licenses/nss/**"                                              = "usr/share/licenses/dev.peios.authd-nss/third-party"

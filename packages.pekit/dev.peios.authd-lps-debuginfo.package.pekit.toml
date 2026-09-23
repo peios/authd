@@ -1,10 +1,13 @@
 [package]
 name        = "dev.peios.authd-lps-debuginfo"
 description = "Peios local principal administration tool debugging symbols"
+# The same crate closure as lps; checked by build.main.
+license     = "((MIT OR Apache-2.0) AND Unicode-3.0) AND Apache-2.0 AND (Apache-2.0 OR MIT) AND BSD-3-Clause AND ISC AND MIT AND (MIT OR Unlicense)"
 
 [dependencies]
 "dev.peios.authd-lps" = "= {{release}}"
 
 [files]
 "@source:LICENSE"               = "usr/share/licenses/dev.peios.authd-lps-debuginfo/LICENSE"
+":licenses/lps/**"              = "usr/share/licenses/dev.peios.authd-lps-debuginfo/third-party"
 ":debug/lps/usr/lib/debug/**"   = "usr/lib/debug"

@@ -2,7 +2,10 @@
 name         = "dev.peios.authd-debugsource"
 architecture = "noarch"
 description  = "Peios authentication stack debug sources"
+# The union of the five binaries' crate closures; checked by build.main.
+license      = "((MIT OR Apache-2.0) AND Unicode-3.0) AND Apache-2.0 AND (Apache-2.0 OR MIT) AND BSD-3-Clause AND ISC AND MIT AND (MIT OR Unlicense)"
 
 [files]
 "@source:LICENSE"   = "usr/share/licenses/dev.peios.authd-debugsource/LICENSE"
+":licenses/debugsource/**" = "usr/share/licenses/dev.peios.authd-debugsource/third-party"
 ":usr/src/debug/**" = "usr/src/debug"

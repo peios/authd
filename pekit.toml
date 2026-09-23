@@ -90,6 +90,40 @@ cargo build --release --locked --offline \
   --target-dir "$PEKIT_OUT/target"
 cargo build --release --locked --offline -p nss_peios --target-dir "$PEKIT_OUT/target"
 
+# Each binary links its own crate closure, so each package ships that
+# closure's notices and declares its conjunction of licences; --check holds
+# every package definition to it (PEI-1163). The debug sources cover all five
+# closures. peios-rs carries no package-local notice; ship the reviewed
+# notice of that same pinned source.
+LICENSE_ROOT=$PEKIT_OUT/licenses
+collect_licences() {
+  out=$1
+  roots=$2
+  shift 2
+  root_args=
+  for root in $roots; do root_args="$root_args --root $root"; done
+  for definition in "$@"; do
+    # shellcheck disable=SC2086 # crate names are single words
+    /usr/libexec/peios-packaging/collect-rust-licences \
+      --licence-root "$LICENSE_ROOT/$out" $root_args \
+      --notice "git+https://github.com/peios/peios-rs.git=third-party/peios-rs-LICENSE" \
+      --check "packages.pekit/$definition.package.pekit.toml"
+  done
+  test -s "$LICENSE_ROOT/$out/crate-licenses.tsv"
+}
+collect_licences authd authd \
+  dev.peios.authd-debuginfo
+collect_licences lpsd lpsd \
+  dev.peios.authd-lpsd dev.peios.authd-lpsd-debuginfo
+collect_licences lps lps \
+  dev.peios.authd-lps dev.peios.authd-lps-debuginfo
+collect_licences login login \
+  dev.peios.authd-login dev.peios.authd-login-debuginfo
+collect_licences nss nss_peios \
+  dev.peios.authd-nss dev.peios.authd-nss-debuginfo
+collect_licences debugsource "authd lpsd lps login nss_peios" \
+  dev.peios.authd-debugsource
+
 mkdir -p "$PEKIT_OUT/usr/sbin" "$PEKIT_OUT/usr/bin"
 cp "$PEKIT_OUT/target/release/authd" "$PEKIT_OUT/usr/sbin/authd"
 cp "$PEKIT_OUT/target/release/lpsd" "$PEKIT_OUT/usr/sbin/lpsd"
@@ -134,6 +168,12 @@ test -x "$PEKIT_OUT/usr/libexec/lpsd/first-account"
 
 # Split each independently installable ELF's symbols separately, while sharing
 # one exact debug-source tree for the source release and vendored Rust closure.
+# This stays local rather than using /usr/libexec/peios-packaging/split-debug:
+# each component's symbols go to their own debuginfo package tree, and the
+# RUSTFLAGS remap already rewrote the vendor target's crates (a separate
+# output tree) to the vendor/ prefix, which split-debug, copying only sources
+# under one build root, would drop; the loop below resolves them back to
+# $PEKIT_VENDOR_OUT.
 : > "$PEKIT_OUT/.debug-sources"
 split_debug() {
   component=$1
@@ -200,6 +240,7 @@ test -n "$(find "$DEBUG_ROOT" -type f -print -quit)"
 "org.llvm.clang"              = ">= 22"
 "dev.peios.libpeios-devel"    = ">= 0.5.0"
 "dev.peios.kernel-headers"    = "*"
+"dev.peios.packaging-tools"   = "*"
 
 [test]
 gate = true
