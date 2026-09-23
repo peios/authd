@@ -50,10 +50,13 @@ done
 # Production builds consume the packaged C ABI and an exact public peios-rs
 # revision. No sibling checkout or mutable Cargo cache is visible here.
 unset PEIOS_LIB_DIR PEIOS_INCLUDE PKM_UAPI
-pkg-config --exists peios || {
-  echo "authd: libpeios-devel (peios.pc) is required" >&2
+# A newer API-compatible libpeios SDK is valid; a different SONAME ABI is not.
+pkg-config --atleast-version=0.5.0 peios || {
+  echo "authd: dev.peios.libpeios-devel >= 0.5.0 (ABI 0) is required" >&2
   exit 1
 }
+readelf -dW "$(pkg-config --variable=libdir peios)/libpeios.so" |
+  grep -E '\(SONAME\).*\[libpeios\.so\.0\]' >/dev/null
 export BINDGEN_EXTRA_CLANG_ARGS="-isystem $(gcc -print-file-name=include) ${BINDGEN_EXTRA_CLANG_ARGS:-}"
 
 # A release tag and every workspace crate describe the same source family.
@@ -195,7 +198,7 @@ test -n "$(find "$DEBUG_ROOT" -type f -print -quit)"
 "org.sourceware.debugedit"    = "*"
 "org.python.python3"          = "*"
 "org.llvm.clang"              = ">= 22"
-"dev.peios.libpeios-devel"    = "*"
+"dev.peios.libpeios-devel"    = ">= 0.5.0"
 "dev.peios.kernel-headers"    = "*"
 
 [test]
@@ -207,11 +210,17 @@ export CARGO_HOME="$PEKIT_OUT/cargo-home"
 mkdir -p "$CARGO_HOME"
 cp "$PEKIT_VENDOR_OUT/cargo-config.toml" "$CARGO_HOME/config.toml"
 unset PEIOS_LIB_DIR PEIOS_INCLUDE PKM_UAPI
-pkg-config --exists peios || {
-  echo "authd: libpeios-devel (peios.pc) is required" >&2
+# A newer API-compatible libpeios SDK is valid; a different SONAME ABI is not.
+pkg-config --atleast-version=0.5.0 peios || {
+  echo "authd: dev.peios.libpeios-devel >= 0.5.0 (ABI 0) is required" >&2
   exit 1
 }
+readelf -dW "$(pkg-config --variable=libdir peios)/libpeios.so" |
+  grep -E '\(SONAME\).*\[libpeios\.so\.0\]' >/dev/null
 export BINDGEN_EXTRA_CLANG_ARGS="-isystem $(gcc -print-file-name=include) ${BINDGEN_EXTRA_CLANG_ARGS:-}"
+# The tests run with the same control-flow protection as build.main (PEI-1155).
+export RUSTC_BOOTSTRAP=1
+export RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }-Zcf-protection=full"
 cargo test --release --workspace --locked --offline --target-dir "$PEKIT_OUT/target"
 
 # Validate the exact staged package output produced by build.main.
@@ -235,8 +244,14 @@ do
   readelf -lW "$elf" | grep -Eq 'GNU_STACK[[:space:]].*RW[[:space:]]'
   readelf -dW "$elf" | grep -q 'BIND_NOW'
   readelf -dW "$elf" | grep -q 'RELR'
-  ! readelf -dW "$elf" | grep -Eq '(RPATH|RUNPATH)'
-  ! readelf -SW "$elf" | grep -q '\.debug_info'
+  if readelf -dW "$elf" | grep -E '(RPATH|RUNPATH)' >/dev/null; then
+    echo "authd: $elf carries an RPATH or RUNPATH" >&2
+    exit 1
+  fi
+  if readelf -SW "$elf" | grep '\.debug_info' >/dev/null; then
+    echo "authd: $elf still contains unsplit debug information" >&2
+    exit 1
+  fi
   if [ "$kind" = exe ]; then
     readelf -dW "$elf" | grep -Eq 'FLAGS_1.*PIE'
   else
@@ -249,7 +264,10 @@ do
   readelf -SW "$debug" | grep -q '\.debug_info'
   test "$(readelf -n "$debug" | sed -n 's/^[[:space:]]*Build ID: //p' | head -1)" = "$build_id"
   for forbidden in "$SRC" "$PEKIT_VENDOR_OUT" "$PEKIT_OUT_BASE" "$PEKIT_WORKSPACE_ROOT"; do
-    ! grep -aF "$forbidden" "$elf" "$debug" >/dev/null
+    if grep -aF "$forbidden" "$elf" "$debug" >/dev/null; then
+      echo "authd: build path $forbidden leaked into $elf or its debug file" >&2
+      exit 1
+    fi
   done
 done
 
@@ -320,5 +338,5 @@ rm -f "$PEKIT_OUT/lps-help" "$PEKIT_OUT/login-out" "$PEKIT_OUT/login-err"
 "org.sourceware.debugedit"    = "*"
 "org.python.python3"          = "*"
 "org.llvm.clang"              = ">= 22"
-"dev.peios.libpeios-devel"    = "*"
+"dev.peios.libpeios-devel"    = ">= 0.5.0"
 "dev.peios.kernel-headers"    = "*"

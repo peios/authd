@@ -3,7 +3,7 @@ name        = "dev.peios.authd-login-debuginfo"
 description = "Peios terminal logon originator debugging symbols"
 
 [dependencies]
-"dev.peios.authd-login" = "{{version}}"
+"dev.peios.authd-login" = "= {{release}}"
 
 [files]
 "@source:LICENSE"                 = "usr/share/licenses/dev.peios.authd-login-debuginfo/LICENSE"

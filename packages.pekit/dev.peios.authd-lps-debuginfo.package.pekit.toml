@@ -3,7 +3,7 @@ name        = "dev.peios.authd-lps-debuginfo"
 description = "Peios local principal administration tool debugging symbols"
 
 [dependencies]
-"dev.peios.authd-lps" = "{{version}}"
+"dev.peios.authd-lps" = "= {{release}}"
 
 [files]
 "@source:LICENSE"               = "usr/share/licenses/dev.peios.authd-lps-debuginfo/LICENSE"
