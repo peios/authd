@@ -78,6 +78,13 @@ if versions != [expected]:
 # Stable DWARF names keep checkout and build-root paths out of the binaries.
 # Put broad mappings first so the more specific source/vendor mappings win.
 export RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }--remap-path-prefix=$PEKIT_WORKSPACE_ROOT=/usr/src/debug/dev.peios.authd/.workspace --remap-path-prefix=$PEKIT_OUT_BASE=/usr/src/debug/dev.peios.authd/.build --remap-path-prefix=$SRC=/usr/src/debug/dev.peios.authd --remap-path-prefix=$PEKIT_VENDOR_OUT/vendor=/usr/src/debug/dev.peios.authd/vendor"
+# Control-flow protection (PEI-1155). Peios' libstd is built with LLVM's CET
+# instrumentation (org.rust-lang.rust); stable rustc applies it to other
+# crates only under -Zcf-protection, so every crate here gets ENDBR landing
+# pads and the IBT/SHSTK property survives the link. The bootstrap escape
+# hatch is the one the Rust recipe itself uses for the same flag.
+export RUSTC_BOOTSTRAP=1
+RUSTFLAGS="$RUSTFLAGS -Zcf-protection=full"
 
 # The exact locked graph is exercised by the gated test target below.
 cargo build --release --locked --offline \
