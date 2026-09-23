@@ -5,6 +5,9 @@ side_effects = ["man-db"]
 [package]
 name         = "dev.peios.authd-login"
 description  = "Peios terminal logon originator"
+# The crate closure login links; build.main's collect-rust-licences --check
+# holds this to what those crates declare.
+license      = "((MIT OR Apache-2.0) AND Unicode-3.0) AND Apache-2.0 AND (Apache-2.0 OR MIT) AND BSD-3-Clause AND ISC AND MIT AND (MIT OR Unlicense)"
 
 
 
@@ -13,6 +16,7 @@ sh = "*"
 
 [files]
 "@source:LICENSE"                         = "usr/share/licenses/dev.peios.authd-login/LICENSE"
+":licenses/login/**"                       = "usr/share/licenses/dev.peios.authd-login/third-party"
 ":usr/bin/login"                           = "usr/bin/login"
 ":usr/share/man/man1/login.1.gz"           = "usr/share/man/man1/login.1.gz"
 ":usr/share/regim/login-console.reg"       = "usr/share/regim/login-console.reg"

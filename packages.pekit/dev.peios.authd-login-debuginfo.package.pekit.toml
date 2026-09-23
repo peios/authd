@@ -1,10 +1,13 @@
 [package]
 name        = "dev.peios.authd-login-debuginfo"
 description = "Peios terminal logon originator debugging symbols"
+# The same crate closure as login; checked by build.main.
+license     = "((MIT OR Apache-2.0) AND Unicode-3.0) AND Apache-2.0 AND (Apache-2.0 OR MIT) AND BSD-3-Clause AND ISC AND MIT AND (MIT OR Unlicense)"
 
 [dependencies]
 "dev.peios.authd-login" = "= {{release}}"
 
 [files]
 "@source:LICENSE"                 = "usr/share/licenses/dev.peios.authd-login-debuginfo/LICENSE"
+":licenses/login/**"              = "usr/share/licenses/dev.peios.authd-login-debuginfo/third-party"
 ":debug/login/usr/lib/debug/**"   = "usr/lib/debug"

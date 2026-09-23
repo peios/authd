@@ -4,10 +4,14 @@ side_effects = ["man-db"]
 [package]
 name         = "dev.peios.authd-lps"
 description  = "Peios local principal store administration tool"
+# The crate closure lps links; build.main's collect-rust-licences --check
+# holds this to what those crates declare.
+license      = "((MIT OR Apache-2.0) AND Unicode-3.0) AND Apache-2.0 AND (Apache-2.0 OR MIT) AND BSD-3-Clause AND ISC AND MIT AND (MIT OR Unlicense)"
 
 
 
 [files]
 "@source:LICENSE"                 = "usr/share/licenses/dev.peios.authd-lps/LICENSE"
+":licenses/lps/**"                 = "usr/share/licenses/dev.peios.authd-lps/third-party"
 ":usr/bin/lps"                     = "usr/bin/lps"
 ":usr/share/man/man1/lps.1.gz"         = "usr/share/man/man1/lps.1.gz"

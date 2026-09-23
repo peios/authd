@@ -1,10 +1,13 @@
 [package]
 name        = "dev.peios.authd-debuginfo"
 description = "Peios authentication authority debugging symbols"
+# The crate closure authd links; checked by build.main.
+license     = "((MIT OR Apache-2.0) AND Unicode-3.0) AND Apache-2.0 AND (Apache-2.0 OR MIT) AND BSD-3-Clause AND ISC AND MIT AND (MIT OR Unlicense)"
 
 [dependencies]
 "dev.peios.authd" = "= {{release}}"
 
 [files]
 "@source:LICENSE"                 = "usr/share/licenses/dev.peios.authd-debuginfo/LICENSE"
+":licenses/authd/**"              = "usr/share/licenses/dev.peios.authd-debuginfo/third-party"
 ":debug/authd/usr/lib/debug/**"   = "usr/lib/debug"

@@ -1,4 +1,4 @@
-#!/usr/bin/sh
+#!/bin/sh
 # Create the development account on a machine that has none.
 #
 # !! THIS ACCOUNT HAS NO CREDENTIAL AND IS AN ADMINISTRATOR. !!

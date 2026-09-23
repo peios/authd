@@ -1,10 +1,13 @@
 [package]
 name        = "dev.peios.authd-nss-debuginfo"
 description = "Peios NSS principal-resolution module debugging symbols"
+# The same crate closure as the module; checked by build.main.
+license     = "(Apache-2.0 OR MIT) AND MIT"
 
 [dependencies]
 "dev.peios.authd-nss" = "= {{release}}"
 
 [files]
 "@source:LICENSE"               = "usr/share/licenses/dev.peios.authd-nss-debuginfo/LICENSE"
+":licenses/nss/**"              = "usr/share/licenses/dev.peios.authd-nss-debuginfo/third-party"
 ":debug/nss/usr/lib/debug/**"   = "usr/lib/debug"
