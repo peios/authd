@@ -204,6 +204,11 @@ test -n "$(find "$DEBUG_ROOT" -type f -print -quit)"
 "dev.peios.kernel-headers"    = "*"
 
 [build.main.dependencies.apt]
+# The libpeios SDK and PKM UAPI headers come from the signed catalogue
+# (pkgs/_debroot_); Debian has no Peios ABI packages.
+"dev.peios.libpeios"       = "*"
+"dev.peios.libpeios-devel" = "*"
+"dev.peios.kernel-headers" = "*"
 dash         = "*"
 coreutils    = "*"
 findutils    = "*"
@@ -345,6 +350,9 @@ rm -f "$PEKIT_OUT/lps-help" "$PEKIT_OUT/login-out" "$PEKIT_OUT/login-err"
 "dev.peios.kernel-headers"    = "*"
 
 [test.dependencies.apt]
+"dev.peios.libpeios"       = "*"
+"dev.peios.libpeios-devel" = "*"
+"dev.peios.kernel-headers" = "*"
 dash         = "*"
 coreutils    = "*"
 findutils    = "*"
