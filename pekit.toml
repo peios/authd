@@ -112,7 +112,7 @@ collect_licences() {
   test -s "$LICENSE_ROOT/$out/crate-licenses.tsv"
 }
 collect_licences authd authd \
-  dev.peios.authd-debuginfo
+  dev.peios.authd dev.peios.authd-debuginfo
 collect_licences lpsd lpsd \
   dev.peios.authd-lpsd dev.peios.authd-lpsd-debuginfo
 collect_licences lps lps \
