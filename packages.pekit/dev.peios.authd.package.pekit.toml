@@ -5,11 +5,13 @@ side_effects = ["man-db"]
 [package]
 name         = "dev.peios.authd"
 description  = "Peios authentication authority - the PGSS Logon authority"
+license      = "((MIT OR Apache-2.0) AND Unicode-3.0) AND Apache-2.0 AND (Apache-2.0 OR MIT) AND BSD-3-Clause AND ISC AND MIT AND (MIT OR Unlicense)"
 
 
 
 [files]
 "@source:LICENSE"                      = "usr/share/licenses/dev.peios.authd/LICENSE"
+":licenses/authd/**"                   = "usr/share/licenses/dev.peios.authd/third-party"
 ":usr/sbin/authd"                       = "usr/sbin/authd"
 ":usr/share/man/man8/authd.8.gz"        = "usr/share/man/man8/authd.8.gz"
 ":usr/share/regim/authd-policy.reg"     = "usr/share/regim/authd-policy.reg"
