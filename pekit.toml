@@ -291,7 +291,7 @@ expected = {
     ],
     "lpsd-service.reg": ["SeChangeNotifyPrivilege"],
     "login-console.reg": [
-        "SeChangeNotifyPrivilege", "SeAssignPrimaryTokenPrivilege"
+        "SeChangeNotifyPrivilege", "SeAssignPrimaryTokenPrivilege", "SeTcbPrivilege"
     ],
     "lpsd-first-account.reg": ["SeChangeNotifyPrivilege"],
 }
