@@ -24,6 +24,10 @@ test -n "$(find "$PEKIT_OUT/vendor" -mindepth 1 -maxdepth 1 -type d -print -quit
 
 [build.vendor.dependencies.peipkg]
 "org.rust-lang.rust" = ">= 1.98.1"
+# Cargo fetches the pinned Git dependencies through the git CLI.
+"com.git-scm.git"    = ">= 2.55.0"
+"dev.peios.peiosutils" = "*"
+"org.gnu.findutils"  = "*"
 
 [build.vendor.dependencies.apt]
 cargo           = "*"
