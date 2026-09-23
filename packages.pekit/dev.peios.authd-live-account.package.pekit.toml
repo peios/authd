@@ -7,8 +7,8 @@ architecture = "noarch"
 description  = "Passwordless Peios live-image development account bootstrap"
 
 [dependencies]
-"dev.peios.authd-lpsd" = "{{version}}"
-"dev.peios.authd-lps"  = "{{version}}"
+"dev.peios.authd-lpsd" = "= {{release}}"
+"dev.peios.authd-lps"  = "= {{release}}"
 sh                       = "*"
 
 [files]

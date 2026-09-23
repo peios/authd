@@ -20,42 +20,6 @@
 # system, so an image that wants an authority without that reach must be able to
 # say so by not installing a package.
 
-# -11: drop the temporary BUILTIN\Administrators membership from every
-# attested service token (PEI-547). It existed only because a service could
-# reach no part of the filesystem: one inheritable ACL granted SYSTEM and
-# Administrators alone, and propagated through KACS's missing-SD synthesis into
-# the whole tree (PEI-546). With the root and phase-1 descriptors now granting
-# Everyone read and execute, a service reaches what it needs as itself. The
-# revert is the point: privileges union across a token's SIDs, so that ACE was
-# not granting filesystem access but the entire Administrators policy record --
-# SeLoadDriverPrivilege, SeRestorePrivilege, SeManageVolumePrivilege,
-# SeSecurityPrivilege and High integrity, on a DNS parser reading from a
-# network socket, invisibly, because svctl reports the declared identity.
-
-# -12: authd creates a principal's home directory at logon when the profile
-# names one and it is absent (PEI-560). Nothing did before -- lpsd records the
-# path and creates nothing, login treats a missing home as non-fatal and starts
-# the session in / -- so every account but the seeded administrator logged in
-# with nowhere to write. It cannot live in login, which has already assumed the
-# principal's token by the time it chdirs, and /home now grants Everyone
-# traverse but not create (fsbase 1.0.0-8). It self-scopes to human accounts:
-# a service identity is minted with Profile::default(), whose home is empty.
-
-# -13: authd stamps a descriptor on /run/ident.sock granting Everyone the right
-# to connect. The socket inherited SYSTEM and Administrators from /run -- whose
-# Everyone ACE is container-inherit only -- so no ordinary principal could reach
-# the name resolver, including for its own name (PEI-571). The 0o666 mode beside
-# the bind never applied: KACS raises CAP_DAC_OVERRIDE on every credential.
-
-# -14: the groups authd staples onto every token -- Everyone, Local, and the
-# logon type -- now reach the POSIX projection. The credentialled logon path
-# numbered only what the source asserted, so `Everyone`, which has carried gid
-# 100 in the well-known table from the start, was never on a token: `getgrgid`
-# resolved it and `getgroups` never returned it (PEI-206). The attested path
-# already numbered the token's own groups; both now do. `Local` (S-1-2-0) was
-# not in the table at all and is now 107, so it is numbered and nameable in
-# policy like the rest.
-
 format = "peipkg"
 
 [package]
