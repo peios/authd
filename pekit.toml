@@ -29,11 +29,6 @@ test -n "$(find "$PEKIT_OUT/vendor" -mindepth 1 -maxdepth 1 -type d -print -quit
 "dev.peios.peiosutils" = "*"
 "org.gnu.findutils"  = "*"
 
-[build.vendor.dependencies.apt]
-cargo           = "*"
-git             = "*"
-ca-certificates = "*"
-
 [build.main]
 needs = ["vendor"]
 command = '''
@@ -203,27 +198,6 @@ test -n "$(find "$DEBUG_ROOT" -type f -print -quit)"
 "dev.peios.libpeios-devel"    = "*"
 "dev.peios.kernel-headers"    = "*"
 
-[build.main.dependencies.apt]
-# The libpeios SDK and PKM UAPI headers come from the signed catalogue
-# (pkgs/_debroot_); Debian has no Peios ABI packages.
-"dev.peios.libpeios"       = "*"
-"dev.peios.libpeios-devel" = "*"
-"dev.peios.kernel-headers" = "*"
-dash         = "*"
-coreutils    = "*"
-findutils    = "*"
-grep         = "*"
-sed          = "*"
-gzip         = "*"
-cargo        = "*"
-rustc        = "*"
-gcc          = "*"
-pkg-config   = "*"
-libclang-dev = "*"
-binutils     = "*"
-debugedit    = "*"
-python3      = "*"
-
 [test]
 gate = true
 needs = ["main", "vendor"]
@@ -348,22 +322,3 @@ rm -f "$PEKIT_OUT/lps-help" "$PEKIT_OUT/login-out" "$PEKIT_OUT/login-err"
 "org.llvm.clang"              = ">= 22"
 "dev.peios.libpeios-devel"    = "*"
 "dev.peios.kernel-headers"    = "*"
-
-[test.dependencies.apt]
-"dev.peios.libpeios"       = "*"
-"dev.peios.libpeios-devel" = "*"
-"dev.peios.kernel-headers" = "*"
-dash         = "*"
-coreutils    = "*"
-findutils    = "*"
-grep         = "*"
-sed          = "*"
-gzip         = "*"
-cargo        = "*"
-rustc        = "*"
-gcc          = "*"
-pkg-config   = "*"
-libclang-dev = "*"
-binutils     = "*"
-debugedit    = "*"
-python3      = "*"
