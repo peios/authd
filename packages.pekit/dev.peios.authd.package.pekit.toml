@@ -16,3 +16,8 @@ license      = "((MIT OR Apache-2.0) AND Unicode-3.0) AND Apache-2.0 AND (Apache
 ":usr/share/man/man8/authd.8.gz"        = "usr/share/man/man8/authd.8.gz"
 ":usr/share/regim/authd-policy.reg"     = "usr/share/regim/authd-policy.reg"
 ":usr/share/regim/authd-service.reg"    = "usr/share/regim/authd-service.reg"
+# regman documentation for the two registry roots authd owns: the logon policy
+# under Generic, and its own principal-source allowlist. The seed above puts
+# values in the registry; this is what explains what one means. Hand-written
+# beside the recipe, so it comes from source with no build target involved.
+"@source:authd.regman"                  = "usr/share/regman/authd.regman"

@@ -1,0 +1,454 @@
+--- machine\generic\authn\policy
+canonical: Machine\Generic\Authn\Policy
+
+What this machine grants a principal. One subkey per principal, named by
+the principal; the values in it are that principal's whole authority.
+
+Keyed by principal rather than by privilege so that **one key shows the
+totality of what somebody may do**. Authority scattered across twenty
+values is authority nobody audits: a privilege granted somewhere
+unexpected does not surface when you look at the principal, and you would
+have to know to check every other place.
+
+Under `Generic` rather than `Software\Authd` because this is Peios policy
+about what a logon means, not configuration belonging to one authority's
+implementation. Another authority would read the same key.
+
+**If the key exists, the key is the whole answer.** There is no per-value
+merge with a compiled table. Either the key is absent — an unconfigured
+machine, which falls back to a compiled floor so it still boots and still
+logs in — or the key exists and nothing compiled contributes anything to
+privileges.
+
+That rule is deliberate, and the alternative was rejected on security
+grounds: an administrator who writes `Administrators` = `SeBackup`
+believing they have locked the machine down would, under a merge, still be
+handing out whatever a table they never saw said for every principal they
+did not mention. A partial policy instead makes things stop working, which
+is an availability failure — worse to hit, far better to diagnose.
+
+The floor grants `SeChangeNotifyPrivilege` to `Everyone` and nothing else:
+without it a process cannot traverse a directory to reach a file, so a
+machine whose policy was never seeded still starts a shell, with no
+administrative power whatsoever. On any seeded machine the key exists, so
+the floor is inert by construction.
+
+**Present but unreadable is not absent.** A descriptor that locked authd
+out, or a damaged hive, grants nothing rather than falling back to the
+floor — treating it as absent would silently restore every privilege an
+administrator had deliberately removed, at the one moment nobody can
+check.
+
+authd reads at most 256 records and warns past that; it is a bound on work
+per logon, not a policy limit.
+
+Default security: inherits the Machine hive root (SYSTEM and
+Administrators full, Authenticated Users read). That descriptor is the
+only gate on changing what this machine grants.
+
+--- machine\generic\authn\policy deniedprivileges
+canonical: Machine\Generic\Authn\Policy DeniedPrivileges
+type: REG_MULTI_SZ
+default: (none)
+valid: privilege names; an unknown name is dropped with a warning
+applies: next logon
+
+Privileges no principal may hold, whatever any record says.
+
+The lockdown knob. Privileges union across every SID on a token, so
+without this, denying something means finding and editing every record
+that grants it. This is applied **last**, after the union, so it is one
+edit that no record you have not read can defeat.
+
+It sits on the parent key rather than in a record so it cannot collide
+with a principal who happens to be called `Denied`.
+
+--- machine\generic\authn\policy logonsocketdescriptor
+canonical: Machine\Generic\Authn\Policy LogonSocketDescriptor
+type: REG_SZ
+default: O:SYG:SYD:P(A;;GA;;;SY)(A;;GA;;;BA)
+valid: SDDL; a malformed value falls back to the built-in
+applies: restart
+
+Who may reach `/run/logon.sock`, as SDDL.
+
+The outer gate on originating a logon — asking authd to authenticate
+somebody else. The compiled default admits SYSTEM (which is what the
+built-in `login` runs as) and Administrators. Widening it is genuinely
+site policy: a graphical greeter, a web console, a remote access daemon.
+
+**Widening the socket alone changes nothing.** The descriptor decides who
+may connect; `LogonTypes` on that peer's own record decides what they may
+then ask for, and a peer with no record may originate nothing. Both edits
+are needed, which is the point — the socket is not the grant.
+
+Read once at start and applied when the socket is bound, so a change needs
+a restart. Rereading it per logon would only misreport what is actually in
+force on the socket.
+
+authd's other two sockets are not configurable here. `/run/psi.sock` is
+authd's own protocol and its requirement is authd's to state;
+`/run/ident.sock` admits everyone a connect needs, because a service
+account that cannot resolve its own name is worse than useless. All three
+are protected, so `/run`'s inheritance can neither widen nor narrow them.
+
+--- machine\generic\authn\policy\<principal>
+canonical: Machine\Generic\Authn\Policy\<principal>
+
+One principal's authority. The key name is the principal, and every value
+in it is optional — absent means "this record does not speak to that",
+which is not the same as "none".
+
+The name is a bare well-known name — `Everyone`, `Administrators`,
+`Users`, `SYSTEM`, `Local Service`, `Network Service`, `Authenticated
+Users`, `Guests`, `Anonymous`, `Local`, `Domain Admins`, or a logon-type
+name (`Interactive`, `Network`, `Batch`, `Service`) — or a literal SID.
+Matching is case-insensitive. `BUILTIN\Administrators` is unrepresentable,
+because a backslash is the registry's path separator.
+
+A name that is neither is **ignored with a warning** rather than silently
+applying to nobody. Resolution happens once, up front, precisely so a
+mistyped principal is visible instead of sitting in the key looking
+authoritative forever.
+
+A record applies when the token carries that SID — as the user or as any
+group, including the ones authd derives: `Everyone`, `Authenticated
+Users`, `Local`, and the logon-type SID. So policy can be written against
+how a logon happened, not only who it was.
+
+**How records compose differs per value**, because the values are
+different kinds of thing:
+
+- `Privileges` is a set, so it **unions** across every applicable record.
+- `Integrity` is a single number that has to be chosen: the user's own
+  record wins outright, otherwise the maximum across their groups.
+- `Owner` and `DefaultDacl` are single values with no ordering: the user's
+  own record wins, otherwise a group may name one, and two groups
+  disagreeing falls back rather than picking arbitrarily.
+- `LogonTypes` is consulted with the peer's user SID **alone** — no group
+  union at all.
+
+Precedence is per value, not per record. A user record that sets
+`Privileges` but no `Integrity` does not suppress the group computation
+for integrity; it simply does not speak to it.
+
+A service's own record is how a daemon gets authority nothing else has: a
+service token carries an `S-1-5-80` SID derived from the service name, so
+a record named for it grants that service alone rather than everything
+running as `LocalService`.
+
+--- machine\generic\authn\policy\<principal> privileges
+canonical: Machine\Generic\Authn\Policy\<principal> Privileges
+type: REG_MULTI_SZ
+default: (absent — this record grants no privileges)
+valid: Se...Privilege names; unknown names dropped with a warning
+applies: next logon
+
+The privileges this principal is granted, present and enabled on the
+token.
+
+Enabled, not merely present: a privilege a caller had to switch on before
+it worked would be a grant in name only.
+
+These **union** across every record the token matches, then
+`DeniedPrivileges` is subtracted. An empty list grants nothing; an absent
+value means this record does not speak to privileges.
+
+An unknown name is dropped with a warning rather than failing the whole
+list. The names are an ABI vocabulary that grows, so a policy written for
+a newer Peios can legitimately mention a privilege this build cannot name,
+and refusing the whole record would take away the privileges the
+administrator did spell correctly. Dropping one grants strictly less,
+which is the safe direction for a grant — but it also means a typo costs
+you that privilege silently, so check the log after an edit.
+
+`SeCreateTokenPrivilege`, `SeTcbPrivilege` and
+`SeAssignPrimaryTokenPrivilege` belong to the TCB and should never appear
+here; granting them makes every other control on this key decorative.
+
+--- machine\generic\authn\policy\<principal> integrity
+canonical: Machine\Generic\Authn\Policy\<principal> Integrity
+type: REG_SZ or REG_DWORD
+default: Medium (compiled in unconditionally)
+valid: Untrusted, Low, Medium, High, System — or any DWORD
+applies: next logon
+
+The integrity level this principal's token carries.
+
+Both spellings are accepted because they do different jobs: the tier name
+is the readable form of the common case, and a raw number reaches levels
+no name can express, since the kernel compares integrity numerically and
+any value is legal. Names match case-insensitively; an unrecognised name
+warns and falls back to the default.
+
+Unlike privileges, the default is compiled in **unconditionally** rather
+than coming from the floor — a level is not a grant, and every token must
+carry one to be valid, so "the key exists" cannot be allowed to mean "mint
+at Untrusted".
+
+The composition rule has a consequence worth knowing in advance: **a group
+cannot impose an integrity floor on a member.** The user's own record wins
+outright, so if `Administrators` names High and a member's own record
+names Low, that member gets Low. That is what makes lowering a single
+principal possible at all without a second mechanism.
+
+--- machine\generic\authn\policy\<principal> owner
+canonical: Machine\Generic\Authn\Policy\<principal> Owner
+type: REG_SZ
+default: (absent — the principal owns what they create)
+valid: a well-known name or a SID; unresolvable warns and is ignored
+applies: next logon
+
+Which principal owns the objects this token creates.
+
+The case it exists for is "objects created by administrators are owned by
+`Administrators`" rather than by the individual, which is why a group
+record may name one.
+
+Named rather than indexed, deliberately: the token field is an index into
+the token's own SID array, a number only authd can compute and one that
+would mean something different on the next logon.
+
+Two groups naming **different** owners is a misconfiguration, and it falls
+back to the principal themselves with a warning rather than picking one —
+group records have no order, and registry enumeration order is not
+something policy should depend on. Two naming the same owner is not a
+conflict.
+
+--- machine\generic\authn\policy\<principal> defaultdacl
+canonical: Machine\Generic\Authn\Policy\<principal> DefaultDacl
+type: REG_SZ
+default: (absent — the kernel's own default applies)
+valid: SDDL; a malformed value warns and is ignored
+applies: next logon
+
+The DACL objects this token creates inherit when nothing else supplies
+one.
+
+SDDL rather than raw bytes because this has to be **auditable**. The whole
+argument for policy living in the registry is that an operator can read
+it, and a binary ACL in a policy key is exactly the thing nobody checks.
+
+One trap, and it is the reason the shipped seed looks the way it does: the
+kernel copies a default DACL onto a new object **verbatim**, so a
+`CREATOR OWNER` placeholder is never substituted and would name nobody.
+Grant the owner through `OWNER RIGHTS` (`S-1-3-4`) instead. The seed ships
+`D:(A;;GA;;;S-1-3-4)(A;;GA;;;SY)(A;;GA;;;BA)` on `Everyone` for exactly
+this reason.
+
+A malformed value is dropped rather than failing the logon, so a typo
+costs the customisation and not the session — but the result is a token
+with no default DACL, and an object it creates with no parent to inherit
+from then gets a **null** DACL. Check the log after editing this one.
+
+Same precedence as `Owner`: the user's own record wins, otherwise a group
+may name one, and two groups disagreeing falls back to none.
+
+--- machine\generic\authn\policy\<principal> logontypes
+canonical: Machine\Generic\Authn\Policy\<principal> LogonTypes
+type: REG_MULTI_SZ
+default: (absent — this principal may originate nothing)
+valid: six logon-type names (below); unknown names dropped with a warning
+applies: next logon
+
+The logon types this principal may **originate** — ask authd to perform on
+behalf of somebody else, over `/run/logon.sock`.
+
+Valid names in full: `Interactive`, `Network`, `Batch`, `Service`,
+`NetworkCleartext`, `NewCredentials`. An unknown name is dropped with a
+warning, on the same reasoning as `Privileges`.
+
+The other half of "client proposes, authority constrains". This is the
+machine's statement about the **asker**, distinct from the per-principal
+logon types a source asserts about the account being signed in. A
+graphical greeter gets `Interactive`, a web console `Network`, and neither
+can mint itself a console-shaped token by proposing a different type.
+
+Consulted with the socket peer's user SID and **nothing else** — no group
+union. Origination is checked before any token exists, so there is no
+final SID set to evaluate against, and a right this consequential should
+be granted by name rather than assembled from memberships nobody stated
+together.
+
+SYSTEM may originate anything without a record. For everybody else, no
+record or no value means **nothing**: an absent value and an explicitly
+empty list are both refusals here, and the distinction that matters
+elsewhere does not apply.
+
+--- machine\software\authd
+canonical: Machine\Software\Authd
+
+authd's own configuration, as distinct from the policy it enforces.
+
+One subkey today: `Sources`, the allowlist of principal sources. What a
+logon means — privileges, integrity, who may originate one — is not
+here; it lives under `Machine\Generic\Authn\Policy`, because that is Peios
+policy any authority would read rather than authd's implementation.
+
+--- machine\software\authd\sources
+canonical: Machine\Software\Authd\Sources
+
+Which principal sources may register with authd, and what each is trusted
+to say. One subkey per source.
+
+**A subkey's name is the allowlist entry.** `Sources\lpsd` says "a service
+named lpsd may register as a principal source", and authd checks that by
+deriving lpsd's service SID and requiring the connecting peer's token to
+carry it. So `reg ls` on this key answers "what may assert identity on
+this machine?" exactly, with no second list anywhere to drift out of step.
+
+**An empty or absent key means no source may register.** An absent
+policy value means "use the documented default"; an absent allowlist
+must mean "nobody", because an allowlist that fails open is not an
+allowlist. The cost is that an image shipping no seed cannot authenticate
+anyone — which is the correct way for that mistake to present.
+
+authd considers at most 64 entries and warns past that; it is a bound on
+work done for an unauthenticated connection, not a policy limit.
+
+Default security: inherits the Machine hive root (SYSTEM and
+Administrators full, Authenticated Users read). Write access here is the
+power to decide who may vouch for identity on this machine.
+
+--- machine\software\authd\sources\<source>
+canonical: Machine\Software\Authd\Sources\<source>
+
+One principal source. The key name is the service name, and it is the
+allowlist entry itself — the values inside only narrow what that source
+may then say.
+
+authd derives the service SID from this name and requires the connecting
+peer to carry it. The name is taken from the registry and never from the
+connecting process, so a source proves nothing by asserting it: peinit
+already did, by minting the token. A name whose service SID cannot be
+derived is ignored with a warning.
+
+Every value below is optional. The standard local source, seeded by lpsd's
+package as `Sources\lpsd`, sets `MayAssertForeignMemberships`,
+`UnixIDBase` and `UnixIDCount`.
+
+--- machine\software\authd\sources\<source> searchorder
+canonical: Machine\Software\Authd\Sources\<source> SearchOrder
+type: REG_DWORD
+default: 1000
+valid: any; lower is consulted first
+applies: next registration
+
+Where this source sits when authd resolves a name nobody qualified.
+
+This is the value that decides who `jack` is on a machine with more than
+one source. It is deliberately explicit: resolving in registration order
+would let a slow disk change which principal a name refers to, and two
+components disagreeing about that is a confused deputy rather than a
+cosmetic inconsistency.
+
+Sources sharing a value are ordered by name, so the result never depends
+on which registered first. The default is mid-range so a source can be
+configured either side of it without renumbering the ones already there.
+
+A value that is not a REG_DWORD warns and resolves at the default.
+
+--- machine\software\authd\sources\<source> domain
+canonical: Machine\Software\Authd\Sources\<source> Domain
+type: REG_SZ
+default: (absent — unpinned, which is not unrestricted)
+valid: a SID; malformed means this source cannot register
+applies: next registration
+
+Pins the domain this source is permitted to declare.
+
+A source declares the domain it is authoritative for when it registers,
+and authd confines every identity it asserts to that domain. The
+declaration is a claim — a source generates its own domain, so nothing
+about the SID can prove the claim honest — and this value is how a site
+states what the answer must be.
+
+Absent means unpinned, **not** unrestricted: authd still requires the
+domain to be a claimable shape, to not collide with another registered
+source's, and to be the same on re-registration.
+
+A malformed value is deliberately not treated as absent. Absence means "no
+pin"; an unparseable value means an administrator tried to write one and
+got it wrong, and quietly downgrading that to "unpinned" would remove the
+control they were applying, silently, at the moment they applied it.
+Instead the source is pinned to the Null SID, which nothing can satisfy,
+so it simply cannot register.
+
+**authd never writes this.** Pinning on first registration would need the
+process holding `SeCreateTokenPrivilege` to hold a registry write handle;
+having the source write it would be the lower-trust party writing into the
+key that governs what it may do.
+
+--- machine\software\authd\sources\<source> unixidbase
+canonical: Machine\Software\Authd\Sources\<source> UnixIDBase
+type: REG_DWORD
+default: (absent — no range, so principals project to nobody)
+valid: 1000000 or above; below that is refused
+applies: next registration
+
+The bottom of this source's Unix ID range.
+
+authd adds it to every relative id the source asserts, so with a base of
+1,000,000 the source's first principal — number 1 — projects to uid
+1,000,001. A source never learns its own base, so rebasing is a registry
+edit rather than a rewrite of every record the source holds.
+
+Everything below 1,000,000 belongs to authd: the well-known SIDs, and the
+service and confinement SIDs numbered out of that band. A base below it is
+refused, which is the numeric half of the same confinement as the domain
+pin — it is why a source cannot reach **uid 0**.
+
+**Absent means no range, and no range means `nobody`.** Every principal
+from an unconfigured source projects to 65534. That is the safe direction:
+65534 grants nothing, where assuming a base would put two sources on the
+same numbers the moment a second one existed.
+
+A malformed or unusable value is treated as absent rather than as a
+refusal — a range is a grant, so discarding it grants strictly less.
+
+--- machine\software\authd\sources\<source> unixidcount
+canonical: Machine\Software\Authd\Sources\<source> UnixIDCount
+type: REG_DWORD
+default: 1000000
+valid: 1 or more; base + count must not overflow
+applies: next registration
+
+How many ids this source's range spans.
+
+Not decoration: a source asserts relative numbers, so without a ceiling
+a large enough one would land inside the next source's range. A relative
+id at or past the count is refused rather than wrapped or clamped —
+clamping would silently put two principals on one number.
+
+A value that is not a REG_DWORD warns and the default is used. A range
+that is unusable as a whole (empty, or overflowing) is treated as no range
+at all, so the source's principals project to `nobody`.
+
+--- machine\software\authd\sources\<source> mayassertforeignmemberships
+canonical: Machine\Software\Authd\Sources\<source> MayAssertForeignMemberships
+type: REG_DWORD
+default: 0
+valid: non-zero to set; absent or 0 is off
+applies: next registration
+
+Lifts the cross-reference restriction on the group memberships this
+source may assert.
+
+An ordinary source may only assert groups in the same domain as the
+principal it just authenticated: a directory vouches for its own users and
+its own groups, and nothing else. The local source is different in kind —
+it is authoritative for local group membership of any principal,
+including domain ones, which is what makes "`CORP\Domain Admins` is in
+`BUILTIN\Administrators`" a local record rather than something a domain
+controller can assert at you.
+
+**Memberships only, never identity.** A source with this set still may not
+be the authority on who someone is outside its own domain, and the
+distinction is not academic: the local source holds no domain credential,
+so an identity-unrestricted local source could hand a domain identity to
+anyone who knew a local password. Confining identity keeps a compromise
+at "administrator of this machine" rather than "any principal in the
+forest".
+
+This grants a permission rather than restoring a default, so silence means
+no: absent, zero, or a value that is not a REG_DWORD all leave it off.
