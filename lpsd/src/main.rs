@@ -113,6 +113,12 @@ const MAX_CONVERSATIONS: usize = 256;
 
 /// What lpsd remembers between asking and being answered.
 enum Pending {
+    Ssh {
+        binding: libauthd::ssh::Binding,
+        generation: Option<(u32, u64)>,
+        credential_ref: u32,
+        submissions: u8,
+    },
     /// A logon, waiting for its password.
     Logon {
         /// The identifier authd passed through. Held so the answer is verified
@@ -300,18 +306,6 @@ fn wait(stream: &UnixStream, listener: &UnixListener) -> io::Result<Ready> {
 fn open_store() -> Result<Store, StoreError> {
     let path = Path::new(store::STORE_PATH);
     if let Some(store) = Store::load(&RealFs, path)? {
-        // A store written by an older lpsd was upgraded on the way in. Write it
-        // back now rather than on the first administrative change, so the
-        // upgrade is not silently redone on every boot until somebody happens
-        // to run `lps` — and so a failure to persist it surfaces here, where it
-        // can be read as an upgrade problem, rather than as a mysteriously
-        // failing unrelated command later.
-        if store.needs_rewrite() {
-            log::info(format_args!(
-                "the store is in an older format; rewriting it in the current one"
-            ));
-            store.save(&RealFs, path)?;
-        }
         return Ok(store);
     }
 
@@ -647,21 +641,58 @@ fn begin(
         );
     }
 
-    // What this principal needs, before anything is collected. Only two answers
-    // come back, and neither separates "exists" from "does not exist" — see
+    if pending.contains_key(&conversation) {
+        return Err(io::Error::other("reused conversation"));
+    }
+    if let Some(binding) = &request.start.ssh_binding {
+        if request.start.required_credential_type != Some(CredentialType::SshPublicKey) {
+            return refuse(
+                stream,
+                conversation,
+                Denial::AuthenticationFailed,
+                "Authentication failed.",
+            );
+        }
+        pending.insert(
+            conversation,
+            Pending::Ssh {
+                binding: binding.clone(),
+                generation: store.credential_generation(&request.start.identifier),
+                credential_ref: 1,
+                submissions: 0,
+            },
+        );
+        return ask_key(stream, conversation, 1, 0);
+    }
+    // What this principal needs, before anything is collected. Unknown and
+    // disabled principals follow the decoy password path — see
     // `Store::credential_requirement`.
     match store.credential_requirement(&request.start.identifier) {
+        store::CredentialRequirement::Unavailable => refuse(
+            stream,
+            conversation,
+            Denial::AuthenticationFailed,
+            "Authentication failed.",
+        ),
         // Nothing to collect. Assert straight away: the relay carries an
         // assertion on the first inbound perfectly well (PGSS Logon §4.1 —
         // "a client that supports nothing … an authority MUST either complete
         // the logon without prompting or deny it"), so no prompt is ever
         // rendered and the client shows nothing.
         store::CredentialRequirement::None(identity) => {
+            if request.start.required_credential_type.is_some() {
+                return refuse(
+                    stream,
+                    conversation,
+                    Denial::AuthenticationFailed,
+                    "Authentication failed.",
+                );
+            }
             log::info(format_args!(
                 "asserting {} without a credential",
                 identity.name
             ));
-            assert_identity(stream, conversation, &identity, unix_id_count)
+            assert_identity(stream, conversation, &identity, unix_id_count, None)
         }
 
         store::CredentialRequirement::Password => {
@@ -743,6 +774,8 @@ fn ask(stream: &UnixStream, conversation: u64, identifier: &[u8]) -> io::Result<
             text: format!("Logging in as {}", displayable(identifier)),
         }],
         prompts: vec![Prompt {
+            parameters: Vec::new(),
+
             credential_ref: PASSWORD_REF,
             credential_type: CredentialType::Password,
             credential_name: "Password".into(),
@@ -787,6 +820,74 @@ fn answer(
     };
 
     match state {
+        Pending::Ssh {
+            binding,
+            generation,
+            credential_ref,
+            submissions,
+        } => {
+            if response.answers.len() != 1
+                || response.answers[0].credential_ref != credential_ref
+                || submissions >= 16
+            {
+                return refuse(
+                    stream,
+                    conversation,
+                    Denial::AuthenticationFailed,
+                    "Authentication failed.",
+                );
+            }
+            let Ok(offer) = libauthd::ssh::Offer::decode(response.answers[0].data.expose()) else {
+                return refuse(
+                    stream,
+                    conversation,
+                    Denial::AuthenticationFailed,
+                    "Authentication failed.",
+                );
+            };
+            if generation != store.credential_generation(binding.username.as_bytes()) {
+                return refuse(
+                    stream,
+                    conversation,
+                    Denial::AuthenticationFailed,
+                    "Authentication failed.",
+                );
+            }
+            if offer.signature.is_empty() {
+                let accepted = store.key_eligible(binding.username.as_bytes(), &offer);
+                let next_ref = credential_ref + 1;
+                pending.insert(
+                    conversation,
+                    Pending::Ssh {
+                        binding,
+                        generation,
+                        credential_ref: next_ref,
+                        submissions: submissions + 1,
+                    },
+                );
+                ask_key(stream, conversation, next_ref, if accepted { 1 } else { 2 })
+            } else if let Some(identity) = store.authenticate_key(&binding, &offer, generation) {
+                log::info(format_args!(
+                    "SSH key authenticated {} key={}",
+                    identity.name,
+                    ssh::fingerprint(&offer.key).unwrap_or_default()
+                ));
+                assert_identity(
+                    stream,
+                    conversation,
+                    &identity,
+                    unix_id_count,
+                    Some(CredentialType::SshPublicKey),
+                )
+            } else {
+                refuse(
+                    stream,
+                    conversation,
+                    Denial::AuthenticationFailed,
+                    "Authentication failed.",
+                )
+            }
+        }
         Pending::Logon { identifier } => answer_logon(
             stream,
             store,
@@ -838,7 +939,13 @@ fn answer_logon(
                 identity.sid,
                 identity.groups.len()
             ));
-            assert_identity(stream, conversation, &identity, unix_id_count)
+            assert_identity(
+                stream,
+                conversation,
+                &identity,
+                unix_id_count,
+                Some(CredentialType::Password),
+            )
         }
         None => {
             // One log line for both "no such principal" and "wrong password".
@@ -1118,6 +1225,8 @@ fn send_request(
         prompts: prompts
             .iter()
             .map(|(credential_ref, name)| Prompt {
+                parameters: Vec::new(),
+
                 credential_ref: *credential_ref,
                 credential_type: CredentialType::Password,
                 credential_name: (*name).to_string(),
@@ -1171,6 +1280,7 @@ fn assert_identity(
     conversation: u64,
     identity: &store::Identity,
     unix_id_count: u32,
+    credential: Option<CredentialType>,
 ) -> io::Result<()> {
     let confined = |unix_id: u32| {
         if unix_id != 0 && unix_id >= unix_id_count {
@@ -1187,6 +1297,8 @@ fn assert_identity(
     let message = psi::encode_assertion(
         conversation,
         &psi::Assertion {
+            authenticated_credential_type: credential,
+
             user_sid: identity.sid.as_ref().as_bytes().to_vec(),
             canonical_name: identity.name.clone(),
             groups: identity
@@ -1576,4 +1688,27 @@ mod tests {
         assert!(h.authenticates("jack", b"old"));
         assert!(!h.authenticates("jack", b"new"));
     }
+}
+
+mod ssh;
+
+fn ask_key(
+    stream: &UnixStream,
+    conversation: u64,
+    credential_ref: u32,
+    disposition: u8,
+) -> io::Result<()> {
+    let request = CredentialRequest {
+        messages: Vec::new(),
+        prompts: vec![Prompt {
+            credential_ref,
+            credential_type: CredentialType::SshPublicKey,
+            credential_name: "SSH public key".into(),
+            parameters: libauthd::ssh::disposition(disposition)
+                .map_err(|_| io::Error::other("invalid probe disposition"))?,
+        }],
+    };
+    let encoded = psi::encode_credential_request(conversation, &request)
+        .map_err(|_| io::Error::other("could not encode key prompt"))?;
+    send_message(stream, &encoded)
 }

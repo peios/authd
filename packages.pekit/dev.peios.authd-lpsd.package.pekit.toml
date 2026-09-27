@@ -7,7 +7,7 @@ name         = "dev.peios.authd-lpsd"
 description  = "Peios local principal source daemon and identity database"
 # The crate closure lpsd links; build.main's collect-rust-licences --check
 # holds this to what those crates declare.
-license      = "((MIT OR Apache-2.0) AND Unicode-3.0) AND Apache-2.0 AND (Apache-2.0 OR MIT) AND BSD-3-Clause AND ISC AND MIT AND (MIT OR Unlicense)"
+license      = "((MIT OR Apache-2.0) AND Unicode-3.0) AND Apache-2.0 AND (Apache-2.0 OR BSD-2-Clause OR MIT) AND (Apache-2.0 OR MIT) AND BSD-3-Clause AND ISC AND MIT AND (MIT OR Unlicense)"
 
 
 

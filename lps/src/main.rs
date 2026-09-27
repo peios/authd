@@ -62,6 +62,10 @@ usage: lps <command> [arguments]
   remove <name>               delete a principal
   enable <name>               allow it to log on
   disable <name>              refuse it, keeping the account
+  key list <name>             list public keys and credential policy
+  key add <name> <file> [label] enroll an SSH public key (does not change policy)
+  key remove <name> <id>      remove an enrolled key
+  policy <name> <mode>        password, key, either, none, or denied
   password <name>             set a principal's password
 
   set <name> [options]        change a principal's profile
@@ -129,6 +133,11 @@ fn run(arguments: &[&str]) -> Result<(), Failed> {
             Ok(())
         }
 
+        ["key", "list", name] => key_list(name),
+        ["key", "add", name, path] => key_add(name, path, ""),
+        ["key", "add", name, path, label] => key_add(name, path, label),
+        ["key", "remove", name, id] => key_remove(name, id),
+        ["policy", name, mode] => credential_policy(name, mode),
         ["list"] => list(),
         ["show", name] => show(name),
         ["domain"] => domain(),
@@ -259,7 +268,10 @@ fn set(name: &str, options: &[&str]) -> Result<(), Failed> {
     }
 
     if profile.home.is_some() || profile.shell.is_some() || profile.display_name.is_some() {
-        simple(lps::encode_set_profile(&profile), &format!("updated {name}"))?;
+        simple(
+            lps::encode_set_profile(&profile),
+            &format!("updated {name}"),
+        )?;
     }
     if let Some(group) = primary_group {
         simple(
@@ -500,4 +512,72 @@ mod tests {
             Failed::Refused(_) => panic!("a missing value is a usage error"),
         }
     }
+}
+
+fn key_list(name: &str) -> Result<(), Failed> {
+    let mut session = Session::open()?;
+    let reply = session.request(&encode(lps::encode_key_request(&lps::KeyRequest::List {
+        name: name.into(),
+    }))?)?;
+    let (policy, keys) = session.expect(lps::decode_keys(reply.expose()))?;
+    println!("Policy: {policy:?}");
+    for key in keys {
+        let id: String = key.id.iter().map(|b| format!("{b:02x}")).collect();
+        println!("{id} {} {} {}", key.fingerprint, key.created, key.label);
+    }
+    Ok(())
+}
+fn key_add(name: &str, path: &str, label: &str) -> Result<(), Failed> {
+    use std::io::Read;
+    let mut public_key = String::new();
+    std::fs::File::open(path)
+        .and_then(|f| f.take(16385).read_to_string(&mut public_key))
+        .map_err(|e| Failed::Refused(e.to_string()))?;
+    simple(
+        lps::encode_key_request(&lps::KeyRequest::Add {
+            name: name.into(),
+            public_key,
+            label: label.into(),
+        }),
+        "key enrolled; credential policy unchanged",
+    )
+}
+fn key_remove(name: &str, text: &str) -> Result<(), Failed> {
+    if text.len() != 32 || !text.is_ascii() {
+        return Err(Failed::Usage("key ID must be 32 hexadecimal digits".into()));
+    }
+    let mut id = [0; 16];
+    for (i, b) in id.iter_mut().enumerate() {
+        *b = u8::from_str_radix(&text[i * 2..i * 2 + 2], 16)
+            .map_err(|_| Failed::Usage("invalid key ID".into()))?;
+    }
+    simple(
+        lps::encode_key_request(&lps::KeyRequest::Remove {
+            name: name.into(),
+            id,
+        }),
+        "key removed",
+    )
+}
+fn credential_policy(name: &str, mode: &str) -> Result<(), Failed> {
+    use libauthd::credential::Policy;
+    let policy = match mode {
+        "password" => Policy::Password,
+        "key" => Policy::SshPublicKey,
+        "either" => Policy::PasswordOrKey,
+        "none" => Policy::NoCredential,
+        "denied" => Policy::Denied,
+        _ => {
+            return Err(Failed::Usage(
+                "policy must be password, key, either, none, or denied".into(),
+            ));
+        }
+    };
+    simple(
+        lps::encode_key_request(&lps::KeyRequest::Policy {
+            name: name.into(),
+            policy,
+        }),
+        "credential policy updated",
+    )
 }

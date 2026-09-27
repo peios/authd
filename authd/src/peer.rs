@@ -24,7 +24,13 @@ use crate::policy::SourceEntry;
 /// user from an unauthenticated process running as the same UID, and carries
 /// none of the token's SIDs, groups, integrity or privileges.
 pub fn identity(stream: &UnixStream) -> peios::Result<Sid> {
-    Token::open_peer(stream.as_fd())?.user()
+    let token = Token::open_peer(stream.as_fd())?;
+    // Restricting a SYSTEM token must not retain authority to originate logons.
+    // Socket admission and the user SID alone are insufficient for this check.
+    if !token.restricted_sids()?.is_empty() {
+        return Err(peios::Error::from_raw_os_error(libc::EACCES));
+    }
+    token.user()
 }
 
 /// Whether a principal is the local SYSTEM account.
@@ -115,13 +121,51 @@ pub fn identify_source(
     stream: &UnixStream,
     configured: &[SourceEntry],
 ) -> Result<SourceEntry, NotASource> {
-    let groups = Token::open_peer(stream.as_fd())
-        .and_then(|token| token.groups())
-        .map_err(NotASource::Unidentifiable)?;
+    let token = Token::open_peer(stream.as_fd()).map_err(NotASource::Unidentifiable)?;
+    if !token
+        .restricted_sids()
+        .map_err(NotASource::Unidentifiable)?
+        .is_empty()
+    {
+        return Err(NotASource::NotConfigured);
+    }
+    let groups = token.groups().map_err(NotASource::Unidentifiable)?;
 
     configured
         .iter()
-        .find(|entry| groups.iter().any(|(sid, _)| *sid == entry.service_sid))
+        .find(|entry| {
+            groups.iter().any(|(sid, attrs)| {
+                let attrs = peios::security::GroupAttributes::from_bits_retain(*attrs);
+                *sid == entry.service_sid
+                    && attrs.contains(peios::security::GroupAttributes::ENABLED)
+                    && !attrs.contains(peios::security::GroupAttributes::USE_FOR_DENY_ONLY)
+            })
+        })
         .cloned()
         .ok_or(NotASource::NotConfigured)
+}
+
+/// Only the SYSTEM SSH monitor's enabled service identity can bind proofs.
+/// The service SID is read from the socket token, never supplied by the peer.
+pub fn ssh_originator(stream: &UnixStream) -> bool {
+    use peios::security::GroupAttributes;
+    let Ok(token) = Token::open_peer(stream.as_fd()) else {
+        return false;
+    };
+    if !token.restricted_sids().is_ok_and(|sids| sids.is_empty())
+        || !token.user().is_ok_and(|sid| is_system(&sid))
+    {
+        return false;
+    }
+    let Some(service) = crate::service_sid::of("sshd") else {
+        return false;
+    };
+    token.groups().is_ok_and(|groups| {
+        groups.iter().any(|(sid, attrs)| {
+            *sid == service
+                && GroupAttributes::from_bits_retain(*attrs).contains(GroupAttributes::ENABLED)
+                && !GroupAttributes::from_bits_retain(*attrs)
+                    .contains(GroupAttributes::USE_FOR_DENY_ONLY)
+        })
+    })
 }

@@ -208,6 +208,9 @@ mod tests {
 
     fn start() -> LogonStart {
         LogonStart {
+            required_credential_type: None,
+            ssh_binding: None,
+
             logon_type: LogonType::Interactive,
             identifier_type: IdentifierType::Username,
             identifier: b"jack".to_vec(),
@@ -244,7 +247,9 @@ mod tests {
         send_message(&a, &message).expect("send");
         let received = recv_message(&psi::FRAMING, &b).expect("recv");
         assert_eq!(
-            psi::decode_envelope(received.expose()).unwrap().conversation,
+            psi::decode_envelope(received.expose())
+                .unwrap()
+                .conversation,
             9
         );
         assert_eq!(
@@ -272,7 +277,11 @@ mod tests {
         // Any descriptor will do; a socketpair end is convenient and cheap.
         let (pipe_r, _pipe_w) = UnixStream::pair().expect("socketpair");
 
-        let granted = encode_access_granted(&AccessGranted { session_id: 4242, ..Default::default() }).unwrap();
+        let granted = encode_access_granted(&AccessGranted {
+            session_id: 4242,
+            ..Default::default()
+        })
+        .unwrap();
         send_message_with_fd(&a, &granted, pipe_r.as_fd()).expect("send with fd");
 
         let (received, fd) = recv_message_with_fd(&wire::FRAMING, &b).expect("recv with fd");
@@ -286,7 +295,11 @@ mod tests {
         let (a, b) = UnixStream::pair().expect("socketpair");
         let (pipe_r, _pipe_w) = UnixStream::pair().expect("socketpair");
 
-        let granted = encode_access_granted(&AccessGranted { session_id: 1, ..Default::default() }).unwrap();
+        let granted = encode_access_granted(&AccessGranted {
+            session_id: 1,
+            ..Default::default()
+        })
+        .unwrap();
         send_message_with_fd(&a, &granted, pipe_r.as_fd()).expect("send with fd");
         let (_, fd) = recv_message_with_fd(&wire::FRAMING, &b).expect("recv with fd");
 
@@ -303,7 +316,11 @@ mod tests {
     #[test]
     fn absent_descriptor_is_reported_as_none() {
         let (a, b) = UnixStream::pair().expect("socketpair");
-        let granted = encode_access_granted(&AccessGranted { session_id: 7, ..Default::default() }).unwrap();
+        let granted = encode_access_granted(&AccessGranted {
+            session_id: 7,
+            ..Default::default()
+        })
+        .unwrap();
         send_message(&a, &granted).expect("send");
 
         let (_, fd) = recv_message_with_fd(&wire::FRAMING, &b).expect("recv");

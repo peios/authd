@@ -87,6 +87,11 @@ pub const MSG_SET_PROFILE: u16 = 0x000d;
 pub const MSG_SET_PRIMARY_GROUP: u16 = 0x000e;
 pub const MSG_SET_CLAIM: u16 = 0x000f;
 pub const MSG_REMOVE_CLAIM: u16 = 0x0010;
+pub const MSG_KEY_LIST: u16 = 0x0011;
+pub const MSG_KEY_ADD: u16 = 0x0012;
+pub const MSG_KEY_REMOVE: u16 = 0x0013;
+pub const MSG_CREDENTIAL_POLICY: u16 = 0x0014;
+pub const MSG_KEYS: u16 = 0x8008;
 // lpsd -> client. The high bit marks a message sent by the authority, as in
 // PGSS Logon and PSI — here lpsd is the authority for its own store.
 pub const MSG_PRINCIPALS: u16 = 0x8001;
@@ -115,6 +120,8 @@ pub const MSG_GROUPS: u16 = 0x8007;
 pub fn reply_to(request: u16) -> Option<u16> {
     Some(match request {
         MSG_LIST => MSG_PRINCIPALS,
+        MSG_KEY_LIST => MSG_KEYS,
+        MSG_KEY_ADD | MSG_KEY_REMOVE | MSG_CREDENTIAL_POLICY => MSG_DONE,
         MSG_SHOW => MSG_PRINCIPAL,
         MSG_DOMAIN => MSG_DOMAIN_IS,
         MSG_GROUP_LIST => MSG_GROUPS,
@@ -137,6 +144,10 @@ pub fn reply_to(request: u16) -> Option<u16> {
 /// Every request type this protocol defines. Exists so [`reply_to`] can be
 /// tested for completeness rather than trusted.
 pub const REQUEST_TYPES: &[u16] = &[
+    MSG_KEY_LIST,
+    MSG_KEY_ADD,
+    MSG_KEY_REMOVE,
+    MSG_CREDENTIAL_POLICY,
     MSG_LIST,
     MSG_SHOW,
     MSG_DOMAIN,
@@ -990,7 +1001,10 @@ mod tests {
 
     #[test]
     fn show_round_trips() {
-        let bytes = encode_show(&Named { name: "jack".into() }).unwrap();
+        let bytes = encode_show(&Named {
+            name: "jack".into(),
+        })
+        .unwrap();
         assert_eq!(decode_show(&bytes).unwrap().name, "jack");
     }
 
@@ -1006,7 +1020,10 @@ mod tests {
         let encoded = encode_add(&add).unwrap();
         let decoded = decode_add(encoded.expose()).unwrap();
         assert_eq!(decoded.name, "jack");
-        assert!(matches!(decoded.credential, Credential::Password(b"hunter2")));
+        assert!(matches!(
+            decoded.credential,
+            Credential::Password(b"hunter2")
+        ));
         assert!(decoded.enabled);
         assert_eq!(decoded.groups, vec!["Administrators".to_string()]);
     }
@@ -1249,15 +1266,25 @@ mod tests {
 
         decode_group_list(&encode_group_list().unwrap()).unwrap();
         assert_eq!(
-            decode_group_create(&encode_group_create(&Named { name: "developers".into() }).unwrap())
+            decode_group_create(
+                &encode_group_create(&Named {
+                    name: "developers".into()
+                })
                 .unwrap()
-                .name,
+            )
+            .unwrap()
+            .name,
             "developers"
         );
         assert_eq!(
-            decode_group_delete(&encode_group_delete(&Named { name: "developers".into() }).unwrap())
+            decode_group_delete(
+                &encode_group_delete(&Named {
+                    name: "developers".into()
+                })
                 .unwrap()
-                .name,
+            )
+            .unwrap()
+            .name,
             "developers"
         );
     }
@@ -1355,7 +1382,10 @@ mod tests {
 
     #[test]
     fn created_and_done_round_trip() {
-        assert_eq!(decode_created(&encode_created(1000).unwrap()).unwrap(), 1000);
+        assert_eq!(
+            decode_created(&encode_created(1000).unwrap()).unwrap(),
+            1000
+        );
         decode_done(&encode_done().unwrap()).unwrap();
     }
 
@@ -1473,8 +1503,14 @@ mod tests {
         let messages: Vec<Vec<u8>> = vec![
             encode_list().unwrap(),
             encode_domain().unwrap(),
-            encode_show(&Named { name: "jack".into() }).unwrap(),
-            encode_remove(&Named { name: "jack".into() }).unwrap(),
+            encode_show(&Named {
+                name: "jack".into(),
+            })
+            .unwrap(),
+            encode_remove(&Named {
+                name: "jack".into(),
+            })
+            .unwrap(),
             encode_set_enabled(&SetEnabled {
                 name: "jack".into(),
                 enabled: true,
@@ -1559,5 +1595,170 @@ mod tests {
                 let _ = decode_add(partial);
             }
         }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum KeyRequest {
+    List {
+        name: String,
+    },
+    Add {
+        name: String,
+        public_key: String,
+        label: String,
+    },
+    Remove {
+        name: String,
+        id: [u8; 16],
+    },
+    Policy {
+        name: String,
+        policy: crate::credential::Policy,
+    },
+}
+
+pub fn encode_key_request(request: &KeyRequest) -> Result<Vec<u8>, WireError> {
+    let (kind, name) = match request {
+        KeyRequest::List { name } => (MSG_KEY_LIST, name),
+        KeyRequest::Add { name, .. } => (MSG_KEY_ADD, name),
+        KeyRequest::Remove { name, .. } => (MSG_KEY_REMOVE, name),
+        KeyRequest::Policy { name, .. } => (MSG_CREDENTIAL_POLICY, name),
+    };
+    let mut w = begin(kind);
+    let body = w.open();
+    w.string(name, MAX_NAME_BYTES)?;
+    match request {
+        KeyRequest::List { .. } => {}
+        KeyRequest::Add {
+            public_key, label, ..
+        } => {
+            w.string(public_key, 16384)?;
+            w.string(label, crate::credential::MAX_LABEL)?;
+        }
+        KeyRequest::Remove { id, .. } => {
+            w.bytes(id, 16)?;
+        }
+        KeyRequest::Policy { policy, .. } => w.u8(*policy as u8),
+    }
+    w.close(body);
+    w.finish()
+}
+
+pub fn decode_key_request(buf: &[u8]) -> Result<KeyRequest, WireError> {
+    let (kind, _) = decode_type(buf)?;
+    let mut r = open_body(buf, kind)?;
+    let name = r.string(MAX_NAME_BYTES)?.to_owned();
+    let result = match kind {
+        MSG_KEY_LIST => KeyRequest::List { name },
+        MSG_KEY_ADD => KeyRequest::Add {
+            name,
+            public_key: r.string(16384)?.to_owned(),
+            label: r.string(crate::credential::MAX_LABEL)?.to_owned(),
+        },
+        MSG_KEY_REMOVE => KeyRequest::Remove {
+            name,
+            id: r
+                .bytes(16)?
+                .try_into()
+                .map_err(|_| WireError::UnknownValue)?,
+        },
+        MSG_CREDENTIAL_POLICY => KeyRequest::Policy {
+            name,
+            policy: crate::credential::Policy::from_u8(r.u8()?).ok_or(WireError::UnknownValue)?,
+        },
+        _ => return Err(WireError::UnexpectedMessage(kind)),
+    };
+    if !r.at_end() {
+        return Err(WireError::UnknownValue);
+    }
+    Ok(result)
+}
+
+pub struct KeyInfo {
+    pub id: [u8; 16],
+    pub fingerprint: String,
+    pub label: String,
+    pub created: u64,
+}
+
+pub fn encode_keys(
+    policy: crate::credential::Policy,
+    keys: &[KeyInfo],
+) -> Result<Vec<u8>, WireError> {
+    let mut w = begin(MSG_KEYS);
+    let body = w.open();
+    w.u8(policy as u8);
+    w.count(keys.len(), crate::credential::MAX_KEYS)?;
+    for key in keys {
+        let at = w.open();
+        w.bytes(&key.id, 16)?;
+        w.string(&key.fingerprint, 128)?;
+        w.string(&key.label, crate::credential::MAX_LABEL)?;
+        w.u64(key.created);
+        w.close(at);
+    }
+    w.close(body);
+    w.finish()
+}
+
+pub fn decode_keys(buf: &[u8]) -> Result<(crate::credential::Policy, Vec<KeyInfo>), WireError> {
+    let mut r = open_body(buf, MSG_KEYS)?;
+    let policy = crate::credential::Policy::from_u8(r.u8()?).ok_or(WireError::UnknownValue)?;
+    let keys = r.array(crate::credential::MAX_KEYS, |r| {
+        Ok(KeyInfo {
+            id: r
+                .bytes(16)?
+                .try_into()
+                .map_err(|_| WireError::UnknownValue)?,
+            fingerprint: r.string(128)?.to_owned(),
+            label: r.string(crate::credential::MAX_LABEL)?.to_owned(),
+            created: r.u64()?,
+        })
+    })?;
+    if !r.at_end() {
+        return Err(WireError::UnknownValue);
+    }
+    Ok((policy, keys))
+}
+
+#[cfg(test)]
+mod key_tests {
+    use super::*;
+    #[test]
+    fn key_administration_messages_are_bounded_and_round_trip() {
+        let requests = [
+            KeyRequest::List {
+                name: "alice".into(),
+            },
+            KeyRequest::Add {
+                name: "alice".into(),
+                public_key: "ssh-ed25519 example".into(),
+                label: "laptop".into(),
+            },
+            KeyRequest::Remove {
+                name: "alice".into(),
+                id: [7; 16],
+            },
+            KeyRequest::Policy {
+                name: "alice".into(),
+                policy: crate::credential::Policy::SshPublicKey,
+            },
+        ];
+        for request in requests {
+            let encoded = encode_key_request(&request).unwrap();
+            assert_eq!(decode_key_request(&encoded).unwrap(), request);
+            for n in 0..encoded.len() {
+                assert!(decode_key_request(&encoded[..n]).is_err());
+            }
+        }
+        assert!(
+            encode_key_request(&KeyRequest::Add {
+                name: "alice".into(),
+                public_key: "x".repeat(16385),
+                label: "".into()
+            })
+            .is_err()
+        );
     }
 }

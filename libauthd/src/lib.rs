@@ -135,3 +135,6 @@ pub const LPSD_RUN_DIR: &str = "/run/lpsd";
 /// from `psi.sock` in a directory listing — the very confusion the distinct
 /// magic numbers exist to catch.
 pub const LPSD_ADMIN_SOCKET_PATH: &str = "/run/lpsd/admin.sock";
+
+pub mod credential;
+pub mod ssh;

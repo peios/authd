@@ -49,6 +49,23 @@ Refuse logon while retaining the principal and SID.
 Set a principal's password, as an administrator.  A principal changes their
 own with
 .BR passwd (1).
+Setting material does not change credential policy.
+.TP
+.BI key\ list " name"
+Show credential policy and enrolled key IDs, SHA256 fingerprints, labels and creation times.
+.TP
+.BI key\ add " name public-key-file [label]"
+Enroll an Ed25519 or RSA (3072 to 8192 bits) public key. Duplicate keys, key
+options, certificates and private keys are refused. Enrollment does not change policy.
+.TP
+.BI key\ remove " name key-id"
+Remove an enrolled key by its 32-digit hexadecimal ID. Removing the last key
+does not enable password or no-credential access. Existing sessions remain live.
+.TP
+.BI policy " name password|key|either|none|denied"
+Select explicitly which credentials may authenticate this principal.
+The none policy allows access without a credential and is intended only for
+explicit development fixtures. Missing permitted material always fails closed.
 .TP
 .BI set " name [options]"
 Change profile fields using

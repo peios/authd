@@ -327,6 +327,9 @@ impl Conversation {
                 // it must be, since a future credential-bearing field would
                 // make cloning it a way to duplicate a secret.
                 start: LogonStart {
+                    required_credential_type: start.required_credential_type,
+                    ssh_binding: start.ssh_binding.clone(),
+
                     logon_type: start.logon_type,
                     identifier_type: start.identifier_type,
                     identifier: start.identifier.clone(),
@@ -1305,6 +1308,36 @@ mod tests {
         assert!(source.open().is_none());
     }
 
+    #[test]
+    fn ssh_binding_and_required_method_reach_the_source_unchanged() {
+        let (source, peer) = pair();
+        let conversation = source.open().unwrap();
+        let binding = libauthd::ssh::Binding {
+            connection: [1; 16],
+            session: vec![2; 64],
+            username: "alice".into(),
+        };
+        let start = LogonStart {
+            logon_type: libauthd::wire::LogonType::RemoteInteractive,
+            identifier_type: libauthd::wire::IdentifierType::Username,
+            identifier: b"alice".to_vec(),
+            tty: None,
+            remote_host: Some("192.0.2.1".into()),
+            supported_credential_types: vec![libauthd::CredentialType::SshPublicKey],
+            required_credential_type: Some(libauthd::CredentialType::SshPublicKey),
+            ssh_binding: Some(binding.clone()),
+        };
+        conversation.authenticate(&start, &[1, 2, 3]).unwrap();
+        let message = libauthd::transport::recv_message(&psi::FRAMING, &peer).unwrap();
+        let decoded = psi::decode_authenticate(message.expose()).unwrap();
+        assert_eq!(decoded.start.ssh_binding, Some(binding));
+        assert_eq!(
+            decoded.start.required_credential_type,
+            start.required_credential_type
+        );
+        assert_eq!(decoded.originator, [1, 2, 3]);
+    }
+
     /// A write that fails must take the whole connection with it, not just the
     /// one conversation: a partial write leaves the stream desynchronised, and
     /// the codec has no way to resynchronise it.
@@ -1364,6 +1397,8 @@ mod tests {
         source.deliver(
             b.id,
             Inbound::Assert(psi::Assertion {
+                authenticated_credential_type: None,
+
                 user_sid: vec![1, 1, 0, 0, 0, 0, 0, 5, 18, 0, 0, 0],
                 canonical_name: "jack".into(),
                 ..psi::Assertion::default()

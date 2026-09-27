@@ -53,3 +53,18 @@ family shares one debugsource and corresponding-source package.
 ## Documentation
 
 User-facing documentation lives in the Peios `learn/` tree, not here — see *Managing local principals*, *Privileges*, and *Logon sessions*.
+
+## SSH credentials
+
+SSH public keys are credentials owned by lpsd, attached to principals rather
+than read from `~/.ssh/authorized_keys`. `lps key add NAME FILE [LABEL]`,
+`lps key list NAME`, and `lps key remove NAME ID` administer them. Select policy
+explicitly with `lps policy NAME password|key|either|none|denied`; enrolling or
+removing material never changes that policy. Password-only logon clients cannot
+satisfy key-only policy.
+
+PGSS and PSI retain header version 1, but LogonStart, Prompt and Assertion now
+require their SSH/method fields. All consumers must be rebuilt together. The
+unpublished principal-store layout is likewise replaced without migration or a
+version bump. Reprovision disposable development stores explicitly. A malformed
+or old store is an error, never permission to create a new one.

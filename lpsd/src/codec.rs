@@ -34,21 +34,10 @@
 /// `PEIOSLPS` — Peios Local Principal Store.
 pub const MAGIC: [u8; 8] = *b"PEIOSLPS";
 
-/// Bumped when the body's meaning changes in a way an older reader would get
-/// wrong. An older reader refuses a newer file rather than guessing.
-///
-/// **2** added Unix IDs, group objects, the profile fields and claims.
-/// **3** made a Unix ID default to the RID and dropped the separate counter —
-/// see [`crate::store`].
-///
-/// Older versions remain *readable*: [`open`] hands the version back so the
-/// store can be upgraded in place rather than refused, which on a machine whose
-/// only administrator lives in that file is the difference between an upgrade
-/// and a brick.
+/// Development layout replaced in place; only the current layout is accepted.
+/// Existing development stores must be explicitly reprovisioned.
 pub const VERSION: u16 = 4;
-
-/// The oldest body layout this lpsd can still read.
-pub const OLDEST_READABLE_VERSION: u16 = 1;
+pub const OLDEST_READABLE_VERSION: u16 = VERSION;
 
 /// `magic[8] | version u16 | body_len u32 | body_crc u32`
 pub const HEADER_BYTES: usize = 18;

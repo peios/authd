@@ -286,6 +286,14 @@ fn run(registry: &Registry, stream: &UnixStream, deadline: Instant) -> io::Resul
         );
     }
 
+    if start.ssh_binding.is_some() && !crate::peer::ssh_originator(stream) {
+        return deny(
+            stream,
+            Denial::PermissionDenied,
+            "Caller may not bind SSH authentication.",
+        );
+    }
+
     log::info(format_args!(
         "logon started: peer={peer} type={:?} identifier={}",
         start.logon_type,
@@ -384,7 +392,12 @@ pub(crate) fn relay(
     purpose: Purpose,
 ) -> io::Result<Option<Ended>> {
     let noun = purpose.noun();
-    for _ in 0..MAX_ROUNDS {
+    let rounds = if supported.contains(&CredentialType::SshPublicKey) {
+        17
+    } else {
+        MAX_ROUNDS
+    };
+    for _ in 0..rounds {
         // The wall-clock bound, checked once per round. Per-read timeouts
         // cannot see a client that keeps resetting them.
         if expired(deadline) {
@@ -746,6 +759,19 @@ fn grant(
     assertion: &libauthd::psi::Assertion,
 ) -> io::Result<()> {
     let source_name = conversation.source_name();
+    if start
+        .required_credential_type
+        .is_some_and(|required| assertion.authenticated_credential_type != Some(required))
+        || assertion
+            .authenticated_credential_type
+            .is_some_and(|actual| !start.supported_credential_types.contains(&actual))
+    {
+        return deny(
+            stream,
+            Denial::AuthenticationFailed,
+            "Authentication failed.",
+        );
+    }
     // A source's assertion is bytes until proven otherwise. Validating the SID
     // here — before it becomes identity — is why libauthd carries it untyped:
     // the codec has no business knowing what a SID is, and the process that
@@ -1208,6 +1234,9 @@ mod tests {
 
     fn start_supporting(types: Vec<CredentialType>) -> LogonStart {
         LogonStart {
+            required_credential_type: None,
+            ssh_binding: None,
+
             logon_type: LogonType::Interactive,
             identifier_type: IdentifierType::Username,
             identifier: b"jack".to_vec(),
@@ -1224,6 +1253,8 @@ mod tests {
                 .iter()
                 .enumerate()
                 .map(|(i, credential_type)| Prompt {
+                    parameters: Vec::new(),
+
                     credential_ref: i as u32 + 1,
                     credential_type: *credential_type,
                     credential_name: "Password".into(),

@@ -309,6 +309,8 @@ mod tests {
             let reply = psi::encode_assertion(
                 envelope.conversation,
                 &psi::Assertion {
+                    authenticated_credential_type: None,
+
                     user_sid: sid("S-1-5-21-1-2-3-1000").as_ref().as_bytes().to_vec(),
                     canonical_name: "jack".into(),
                     ..psi::Assertion::default()

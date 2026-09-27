@@ -377,6 +377,10 @@ fn describe(msg_type: u16) -> &'static str {
         lps::MSG_SET_PRIMARY_GROUP => "set-primary-group",
         lps::MSG_SET_CLAIM => "set-claim",
         lps::MSG_REMOVE_CLAIM => "remove-claim",
+        lps::MSG_KEY_LIST => "key-list",
+        lps::MSG_KEY_ADD => "key-add",
+        lps::MSG_KEY_REMOVE => "key-remove",
+        lps::MSG_CREDENTIAL_POLICY => "credential-policy",
         _ => "an unknown request",
     }
 }
@@ -404,6 +408,43 @@ fn dispatch(
     };
 
     match msg_type {
+        lps::MSG_KEY_LIST | lps::MSG_KEY_ADD | lps::MSG_KEY_REMOVE | lps::MSG_CREDENTIAL_POLICY => {
+            match request(lps::decode_key_request(buf))? {
+                lps::KeyRequest::List { name } => {
+                    let keys: Vec<_> = store
+                        .keys(&name)?
+                        .iter()
+                        .map(|k| lps::KeyInfo {
+                            id: k.id,
+                            fingerprint: crate::ssh::fingerprint(&k.blob).unwrap_or_default(),
+                            label: k.label.clone(),
+                            created: k.created,
+                        })
+                        .collect();
+                    Ok((
+                        Changed::No,
+                        encoded(lps::encode_keys(store.credential_policy(&name)?, &keys))?,
+                    ))
+                }
+                lps::KeyRequest::Add {
+                    name,
+                    public_key,
+                    label,
+                } => {
+                    store.add_key(&name, &public_key, &label)?;
+                    Ok((Changed::Yes, encoded(lps::encode_done())?))
+                }
+                lps::KeyRequest::Remove { name, id } => {
+                    store.remove_key(&name, id)?;
+                    Ok((Changed::Yes, encoded(lps::encode_done())?))
+                }
+                lps::KeyRequest::Policy { name, policy } => {
+                    store.set_credential_policy(&name, policy)?;
+                    Ok((Changed::Yes, encoded(lps::encode_done())?))
+                }
+            }
+        }
+
         lps::MSG_LIST => {
             let summaries = store
                 .summaries()
