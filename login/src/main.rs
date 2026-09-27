@@ -603,8 +603,8 @@ fn default_term() -> String {
 
 fn term_for_device(major: u32, minor: u32, console_active: &str) -> &'static str {
     match (major, minor) {
-        // /dev/console: whatever the kernel chose, named first in sysfs.
-        (5, 1) => term_for_name(console_active.split_whitespace().next().unwrap_or("")),
+        // /dev/console: whatever the kernel chose, named last in sysfs.
+        (5, 1) => term_for_name(console_active.split_whitespace().last().unwrap_or("")),
         // tty1..tty63: the virtual consoles. Minors from 64 up on the same
         // major are the serial ports.
         (4, m) if m < 64 => "linux",
@@ -716,8 +716,8 @@ mod tests {
     #[test]
     fn dev_console_resolves_through_the_active_console_list() {
         assert_eq!(term_for_device(5, 1, "tty0\n"), "linux");
-        assert_eq!(term_for_device(5, 1, "ttyS0 tty0\n"), "vt220");
-        assert_eq!(term_for_device(5, 1, "tty0 ttyS0\n"), "linux");
+        assert_eq!(term_for_device(5, 1, "ttyS0 tty0\n"), "linux");
+        assert_eq!(term_for_device(5, 1, "tty0 ttyS0\n"), "vt220");
         assert_eq!(term_for_device(5, 1, ""), "vt220");
     }
 
