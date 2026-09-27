@@ -33,6 +33,12 @@ With no
 it prompts for one.  Supplying a name selects that principal directly.
 .SH OPTIONS
 .TP
+.B \-\-console
+Prepare a managed console: restore canonical input, echo and standard control
+characters while preserving serial speed, and wait until first-boot setup has
+retired both of its service definitions before accepting credentials. Registry
+errors fail closed. This option grants no authentication authority.
+.TP
 .B \-p
 Preserve the inherited environment instead of constructing a fresh login
 environment.
