@@ -310,7 +310,7 @@ fn open_store() -> Result<Store, StoreError> {
         // itself durable buys nothing, and losing the directory means losing
         // the domain. See `RealFs::create_directory`.
         RealFs.create_directory(directory).map_err(StoreError::Io)?;
-        let sd = peios::security::sddl::parse("O:SYG:SYD:P(A;OICI;GA;;;SY)")
+        let sd = peios::security::sddl::parse("O:S-1-5-80-4242895835-3884168475-4287610261-1596539771-2019494472G:S-1-5-80-4242895835-3884168475-4287610261-1596539771-2019494472D:P(A;OICI;GA;;;SY)(A;OICI;GA;;;S-1-5-80-4242895835-3884168475-4287610261-1596539771-2019494472)")
             .map_err(std::io::Error::from)?;
         RealFs.set_sd(directory, &sd).map_err(StoreError::Io)?;
     }

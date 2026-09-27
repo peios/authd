@@ -41,15 +41,43 @@
     "The package proposes, the image decides."
   ],
   "keys": [
-    { "path": "Machine\\Software" },
-    { "path": "Machine\\Software\\Authd" },
-    { "path": "Machine\\Software\\Authd\\Sources" },
+    {
+      "path": "Machine\\Software"
+    },
+    {
+      "path": "Machine\\Software\\Authd"
+    },
+    {
+      "path": "Machine\\Software\\Authd\\Sources"
+    },
     {
       "path": "Machine\\Software\\Authd\\Sources\\lpsd",
       "values": [
-        { "name": "MayAssertForeignMemberships", "type": "dword", "data": 1 },
-        { "name": "UnixIDBase", "type": "dword", "data": 1000000 },
-        { "name": "UnixIDCount", "type": "dword", "data": 1000000 }
+        {
+          "name": "MayAssertForeignMemberships",
+          "type": "dword",
+          "data": 1
+        },
+        {
+          "name": "UnixIDBase",
+          "type": "dword",
+          "data": 1000000
+        },
+        {
+          "name": "UnixIDCount",
+          "type": "dword",
+          "data": 1000000
+        }
+      ]
+    },
+    {
+      "path": "Machine\\Generic\\Authn\\Policy\\S-1-5-80-4242895835-3884168475-4287610261-1596539771-2019494472",
+      "values": [
+        {
+          "name": "Integrity",
+          "type": "sz",
+          "data": "System"
+        }
       ]
     }
   ]

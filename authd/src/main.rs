@@ -237,10 +237,10 @@ fn main() -> ExitCode {
 /// self-service credential change for everyone it leaves out.
 ///
 /// **`/run/psi.sock`** is authd's own protocol, so the requirement is ours
-/// to state: SYSTEM and Administrators, constant. Every source is a SYSTEM
-/// service today; a future source running as something else needs an authd
-/// change anyway, since the registration allowlist is consulted with the
-/// peer's identity. The connection caps stay load-bearing regardless — a
+/// to state: SYSTEM and Administrators have full access; service-logon
+/// processes may connect. Source registration still requires the peer's enabled
+/// service SID to match the configured allowlist. Transport admission alone
+/// grants no source authority. Connection caps remain load-bearing — a
 /// descriptor bounds who, not how many.
 ///
 /// All three are protected (`P`), so `/run`'s inheritance can neither widen
@@ -248,7 +248,7 @@ fn main() -> ExitCode {
 fn protect_the_sockets() {
     const IDENT_SDDL: &str = "O:SYG:SYD:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;0x100082;;;WD)";
     const LOGON_SDDL: &str = "O:SYG:SYD:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;0x100082;;;AU)";
-    const PSI_SDDL: &str = "O:SYG:SYD:P(A;;GA;;;SY)(A;;GA;;;BA)";
+    const PSI_SDDL: &str = "O:SYG:SYD:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;FW;;;SU)";
 
     stamp(
         IDENT_SOCKET_PATH,

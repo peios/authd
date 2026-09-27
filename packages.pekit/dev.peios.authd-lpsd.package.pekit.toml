@@ -18,3 +18,9 @@ license      = "((MIT OR Apache-2.0) AND Unicode-3.0) AND Apache-2.0 AND (Apache
 ":usr/share/man/man8/lpsd.8.gz"                     = "usr/share/man/man8/lpsd.8.gz"
 ":usr/share/regim/lpsd-service.reg"                 = "usr/share/regim/lpsd-service.reg"
 ":usr/share/regim/lpsd-authd-registration.reg"      = "usr/share/regim/lpsd-authd-registration.reg"
+
+# Provision before the virtual account starts; it cannot create siblings under /var/state.
+":var/state/lpsd" = "var/state/lpsd"
+
+[sd_overrides]
+"var/state/lpsd" = "O:S-1-5-80-4242895835-3884168475-4287610261-1596539771-2019494472G:S-1-5-80-4242895835-3884168475-4287610261-1596539771-2019494472D:P(A;OICI;GA;;;SY)(A;OICI;GA;;;S-1-5-80-4242895835-3884168475-4287610261-1596539771-2019494472)"

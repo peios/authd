@@ -2135,45 +2135,13 @@ fn decode_claim(r: &mut Reader<'_>) -> Result<Claim, StoreError> {
     })
 }
 
-/// The security descriptor the store file is written with.
-///
-/// `LocalSystem` alone: owner, group, and the only ACE. Not
-/// `BUILTIN\Administrators`, which the rest of the system's descriptors do
-/// grant — an administrator can take ownership if they genuinely need the file,
-/// and that is an act that leaves a trail, where a read granted by the DACL
-/// does not. This is the machine's password material; the list of principals
-/// entitled to read it should be as close to empty as the system permits.
-///
-/// No inheritance flags. It is a file, nothing is created under it, and an
-/// inheritable ACE here would be a claim about children that cannot exist.
-///
-/// **This is coupled to lpsd running as SYSTEM.** If lpsd is ever given a
-/// dedicated account, this descriptor has to name it or lpsd will lock itself
-/// out of its own store. The tighter descriptor — lpsd's *service* SID rather
-/// than SYSTEM, so that not every SYSTEM process on the machine can read the
-/// verifiers — needs the service-SID derivation that currently exists twice
-/// (peinit and authd) and should exist once in libpeios. Flagged on PEI-166
-/// rather than adding a third copy here.
+/// The virtual lpsd account owns its credential files. SYSTEM remains a trusted
+/// recovery principal; Administrators and unrelated services receive no grant.
+/// The descriptor is protected and supplied at creation, before secret bytes.
 pub fn store_descriptor() -> peios::Result<peios::security::SecurityDescriptor> {
-    use peios::security::{AccessMask, AceFlags, AclBuilder, SdBuilder, WellKnown};
-
-    let system = Sid::well_known(WellKnown::System);
-    let dacl = AclBuilder::new()
-        .allow(
-            system.as_ref(),
-            AccessMask::GENERIC_ALL.bits(),
-            AceFlags::empty(),
-        )
-        .build()?;
-    SdBuilder::new()
-        .owner(system.as_ref())
-        .group(system.as_ref())
-        .control(
-            peios::security::Control::DACL_PROTECTED,
-            peios::security::Control::empty(),
-        )
-        .dacl(&dacl)
-        .build()
+    peios::security::sddl::parse(
+        "O:S-1-5-80-4242895835-3884168475-4287610261-1596539771-2019494472G:S-1-5-80-4242895835-3884168475-4287610261-1596539771-2019494472D:P(A;;GA;;;SY)(A;;GA;;;S-1-5-80-4242895835-3884168475-4287610261-1596539771-2019494472)",
+    )
 }
 
 #[cfg(test)]
@@ -3375,7 +3343,7 @@ mod tests {
     }
 
     #[test]
-    fn the_store_is_written_with_a_system_only_descriptor() {
+    fn the_store_is_written_with_its_private_service_descriptor() {
         let fs = FaultyFs::new();
         seeded().save(&fs, path()).expect("must save");
         let stamped = fs
@@ -3386,6 +3354,10 @@ mod tests {
             store_descriptor().unwrap().as_bytes(),
             "the store must be written with its own descriptor, not an inherited one"
         );
+        let text = peios::security::sddl::format(&stamped).expect("valid descriptor");
+        assert!(!text.contains(";;;BA)"));
+        assert!(!text.contains(";;;WD)"));
+        assert!(text.contains("D:P"));
     }
 
     #[test]
