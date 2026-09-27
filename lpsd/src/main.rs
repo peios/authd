@@ -70,7 +70,7 @@ use std::os::unix::net::{UnixDatagram, UnixListener, UnixStream};
 use std::path::Path;
 use std::process::ExitCode;
 
-use crate::fs::RealFs;
+use crate::fs::{Fs, RealFs};
 use crate::store::{Store, StoreError};
 
 use libauthd::PSI_SOCKET_PATH;
@@ -305,6 +305,15 @@ fn wait(stream: &UnixStream, listener: &UnixListener) -> io::Result<Ready> {
 /// this daemon could have.
 fn open_store() -> Result<Store, StoreError> {
     let path = Path::new(store::STORE_PATH);
+    if let Some(directory) = path.parent() {
+        // Durably: an atomically-replaced file inside a directory that is not
+        // itself durable buys nothing, and losing the directory means losing
+        // the domain. See `RealFs::create_directory`.
+        RealFs.create_directory(directory).map_err(StoreError::Io)?;
+        let sd = peios::security::sddl::parse("O:SYG:SYD:P(A;OICI;GA;;;SY)")
+            .map_err(std::io::Error::from)?;
+        RealFs.set_sd(directory, &sd).map_err(StoreError::Io)?;
+    }
     if let Some(store) = Store::load(&RealFs, path)? {
         return Ok(store);
     }
@@ -313,12 +322,6 @@ fn open_store() -> Result<Store, StoreError> {
         "no store at {}; provisioning",
         store::STORE_PATH
     ));
-    if let Some(directory) = path.parent() {
-        // Durably: an atomically-replaced file inside a directory that is not
-        // itself durable buys nothing, and losing the directory means losing
-        // the domain. See `RealFs::create_directory`.
-        RealFs.create_directory(directory).map_err(StoreError::Io)?;
-    }
 
     let store = Store::provision()?;
     store.save(&RealFs, path)?;

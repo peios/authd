@@ -18,14 +18,13 @@
 //! # The order is the algorithm
 //!
 //! ```text
-//! create temp -> write -> set SD -> fsync(temp) -> rename -> fsync(dir)
+//! create protected temp -> write -> fsync(temp) -> rename -> fsync(dir)
 //! ```
 //!
 //! Every step is load-bearing:
 //!
-//! - **The SD is stamped on the temp file**, before the rename. Stamping after
-//!   would leave the store readable at its real name, however briefly, under
-//!   whatever descriptor it inherited from its directory.
+//! - **The SD is supplied when creating the temp file**, before any bytes are
+//!   written. A later stamp would expose credentials through the staging name.
 //! - **`fsync` precedes the rename.** Reversed, a crash can leave the store's
 //!   name pointing at a block that was never written — the file is present,
 //!   correctly named, and empty. This is the single most common way an
@@ -67,11 +66,9 @@ pub trait Fs {
     /// supported state (an unprovisioned machine), not an error.
     fn read(&self, path: &Path) -> io::Result<Option<Secret>>;
 
-    /// Create or truncate `path`. Truncating rather than failing on an existing
-    /// file is deliberate: a crash can leave a stale staging file behind, and
-    /// refusing to overwrite it would wedge every future write until someone
-    /// deleted it by hand.
-    fn create(&self, path: &Path) -> io::Result<Self::File>;
+    /// Replace stale staging debris with a new inode carrying `sd` at creation.
+    /// Never truncate or follow a pre-existing staging inode.
+    fn create(&self, path: &Path, sd: &SecurityDescriptor) -> io::Result<Self::File>;
 
     /// Stamp a security descriptor on a file.
     fn set_sd(&self, path: &Path, sd: &SecurityDescriptor) -> io::Result<()>;
@@ -125,17 +122,15 @@ pub fn replace<F: Fs>(
     let directory = path.parent().unwrap_or_else(|| Path::new("."));
 
     let outcome = (|| -> io::Result<()> {
-        let mut file = fs.create(&staged)?;
+        let mut file = fs.create(&staged, sd)?;
         file.write_all(contents)?;
-        fs.set_sd(&staged, sd)?;
         file.sync()?;
         fs.rename(&staged, path)?;
         fs.sync_dir(directory)
     })();
 
     if outcome.is_err() {
-        // Best effort. If this fails too, the next write truncates it anyway —
-        // which is why `create` truncates rather than refusing.
+        // Best effort. A subsequent replacement removes stale staging debris.
         let _ = fs.remove(&staged);
     }
     outcome
@@ -184,6 +179,14 @@ impl RealFs {
     }
 }
 
+fn remove_stale_stage(path: &Path) -> io::Result<()> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
 pub struct RealFile(std::fs::File);
 
 impl File for RealFile {
@@ -217,14 +220,21 @@ impl Fs for RealFs {
         Ok(Some(secret))
     }
 
-    fn create(&self, path: &Path) -> io::Result<Self::File> {
-        use std::os::unix::fs::OpenOptionsExt;
-        let file = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(STORE_MODE)
-            .open(path)?;
+    fn create(&self, path: &Path, sd: &SecurityDescriptor) -> io::Result<Self::File> {
+        use peios::file::{Disposition, FileAccess, OpenOptions};
+        use std::os::fd::OwnedFd;
+        use std::os::unix::fs::PermissionsExt;
+        remove_stale_stage(path)?;
+        let file = OpenOptions::new()
+            .desired_access(
+                FileAccess::WRITE_DATA | FileAccess::WRITE_ATTRIBUTES | FileAccess::SYNCHRONIZE,
+            )
+            .disposition(Disposition::Create)
+            .creator_sd(sd)
+            .open(None, path)
+            .map_err(io::Error::from)?;
+        let file = std::fs::File::from(OwnedFd::from(file));
+        file.set_permissions(std::fs::Permissions::from_mode(STORE_MODE))?;
         Ok(RealFile(file))
     }
 
@@ -394,6 +404,10 @@ pub struct FaultyFile {
 impl File for FaultyFile {
     fn write_all(&mut self, buf: &[u8]) -> io::Result<()> {
         let mut state = self.state.borrow_mut();
+        assert!(
+            state.descriptors.contains_key(&self.path),
+            "unprotected credential write"
+        );
         state.perform(Op::Write)?;
         state
             .live
@@ -422,9 +436,13 @@ impl Fs for FaultyFs {
         Ok(state.live.get(path).map(|bytes| Secret::from_slice(bytes)))
     }
 
-    fn create(&self, path: &Path) -> io::Result<Self::File> {
+    fn create(&self, path: &Path, sd: &SecurityDescriptor) -> io::Result<Self::File> {
         let mut state = self.state.borrow_mut();
         state.perform(Op::Create)?;
+        state.perform(Op::SetSd)?;
+        state
+            .descriptors
+            .insert(path.to_path_buf(), sd.as_bytes().to_vec());
         state.live.insert(path.to_path_buf(), Vec::new());
         drop(state);
         Ok(FaultyFile {
@@ -525,12 +543,12 @@ impl Drop for TempDir {
 
 /// `RealFs` with the descriptor step stubbed out.
 ///
-/// `set_sd` is a KACS syscall and fails anywhere that is not Peios, so an
+/// Native creation with a descriptor requires Peios, so an
 /// end-to-end test of [`replace`] against a real filesystem cannot include it.
 /// Everything else here is the genuine article: real `open`, real `write`, real
 /// `fsync`, real `rename`, real directory sync.
 ///
-/// So `set_sd` is the one primitive whose real implementation is exercised only
+/// The creator descriptor is exercised only
 /// on Peios itself. Stated plainly rather than papered over — the alternative
 /// was to weaken production behaviour to make it testable, which trades a real
 /// property for a green tick.
@@ -544,8 +562,16 @@ impl Fs for RealFsWithoutSd {
     fn read(&self, path: &Path) -> io::Result<Option<Secret>> {
         RealFs.read(path)
     }
-    fn create(&self, path: &Path) -> io::Result<Self::File> {
-        RealFs.create(path)
+    fn create(&self, path: &Path, _sd: &SecurityDescriptor) -> io::Result<Self::File> {
+        use std::os::unix::fs::OpenOptionsExt;
+        remove_stale_stage(path)?;
+        Ok(RealFile(
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(STORE_MODE)
+                .open(path)?,
+        ))
     }
     fn set_sd(&self, _path: &Path, _sd: &SecurityDescriptor) -> io::Result<()> {
         Ok(())
@@ -662,6 +688,29 @@ mod real_tests {
     }
 
     #[test]
+    fn a_stale_staging_symlink_or_hardlink_is_never_written_through() {
+        use std::os::unix::fs::symlink;
+        for hardlink in [false, true] {
+            let dir = TempDir::new();
+            let store = dir.join("principals");
+            let victim = dir.join("other");
+            std::fs::write(&victim, b"untouched").unwrap();
+            let stage = dir.join("principals.new");
+            if hardlink {
+                std::fs::hard_link(&victim, &stage).unwrap();
+            } else {
+                symlink(&victim, &stage).unwrap();
+            }
+            replace(
+                &RealFsWithoutSd, &store, b"credentials",
+                &crate::store::store_descriptor().unwrap(),
+            ).unwrap();
+            assert_eq!(std::fs::read(victim).unwrap(), b"untouched");
+            assert_eq!(std::fs::read(store).unwrap(), b"credentials");
+        }
+    }
+
+    #[test]
     fn create_directory_makes_every_missing_ancestor() {
         let dir = TempDir::new();
         let nested = dir.join("var").join("lib").join("lpsd");
@@ -718,15 +767,15 @@ mod tests {
     }
 
     #[test]
-    fn the_order_is_write_protect_sync_rename_syncdir() {
+    fn the_order_is_protect_write_sync_rename_syncdir() {
         let fs = FaultyFs::new();
         replace(&fs, &store(), b"new", &descriptor()).expect("must replace");
         assert_eq!(
             fs.journal(),
             vec![
                 Op::Create,
-                Op::Write,
                 Op::SetSd,
+                Op::Write,
                 Op::Sync,
                 Op::Rename,
                 Op::SyncDir
@@ -735,15 +784,15 @@ mod tests {
     }
 
     #[test]
-    fn the_descriptor_is_stamped_before_the_rename() {
+    fn the_descriptor_is_established_before_the_first_write() {
         let fs = FaultyFs::new();
         replace(&fs, &store(), b"new", &descriptor()).expect("must replace");
         let journal = fs.journal();
         let set_sd = journal.iter().position(|&op| op == Op::SetSd).unwrap();
-        let rename = journal.iter().position(|&op| op == Op::Rename).unwrap();
+        let write = journal.iter().position(|&op| op == Op::Write).unwrap();
         assert!(
-            set_sd < rename,
-            "the store must never exist at its real name under an inherited descriptor"
+            set_sd < write,
+            "credential bytes must never be written under an inherited descriptor"
         );
         assert!(fs.descriptor_of(&store()).is_some());
     }
@@ -790,9 +839,8 @@ mod tests {
             fs.preload(&store(), b"old");
 
             // Everything up to but not including the rename.
-            let mut file = fs.create(&staged()).unwrap();
+            let mut file = fs.create(&staged(), &descriptor()).unwrap();
             file.write_all(b"new").unwrap();
-            fs.set_sd(&staged(), &descriptor()).unwrap();
             file.sync().unwrap();
 
             fs.crash(flushed);
@@ -810,9 +858,8 @@ mod tests {
             let fs = FaultyFs::new();
             fs.preload(&store(), b"old");
 
-            let mut file = fs.create(&staged()).unwrap();
+            let mut file = fs.create(&staged(), &descriptor()).unwrap();
             file.write_all(b"new").unwrap();
-            fs.set_sd(&staged(), &descriptor()).unwrap();
             file.sync().unwrap();
             fs.rename(&staged(), &store()).unwrap();
             // No directory sync: both outcomes are legal from here.
@@ -846,7 +893,7 @@ mod tests {
         // teeth, and that the fsync-before-rename ordering is load-bearing
         // rather than decorative.
         let fs = FaultyFs::new();
-        let mut file = fs.create(&staged()).unwrap();
+        let mut file = fs.create(&staged(), &descriptor()).unwrap();
         file.write_all(b"new").unwrap();
         fs.rename(&staged(), &store()).unwrap();
         fs.sync_dir(Path::new("/var/state/lpsd")).unwrap();
