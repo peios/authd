@@ -148,12 +148,9 @@ pub fn seal(body: &[u8]) -> Vec<u8> {
 /// anything look at what the body *means*, which is what keeps the parser from
 /// ever running on bytes that failed their checksum.
 ///
-/// The version is *returned* rather than merely checked, because old and new
-/// are not symmetric. A **newer** file is refused outright — its body means
-/// something this code does not know, and guessing is how a downgrade silently
-/// discards accounts. An **older** one is handed to the caller to upgrade, since
-/// every field this version added has a defensible default and refusing would
-/// strand a machine whose only administrator lives in the file.
+/// Only the current unpublished layout is supported. Older and newer version
+/// markers are both refused; the caller also validates every required field
+/// of the replacement body. Reprovisioning old development stores is explicit.
 pub fn open(file: &[u8]) -> Result<(u16, &[u8]), CodecError> {
     if file.len() < HEADER_BYTES {
         return Err(CodecError::Truncated);
