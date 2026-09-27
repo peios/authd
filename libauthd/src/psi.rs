@@ -89,7 +89,7 @@ use crate::ident::{Fields, Kind, Outcome, Value, Withheld};
 use crate::secret::Secret;
 use crate::wire::{
     CredentialChangeStart, CredentialRequest, CredentialResponse, Denial, LogonStart, LogonTypes,
-    Profile, MAX_REASON_BYTES, WireError,
+    MAX_REASON_BYTES, Profile, WireError,
 };
 
 /// Four literal bytes opening every message: **P**eios **P**rincipal **S**ource
@@ -321,6 +321,7 @@ pub struct Group {
 /// domain SID.
 #[derive(Debug, Default)]
 pub struct Assertion {
+    pub authenticated_credential_type: Option<crate::wire::CredentialType>,
     /// Binary SID bytes. Structurally unvalidated here — libauthd deliberately
     /// has no dependency on the security library — so the *recipient* must
     /// validate before treating it as identity.
@@ -780,6 +781,9 @@ pub fn encode_assertion(conversation: u64, assertion: &Assertion) -> Result<Vec<
 
     crate::claim::write_claims(&mut w, &assertion.claims)?;
     w.u32(assertion.permitted_logon_types.bits());
+    w.u8(assertion
+        .authenticated_credential_type
+        .map_or(0, |v| v as u8));
 
     w.close(body);
     w.finish()
@@ -790,43 +794,23 @@ pub fn decode_assertion(buf: &[u8]) -> Result<Assertion, WireError> {
     let user_sid = b.bytes(MAX_SID_BYTES)?.to_vec();
     let canonical_name = b.string(MAX_CANONICAL_NAME_BYTES)?.to_owned();
 
-    // Every field below is optional in the same way and for the same reason: a
-    // source built against an earlier shape simply stopped writing, and what it
-    // did not write it did not mean. Each default is the honest reading of
-    // silence — no groups, no number, no primary group, no profile, no claims —
-    // rather than a guess standing in for one.
-    let groups = if b.at_end() {
-        Vec::new()
-    } else {
-        b.array(MAX_GROUPS, |g| {
-            let sid = g.bytes(MAX_SID_BYTES)?.to_vec();
-            let unix_id = if g.at_end() { 0 } else { g.u32()? };
-            Ok(Group { sid, unix_id })
-        })?
-    };
-    let unix_id = if b.at_end() { 0 } else { b.u32()? };
-    let primary_group = if b.at_end() {
-        Vec::new()
-    } else {
-        b.bytes(MAX_SID_BYTES)?.to_vec()
-    };
-    let profile = if b.at_end() {
-        Profile::default()
-    } else {
-        crate::wire::read_profile_body(&mut b.open()?)?
-    };
-    let claims = if b.at_end() {
-        Vec::new()
-    } else {
-        crate::claim::read_claims(&mut b)?
-    };
-    let permitted_logon_types = if b.at_end() {
-        LogonTypes::UNSTATED
-    } else {
-        LogonTypes(b.u32()?)
-    };
+    let groups = b.array(MAX_GROUPS, |g| {
+        let sid = g.bytes(MAX_SID_BYTES)?.to_vec();
+        let unix_id = g.u32()?;
+        Ok(Group { sid, unix_id })
+    })?;
+    let unix_id = b.u32()?;
+    let primary_group = b.bytes(MAX_SID_BYTES)?.to_vec();
+    let profile = crate::wire::read_profile_body(&mut b.open()?)?;
+    let claims = crate::claim::read_claims(&mut b)?;
+    let permitted_logon_types = LogonTypes(b.u32()?);
 
+    let authenticated_credential_type = match b.u8()? {
+        0 => None,
+        v => Some(crate::wire::CredentialType::from_u8(v).ok_or(WireError::UnknownValue)?),
+    };
     Ok(Assertion {
+        authenticated_credential_type,
         user_sid,
         canonical_name,
         groups,
@@ -1007,10 +991,7 @@ pub fn decode_query(buf: &[u8]) -> Result<Query, WireError> {
     Ok(Query { fields, keys })
 }
 
-pub fn encode_query_result(
-    conversation: u64,
-    result: &QueryResult,
-) -> Result<Vec<u8>, WireError> {
+pub fn encode_query_result(conversation: u64, result: &QueryResult) -> Result<Vec<u8>, WireError> {
     let mut w = begin(MSG_QUERY_RESULT, conversation);
     let body = w.open();
     w.count(result.results.len(), MAX_KEYS)?;
@@ -1116,6 +1097,9 @@ mod tests {
 
     fn start() -> LogonStart {
         LogonStart {
+            required_credential_type: None,
+            ssh_binding: None,
+
             logon_type: LogonType::Interactive,
             identifier_type: IdentifierType::Username,
             identifier: b"jack".to_vec(),
@@ -1221,7 +1205,10 @@ mod tests {
         assert_eq!(decoded.start.identifier, b"jack");
         assert_eq!(decoded.start.logon_type, LogonType::Interactive);
         assert_eq!(decoded.start.tty.as_deref(), Some("/dev/console"));
-        assert_eq!(decoded.originator, vec![1, 1, 0, 0, 0, 0, 0, 5, 18, 0, 0, 0]);
+        assert_eq!(
+            decoded.originator,
+            vec![1, 1, 0, 0, 0, 0, 0, 5, 18, 0, 0, 0]
+        );
     }
 
     /// The nesting exists so PGSS Logon can append a field to `LogonStart`
@@ -1243,7 +1230,8 @@ mod tests {
         // newer PGSS Logon would, fixing up each enclosing length.
         let nested_len_at = HEADER_BYTES + 4;
         let nested_len =
-            u32::from_le_bytes(bytes[nested_len_at..nested_len_at + 4].try_into().unwrap()) as usize;
+            u32::from_le_bytes(bytes[nested_len_at..nested_len_at + 4].try_into().unwrap())
+                as usize;
         let insert_at = nested_len_at + 4 + nested_len;
         for (i, byte) in [0xde, 0xad, 0xbe, 0xef].into_iter().enumerate() {
             bytes.insert(insert_at + i, byte);
@@ -1351,6 +1339,8 @@ mod tests {
                 text: "Hello.".into(),
             }],
             prompts: vec![Prompt {
+                parameters: Vec::new(),
+
                 credential_ref: 1,
                 credential_type: CredentialType::Password,
                 credential_name: "Password".into(),
@@ -1372,6 +1362,8 @@ mod tests {
         let req = CredentialRequest {
             messages: Vec::new(),
             prompts: vec![Prompt {
+                parameters: Vec::new(),
+
                 credential_ref: 9,
                 credential_type: CredentialType::Password,
                 credential_name: "Password".into(),
@@ -1411,6 +1403,8 @@ mod tests {
 
     fn assertion() -> Assertion {
         Assertion {
+            authenticated_credential_type: None,
+
             permitted_logon_types: LogonTypes::UNSTATED,
             user_sid: vec![1, 1, 0, 0, 0, 0, 0, 5, 18, 0, 0, 0],
             canonical_name: "jack".into(),
@@ -1470,6 +1464,8 @@ mod tests {
             &encode_assertion(
                 2,
                 &Assertion {
+                    authenticated_credential_type: None,
+
                     groups: Vec::new(),
                     ..assertion()
                 },
@@ -1484,11 +1480,10 @@ mod tests {
         );
     }
 
-    /// A source predating every field after the name asserts none of them —
-    /// which is precisely what it meant, so it must decode rather than fail.
+    /// All sources must supply the current assertion shape.
     /// Written by hand, because no encoder produces this shape any more.
     #[test]
-    fn an_assertion_with_only_the_original_fields_decodes_as_empty() {
+    fn an_assertion_without_mandatory_fields_is_rejected() {
         let mut w = begin(MSG_ASSERTION, 2);
         let body = w.open();
         w.bytes(&[1, 1, 0, 0, 0, 0, 0, 5, 18, 0, 0, 0], MAX_SID_BYTES)
@@ -1497,13 +1492,7 @@ mod tests {
         w.close(body);
         let bytes = w.finish().unwrap();
 
-        let decoded = decode_assertion(&bytes).expect("an older source must decode");
-        assert_eq!(decoded.canonical_name, "jack");
-        assert!(decoded.groups.is_empty());
-        assert_eq!(decoded.unix_id, 0);
-        assert!(decoded.primary_group.is_empty());
-        assert_eq!(decoded.profile, Profile::default());
-        assert!(decoded.claims.is_empty());
+        assert!(decode_assertion(&bytes).is_err());
     }
 
     /// The reason each group gets its own frame — and the case it was put there
@@ -1524,6 +1513,13 @@ mod tests {
         w.u32(0xdead_beef); // a field this decoder does not know about
         w.close(at);
         w.u32(9); // the principal's own id, after the array
+        w.bytes(&[], MAX_SID_BYTES).unwrap();
+        let profile = w.open();
+        crate::wire::write_profile_body(&mut w, &Profile::default()).unwrap();
+        w.close(profile);
+        crate::claim::write_claims(&mut w, &[]).unwrap();
+        w.u32(0);
+        w.u8(0);
         w.close(body);
         let bytes = w.finish().unwrap();
 
@@ -1540,7 +1536,7 @@ mod tests {
     /// A group entry from before the Unix ID existed decodes as unnumbered,
     /// which is the same thing a source says about a group it does not own.
     #[test]
-    fn a_group_without_a_unix_id_decodes_as_unnumbered() {
+    fn a_group_missing_its_number_is_rejected() {
         let mut w = begin(MSG_ASSERTION, 2);
         let body = w.open();
         w.bytes(&[1, 1, 0, 0, 0, 0, 0, 5, 18, 0, 0, 0], MAX_SID_BYTES)
@@ -1553,8 +1549,7 @@ mod tests {
         w.close(body);
         let bytes = w.finish().unwrap();
 
-        let decoded = decode_assertion(&bytes).expect("an older source must decode");
-        assert_eq!(decoded.groups[0].unix_id, 0);
+        assert!(decode_assertion(&bytes).is_err());
     }
 
     #[test]
@@ -1563,6 +1558,8 @@ mod tests {
             encode_assertion(
                 1,
                 &Assertion {
+                    authenticated_credential_type: None,
+
                     groups: vec![
                         Group {
                             sid: everyone(),
@@ -1645,6 +1642,8 @@ mod tests {
             encode_assertion(
                 1,
                 &Assertion {
+                    authenticated_credential_type: None,
+
                     user_sid: vec![0; MAX_SID_BYTES + 1],
                     canonical_name: "x".into(),
                     groups: Vec::new(),
@@ -1662,6 +1661,8 @@ mod tests {
             encode_assertion(
                 1,
                 &Assertion {
+                    authenticated_credential_type: None,
+
                     groups: vec![Group {
                         sid: vec![0; MAX_SID_BYTES + 1],
                         unix_id: 0,
@@ -1780,7 +1781,10 @@ mod query_tests {
                 },
             ],
         };
-        assert_eq!(decode_query(&encode_query(7, &query).unwrap()).unwrap(), query);
+        assert_eq!(
+            decode_query(&encode_query(7, &query).unwrap()).unwrap(),
+            query
+        );
     }
 
     #[test]

@@ -382,6 +382,9 @@ mod tests {
     fn a_logon_message_is_not_served_here() {
         let (stream, handle) = client();
         let start = libauthd::wire::encode_logon_start(&libauthd::wire::LogonStart {
+            required_credential_type: None,
+            ssh_binding: None,
+
             logon_type: libauthd::wire::LogonType::Interactive,
             identifier_type: libauthd::wire::IdentifierType::Username,
             identifier: b"jack".to_vec(),

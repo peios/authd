@@ -21,7 +21,8 @@
 //! SIDs, orphaning every security descriptor that named them. Refusing to start
 //! is loud, reversible, and leaves the evidence intact.
 //!
-//! An **older** store is neither: it is upgraded in place. See [`Store::load`].
+//! This development release replaces the layout in place. Older layouts are
+//! refused; development stores must be explicitly reprovisioned.
 //!
 //! # The domain is the store's, and it is generated here
 //!
@@ -86,6 +87,7 @@ use std::io;
 use std::path::Path;
 
 use libauthd::claim::{self, Claim, Values};
+use libauthd::credential::{MAX_KEYS, MAX_LABEL, Policy, PublicKey};
 use libauthd::wire::LogonTypes;
 use peios::security::{Sid, SidRef, WellKnown};
 
@@ -289,18 +291,10 @@ struct Principal {
     /// principal is actually called.
     name: String,
     enabled: bool,
-    /// `None` means this principal authenticates with no credential at all.
-    ///
-    /// Distinct from a verifier over an empty password, which is why the empty
-    /// password is rejected outright ([`Store::add`]): two encodings of "type
-    /// nothing" that behave differently — one prompting, one not — is the kind
-    /// of ambiguity an administrator discovers at the worst moment.
-    ///
-    /// Whether the account *has* one is deliberately not derivable from
-    /// [`Store::authenticate`], which runs one derivation either way. The
-    /// distinction is drawn by [`Store::credential_requirement`], before any
-    /// credential is asked for, and only ever separates "passwordless" from
-    /// everything else — never "exists" from "does not exist".
+    /// Missing password material never determines authentication policy.
+    policy: Policy,
+    keys: Vec<PublicKey>,
+    credential_generation: u64,
     verifier: Option<Verifier>,
     /// Which kinds of sign-on this principal may be used for.
     ///
@@ -474,16 +468,14 @@ pub struct Identity {
 
 /// What the store needs before it can authenticate a given identifier.
 ///
-/// Deliberately two variants and not three. There is no `NoSuchPrincipal`,
-/// because a source that answered one would hand an unauthenticated caller an
-/// account-existence oracle over the logon channel — which PGSS Logon
-/// obligation 22 forbids, and which the decoy verifier in
-/// [`Store::authenticate`] exists to prevent.
+/// Explicit policy separates permitted material from no-credential access.
 #[derive(Debug)]
 pub enum CredentialRequirement {
     /// Collect a password and call [`Store::authenticate`]. Also the answer for
     /// a principal who does not exist, and for a disabled one.
     Password,
+    /// This principal does not permit password collection.
+    Unavailable,
     /// Nothing to collect: this principal is already identified. Boxed because
     /// an `Identity` is far larger than the other variant and this type is
     /// returned by value on every logon.
@@ -602,10 +594,6 @@ pub struct Store {
     groups: Vec<Group>,
     /// A verifier for a password nobody knows — see [`Store::authenticate`].
     decoy: Verifier,
-    /// Set when this store was read from an older format and upgraded in
-    /// memory. Not persisted: it is a fact about *this load*, and the next
-    /// write is what makes it false.
-    upgraded: bool,
 }
 
 impl Store {
@@ -624,7 +612,6 @@ impl Store {
             principals: Vec::new(),
             groups: Vec::new(),
             decoy: Verifier::decoy()?,
-            upgraded: false,
         })
     }
 
@@ -671,12 +658,6 @@ impl Store {
 
     pub fn len(&self) -> usize {
         self.principals.len()
-    }
-
-    /// Whether this store was upgraded from an older format on load and should
-    /// be written back.
-    pub fn needs_rewrite(&self) -> bool {
-        self.upgraded
     }
 
     #[cfg(test)]
@@ -1051,6 +1032,13 @@ impl Store {
             name,
             enabled: new.enabled,
             verifier: credential.map(Verifier::create).transpose()?,
+            policy: if credential.is_some() {
+                Policy::Password
+            } else {
+                Policy::NoCredential
+            },
+            keys: Vec::new(),
+            credential_generation: 0,
             groups: new.groups,
             primary_group: new.primary_group.unwrap_or_else(default_primary_group),
             home,
@@ -1085,6 +1073,7 @@ impl Store {
             return Ok(false);
         }
         self.principals[at].enabled = enabled;
+        self.principals[at].credential_generation += 1;
         Ok(true)
     }
 
@@ -1098,6 +1087,7 @@ impl Store {
         refuse_empty_password(Some(password))?;
         let at = self.position(name)?;
         self.principals[at].verifier = Some(Verifier::create(password)?);
+        self.principals[at].credential_generation += 1;
         Ok(())
     }
 
@@ -1348,6 +1338,7 @@ impl Store {
         let verifier = Verifier::create(password)
             .map_err(|error| ChangeRefused::Rejected(error.to_string()))?;
         self.principals[at].verifier = Some(verifier);
+        self.principals[at].credential_generation += 1;
         Ok(())
     }
 
@@ -1365,7 +1356,7 @@ impl Store {
         // password to prove, so a self-service change would be the account's
         // token alone setting a credential for it. An administrator can give
         // one with `lps password`; the account holder cannot.
-        if principal.verifier.is_none() {
+        if !principal.policy.password() || principal.verifier.is_none() {
             return Err(ChangeRefused::NoCredential);
         }
         Ok(principal)
@@ -1408,36 +1399,33 @@ impl Store {
         let correct = verifier.verify(secret);
 
         let principal = found?;
-        if !correct || !principal.enabled || principal.verifier.is_none() {
+        if !correct
+            || !principal.enabled
+            || !principal.policy.password()
+            || principal.verifier.is_none()
+        {
             return None;
         }
         self.identity_of(principal)
     }
 
-    /// What must be collected before [`Store::authenticate`] can be called for
-    /// `identifier`.
-    ///
-    /// # This is the only place the store answers a question before a credential
-    ///
-    /// So it is the only place that could leak one, and what it may separate is
-    /// therefore narrow: [`CredentialRequirement::None`] for a principal that
-    /// exists, is enabled and has no verifier, and [`CredentialRequirement::Password`]
-    /// for *everything else* — a principal with a password, a disabled one, and
-    /// a name that does not exist, all alike.
-    ///
-    /// That keeps PGSS Logon obligation 22 (never distinguish an unknown
-    /// principal from a bad credential) intact. The one thing an unauthenticated
-    /// caller can learn here is that a name is passwordless — which is a name
-    /// they could have logged in as anyway, so there is nothing left to protect.
-    ///
-    /// Existence on its own is a question for the identity-lookup channel
-    /// (PGSS §2), which answers it plainly and by design.
+    /// Password-side collection policy. A key-only or denied principal must
+    /// not be prompted for a password it cannot use. Unknown and disabled names
+    /// take the existing generic password/decoy path; no-credential access is
+    /// possible only through the explicit NoCredential policy.
     pub fn credential_requirement(&self, identifier: &[u8]) -> CredentialRequirement {
         let Some(principal) = self.principals.iter().find(|p| p.matches(identifier)) else {
             return CredentialRequirement::Password;
         };
-        if !principal.enabled || principal.verifier.is_some() {
+        if !principal.enabled {
             return CredentialRequirement::Password;
+        }
+        if principal.policy != Policy::NoCredential {
+            return if principal.policy.password() {
+                CredentialRequirement::Password
+            } else {
+                CredentialRequirement::Unavailable
+            };
         }
         match self.identity_of(principal) {
             Some(identity) => CredentialRequirement::None(Box::new(identity)),
@@ -1445,6 +1433,114 @@ impl Store {
             // rather than granting on a half-built identity.
             None => CredentialRequirement::Password,
         }
+    }
+
+    pub fn credential_generation(&self, identifier: &[u8]) -> Option<(u32, u64)> {
+        self.principals
+            .iter()
+            .find(|p| p.matches(identifier))
+            .map(|p| (p.rid, p.credential_generation))
+    }
+
+    pub fn key_eligible(&self, identifier: &[u8], offer: &libauthd::ssh::Offer) -> bool {
+        self.principals
+            .iter()
+            .find(|p| p.matches(identifier))
+            .is_some_and(|p| {
+                p.enabled
+                    && p.policy.ssh()
+                    && p.keys.iter().any(|k| k.blob == offer.key)
+                    && crate::ssh::eligible(&offer.key, &offer.algorithm)
+            })
+    }
+
+    pub fn authenticate_key(
+        &self,
+        binding: &libauthd::ssh::Binding,
+        offer: &libauthd::ssh::Offer,
+        generation: Option<(u32, u64)>,
+    ) -> Option<Identity> {
+        let p = self
+            .principals
+            .iter()
+            .find(|p| p.matches(binding.username.as_bytes()))?;
+        if Some((p.rid, p.credential_generation)) != generation
+            || !self.key_eligible(binding.username.as_bytes(), offer)
+            || !crate::ssh::verify(binding, offer)
+        {
+            return None;
+        }
+        self.identity_of(p)
+    }
+
+    pub fn set_credential_policy(&mut self, name: &str, policy: Policy) -> Result<(), StoreError> {
+        let at = self.position(name)?;
+        self.principals[at].policy = policy;
+        self.principals[at].credential_generation += 1;
+        Ok(())
+    }
+
+    pub fn credential_policy(&self, name: &str) -> Result<Policy, StoreError> {
+        Ok(self.principals[self.position(name)?].policy)
+    }
+
+    pub fn keys(&self, name: &str) -> Result<&[PublicKey], StoreError> {
+        Ok(&self.principals[self.position(name)?].keys)
+    }
+
+    pub fn add_key(
+        &mut self,
+        name: &str,
+        line: &str,
+        label: &str,
+    ) -> Result<PublicKey, StoreError> {
+        let at = self.position(name)?;
+        let (blob, comment) = crate::ssh::import(line)
+            .ok_or_else(|| StoreError::Invalid("unsupported or invalid SSH public key".into()))?;
+        let label = if label.is_empty() {
+            comment
+        } else {
+            label.to_owned()
+        };
+        if label.len() > MAX_LABEL || label.chars().any(char::is_control) {
+            return Err(StoreError::Invalid("invalid key label".into()));
+        }
+        let p = &mut self.principals[at];
+        if p.keys.len() >= MAX_KEYS || p.keys.iter().any(|k| k.blob == blob) {
+            return Err(StoreError::Invalid(
+                "duplicate key or key limit reached".into(),
+            ));
+        }
+        let id = loop {
+            let id = random::array::<16>()?;
+            if id != [0; 16] && !p.keys.iter().any(|k| k.id == id) {
+                break id;
+            }
+        };
+        let created = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|_| StoreError::Invalid("clock precedes Unix epoch".into()))?
+            .as_secs();
+        let key = PublicKey {
+            id,
+            blob,
+            label,
+            created,
+        };
+        p.keys.push(key.clone());
+        p.credential_generation += 1;
+        Ok(key)
+    }
+
+    pub fn remove_key(&mut self, name: &str, id: [u8; 16]) -> Result<(), StoreError> {
+        let at = self.position(name)?;
+        let p = &mut self.principals[at];
+        let Some(i) = p.keys.iter().position(|k| k.id == id) else {
+            return Err(StoreError::NotFound("SSH key".into()));
+        };
+        p.keys.remove(i);
+        p.credential_generation += 1;
+        Ok(())
     }
 
     /// The assertion this principal produces once authenticated.
@@ -1476,11 +1572,7 @@ impl Store {
     /// `Ok(None)` means no store exists — an unprovisioned machine. Every other
     /// failure is an error, and the caller must not treat it as absence.
     ///
-    /// A store written by an **older** lpsd is upgraded in memory and flagged
-    /// with [`Store::needs_rewrite`], so the caller writes it back once. Every
-    /// field added since has a defensible default, and the alternative — refuse
-    /// to start — would strand a machine whose only administrator is inside the
-    /// file it is refusing to read.
+    /// Incompatible layouts are errors, never a reason to provision.
     pub fn load<F: Fs>(fs: &F, path: &Path) -> Result<Option<Self>, StoreError> {
         let Some(file) = fs.read(path)? else {
             return Ok(None);
@@ -1565,41 +1657,27 @@ impl Store {
             // opportunistically -- a decoder that guessed wrong would consume
             // the next principal's rid. The version gate is what makes it safe.
             w.u32(principal.permitted_logon_types.bits());
+            w.u8(principal.policy as u8);
+            w.u32(principal.keys.len() as u32);
+            for key in &principal.keys {
+                w.bytes(&key.id);
+                w.bytes(&key.blob);
+                w.str(&key.label);
+                w.bytes(&key.created.to_le_bytes());
+            }
         }
         w.finish()
     }
 
     fn decode(version: u16, body: &[u8]) -> Result<Self, StoreError> {
+        if version != codec::VERSION {
+            return Err(StoreError::Corrupt(CodecError::UnsupportedVersion(version)));
+        }
         let mut r = Reader::new(body);
         let domain = [r.u32()?, r.u32()?, r.u32()?];
         let next_rid = r.u32()?;
 
-        // What each older layout is missing, and how it is filled in.
-        //
-        // Version 1 had no groups and no profile at all. Version 2 had both,
-        // plus a separate Unix ID counter that allocated 1, 2, 3… — which is
-        // what version 3 replaced with "the Unix ID is the RID".
-        //
-        // **Both are renumbered on the way in**, so every store ends up with
-        // one rule rather than a stratum per vintage. That changes a
-        // principal's uid across the upgrade, which on an ordinary Unix would
-        // be reckless — it would orphan every file they own. Here it is safe,
-        // and for a reason specific to this system: under KACS a uid decides
-        // nothing. Access is decided by the SID, and the SID is untouched.
-        let has_groups = version >= 2;
-        let has_profile = version >= 2;
-        let has_logon_types = version >= 4;
-        let upgraded = version < codec::VERSION;
-
-        // Version 2's Unix ID counter. Read and discarded: version 3 allocates
-        // no Unix IDs, so there is no counter to carry forward.
-        if version == 2 {
-            let _ = r.u32()?;
-        }
-
-        let groups = if !has_groups {
-            Vec::new()
-        } else {
+        let groups = {
             let count = bounded(r.u32()?, MAX_GROUP_OBJECTS, "groups")?;
             let mut groups = Vec::with_capacity(count);
             for _ in 0..count {
@@ -1623,7 +1701,7 @@ impl Store {
                 check_name(name, "group")?;
                 groups.push(Group {
                     rid,
-                    unix_id: if version == 2 { rid } else { stored },
+                    unix_id: stored,
                     name: name.to_string(),
                 });
             }
@@ -1634,19 +1712,7 @@ impl Store {
         let mut principals = Vec::with_capacity(count);
         for _ in 0..count {
             let rid = r.u32()?;
-            let unix_id = match version {
-                // No such field: version 1 had no concept of one.
-                1 => rid,
-                // Present, but separately allocated (1, 2, 3…). Read so the
-                // cursor advances, then discarded in favour of the RID.
-                2 => {
-                    let _ = r.u32()?;
-                    rid
-                }
-                // A stored attribute, which defaults to the RID but need not
-                // equal it — an imported account keeps the number it had.
-                _ => r.u32()?,
-            };
+            let unix_id = r.u32()?;
             let flags = r.u8()?;
             let name = r.str()?;
             if name.is_empty() || name.len() > MAX_NAME_BYTES {
@@ -1676,15 +1742,7 @@ impl Store {
                 memberships.push(sid.to_sid());
             }
 
-            let (primary_group, home, shell, display_name, claims) = if !has_profile {
-                (
-                    default_primary_group(),
-                    default_home(name),
-                    DEFAULT_SHELL.to_string(),
-                    String::new(),
-                    Vec::new(),
-                )
-            } else {
+            let (primary_group, home, shell, display_name, claims) = {
                 let primary = SidRef::from_bytes(r.bytes()?)
                     .ok_or_else(|| {
                         StoreError::Invalid(format!(
@@ -1712,21 +1770,47 @@ impl Store {
                 (primary, home, shell, display_name, claims)
             };
 
-            // Absent before version 4, and absent means "not stated" rather
-            // than "nothing permitted" -- an upgrade must not lock every
-            // existing principal out. The authority substitutes its default,
-            // which is everything a person could use and never Service.
-            let permitted_logon_types = if has_logon_types {
-                LogonTypes(r.u32()?)
-            } else {
-                LogonTypes::UNSTATED
-            };
+            let permitted_logon_types = LogonTypes(r.u32()?);
 
+            let policy = Policy::from_u8(r.u8()?)
+                .ok_or_else(|| StoreError::Invalid("invalid credential policy".into()))?;
+            let key_count = bounded(r.u32()?, MAX_KEYS, "SSH keys")?;
+            let mut keys: Vec<PublicKey> = Vec::with_capacity(key_count);
+            for _ in 0..key_count {
+                let id: [u8; 16] = r
+                    .bytes()?
+                    .try_into()
+                    .map_err(|_| StoreError::Invalid("invalid key ID".into()))?;
+                let blob = r.bytes()?.to_vec();
+                let label = r.str()?.to_owned();
+                let created = u64::from_le_bytes(
+                    r.bytes()?
+                        .try_into()
+                        .map_err(|_| StoreError::Invalid("invalid key time".into()))?,
+                );
+                if id == [0; 16]
+                    || crate::ssh::parse(&blob).is_none()
+                    || label.len() > MAX_LABEL
+                    || label.chars().any(char::is_control)
+                    || keys.iter().any(|k| k.id == id || k.blob == blob)
+                {
+                    return Err(StoreError::Invalid("invalid or duplicate SSH key".into()));
+                }
+                keys.push(PublicKey {
+                    id,
+                    blob,
+                    label,
+                    created,
+                });
+            }
             principals.push(Principal {
                 rid,
                 unix_id,
                 name: name.to_string(),
                 enabled: flags & Principal::FLAG_ENABLED != 0,
+                policy,
+                keys,
+                credential_generation: 0,
                 verifier,
                 groups: memberships,
                 primary_group,
@@ -1754,7 +1838,6 @@ impl Store {
             principals,
             groups,
             decoy: Verifier::decoy()?,
-            upgraded,
         };
         store.check_consistent()?;
         Ok(store)
@@ -2120,6 +2203,145 @@ mod tests {
         store
     }
 
+    fn ssh_fixture() -> (String, libauthd::ssh::Binding, libauthd::ssh::Offer) {
+        use signature::Signer;
+        use ssh_key::{
+            PublicKey, Signature,
+            private::{Ed25519Keypair, Ed25519PrivateKey},
+        };
+        let pair = Ed25519Keypair::from(Ed25519PrivateKey::from_bytes(&[7; 32]));
+        let key = PublicKey::new(pair.public.into(), "test key");
+        let binding = libauthd::ssh::Binding {
+            connection: [1; 16],
+            session: vec![2; 32],
+            username: "alice".into(),
+        };
+        let mut offer = libauthd::ssh::Offer {
+            algorithm: "ssh-ed25519".into(),
+            key: key.to_bytes().unwrap(),
+            signature: vec![],
+        };
+        let sig: Signature = pair
+            .try_sign(&binding.signed_data(&offer).unwrap())
+            .unwrap();
+        offer.signature = Vec::try_from(sig).unwrap();
+        (key.to_openssh().unwrap(), binding, offer)
+    }
+
+    #[test]
+    fn ssh_policy_enrollment_and_revocation_are_independent() {
+        let mut store = Store::provision().unwrap();
+        store.add(new("alice", vec![]), Some(b"password")).unwrap();
+        let (line, binding, offer) = ssh_fixture();
+        let key = store.add_key("alice", &line, "laptop").unwrap();
+        assert!(
+            !store.key_eligible(b"alice", &offer),
+            "enrollment cannot change password policy"
+        );
+        store
+            .set_credential_policy("alice", Policy::SshPublicKey)
+            .unwrap();
+        assert!(store.key_eligible(b"alice", &offer));
+        assert!(
+            store.authenticate(b"alice", b"password").is_none(),
+            "key-only cannot fall back to stored password"
+        );
+        let generation = store.credential_generation(b"alice");
+        assert!(
+            store
+                .authenticate_key(&binding, &offer, generation)
+                .is_some()
+        );
+        let mut wrong = binding.clone();
+        wrong.session[0] ^= 1;
+        assert!(store.authenticate_key(&wrong, &offer, generation).is_none());
+        store.remove_key("alice", key.id).unwrap();
+        assert_eq!(
+            store.credential_policy("alice").unwrap(),
+            Policy::SshPublicKey
+        );
+        assert!(matches!(
+            store.credential_requirement(b"alice"),
+            CredentialRequirement::Unavailable
+        ));
+        assert!(
+            store
+                .authenticate_key(&binding, &offer, generation)
+                .is_none()
+        );
+        store.add_key("alice", &line, "again").unwrap();
+        assert!(
+            store
+                .authenticate_key(&binding, &offer, generation)
+                .is_none(),
+            "remove/re-add invalidates pending proof"
+        );
+        assert!(
+            store
+                .authenticate_key(&binding, &offer, store.credential_generation(b"alice"))
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn ssh_pending_proof_cannot_follow_a_recreated_principal() {
+        let mut store = Store::provision().unwrap();
+        let (line, binding, offer) = ssh_fixture();
+        store.add(new("alice", vec![]), None).unwrap();
+        store.add_key("alice", &line, "").unwrap();
+        store
+            .set_credential_policy("alice", Policy::SshPublicKey)
+            .unwrap();
+        let generation = store.credential_generation(b"alice");
+        store.remove("alice").unwrap();
+        store.add(new("alice", vec![]), None).unwrap();
+        store.add_key("alice", &line, "").unwrap();
+        store
+            .set_credential_policy("alice", Policy::SshPublicKey)
+            .unwrap();
+        assert!(
+            store
+                .authenticate_key(&binding, &offer, generation)
+                .is_none()
+        );
+        assert!(
+            store
+                .authenticate_key(&binding, &offer, store.credential_generation(b"alice"))
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn ssh_keys_and_explicit_policy_survive_storage() {
+        let mut store = Store::provision().unwrap();
+        store.add(new("alice", vec![]), None).unwrap();
+        let (line, binding, offer) = ssh_fixture();
+        let key = store.add_key("alice", &line, "work laptop").unwrap();
+        assert!(store.add_key("alice", &line, "duplicate").is_err());
+        store
+            .set_credential_policy("alice", Policy::SshPublicKey)
+            .unwrap();
+        let decoded = Store::decode(codec::VERSION, &store.encode()).unwrap();
+        assert_eq!(decoded.keys("alice").unwrap(), &[key]);
+        assert_eq!(
+            decoded.credential_policy("alice").unwrap(),
+            Policy::SshPublicKey
+        );
+        assert!(
+            decoded
+                .authenticate_key(&binding, &offer, decoded.credential_generation(b"alice"))
+                .is_some()
+        );
+        store.set_enabled("alice", false).unwrap();
+        assert!(!store.key_eligible(b"alice", &offer));
+        assert!(!store.key_eligible(b"missing", &offer));
+        assert!(
+            store
+                .authenticate_key(&binding, &offer, store.credential_generation(b"alice"))
+                .is_none()
+        );
+    }
+
     // -----------------------------------------------------------------------
     // Passwordless principals
     // -----------------------------------------------------------------------
@@ -2218,14 +2440,18 @@ mod tests {
         assert!(store.authenticate(b"jack", b"password").is_some());
     }
 
-    /// Giving a passwordless principal a password is a one-way door only
-    /// because nothing exposes the reverse — but it must at least work.
+    /// Adding material does not silently change the authentication policy.
     #[test]
-    fn a_passwordless_principal_can_be_given_a_password() {
+    fn adding_a_password_requires_an_explicit_policy_change() {
         let mut store = Store::provision().expect("must provision");
         store.add(new("kiosk", vec![]), None).expect("must add");
         store.set_password("kiosk", b"pw").expect("must set");
 
+        assert!(!needs_a_password(&store, "kiosk"));
+        assert!(store.authenticate(b"kiosk", b"pw").is_none());
+        store
+            .set_credential_policy("kiosk", Policy::Password)
+            .unwrap();
         assert!(needs_a_password(&store, "kiosk"));
         assert!(store.authenticate(b"kiosk", b"pw").is_some());
     }
@@ -2273,30 +2499,6 @@ mod tests {
                 .permits(LogonType::Interactive)
         );
         assert!(!ordinary.permitted_logon_types.permits(LogonType::Service));
-    }
-
-    /// A store written before the field existed must not come back with every
-    /// principal locked out — and must not come back with every principal
-    /// usable as a service identity either.
-    #[test]
-    fn a_store_from_before_the_field_reads_as_unstated() {
-        use libauthd::wire::LogonType;
-        let mut store = Store::provision().expect("must provision");
-        store
-            .add(new("jack", vec![]), Some(b"password"))
-            .expect("must add");
-        let body = store.encode();
-
-        // Version 3 is the last layout without the field. Its body is this
-        // one minus the trailing u32 per principal, which `decode` must not
-        // look for.
-        let older = &body[..body.len() - 4];
-        let back = Store::decode(3, older).expect("a version 3 store must still read");
-
-        let jack = back.record("jack").expect("must be there");
-        assert!(jack.permitted_logon_types.is_unstated());
-        assert!(jack.permitted_logon_types.permits(LogonType::Interactive));
-        assert!(!jack.permitted_logon_types.permits(LogonType::Service));
     }
 
     /// The empty verifier frame survives a write and a read. If it did not, a
@@ -2986,7 +3188,6 @@ mod tests {
             .expect("must be present");
         assert_eq!(loaded.domain_sid().unwrap().to_string(), domain);
         assert_eq!(loaded.len(), 1);
-        assert!(!loaded.needs_rewrite());
 
         let identity = loaded
             .authenticate(b"jack", b"password")
@@ -3490,142 +3691,21 @@ mod tests {
         ));
     }
 
-    // -----------------------------------------------------------------------
-    // Upgrading a version 1 store
-    // -----------------------------------------------------------------------
-
-    /// A version 1 body: no Unix ID counter, no groups, and no profile or
-    /// claims on a principal. Written by hand because no code produces it any
-    /// more, which is exactly why the upgrade path needs a test.
-    fn version_1_body(
-        domain: [u32; 3],
-        next_rid: u32,
-        principals: &[(u32, &str, Verifier)],
-    ) -> Vec<u8> {
-        let mut w = Writer::new();
-        w.u32(domain[0]);
-        w.u32(domain[1]);
-        w.u32(domain[2]);
-        w.u32(next_rid);
-        w.u32(principals.len() as u32);
-        for (rid, name, verifier) in principals {
-            w.u32(*rid);
-            w.u8(Principal::FLAG_ENABLED);
-            w.str(name);
-            let mut inner = Writer::new();
-            verifier.encode(&mut inner);
-            w.bytes(&inner.finish());
-            w.u32(1);
-            w.bytes(
-                Sid::well_known(WellKnown::Administrators)
-                    .as_ref()
-                    .as_bytes(),
-            );
+    #[test]
+    fn incompatible_store_versions_are_refused_without_rewriting() {
+        let store = seeded();
+        for version in [1, 2, 3, 5] {
+            assert!(matches!(Store::decode(version, &store.encode()),
+                Err(StoreError::Corrupt(CodecError::UnsupportedVersion(v))) if v == version));
         }
-        w.finish()
     }
 
     #[test]
-    fn a_version_1_store_is_upgraded_rather_than_refused() {
-        let verifier = Verifier::create(b"password").unwrap();
-        let body = version_1_body([1, 2, 3], 1001, &[(1000, "jack", verifier)]);
-
-        let store = Store::decode(1, &body).expect("an older store must be readable");
-        assert!(
-            store.needs_rewrite(),
-            "the caller has to know to write it back in the new format"
-        );
-
-        let record = store.record("jack").unwrap();
-        assert_eq!(record.rid, 1000);
-        assert_eq!(record.unix_id, 1000, "numbered on the way in, from the RID");
-        assert_eq!(record.home, "/home/jack");
-        assert_eq!(record.shell, "/bin/sh");
-        assert_eq!(record.primary_group.sid, default_primary_group());
-        assert!(record.claims.is_empty());
-
-        // The credential still works, which is the whole point.
-        assert!(store.authenticate(b"jack", b"password").is_some());
-    }
-
-    #[test]
-    fn an_upgraded_store_numbers_every_principal_distinctly() {
-        let body = version_1_body(
-            [1, 2, 3],
-            1002,
-            &[
-                (1000, "jack", Verifier::create(b"a").unwrap()),
-                (1001, "guest", Verifier::create(b"b").unwrap()),
-            ],
-        );
-        let store = Store::decode(1, &body).expect("must upgrade");
-        assert_eq!(store.record("jack").unwrap().unix_id, 1000);
-        assert_eq!(store.record("guest").unwrap().unix_id, 1001);
-    }
-
-    /// Version 2 allocated Unix IDs from a counter of its own — 1, 2, 3… — so
-    /// upgrading renumbers them onto the RID rather than leaving one store
-    /// carrying two conventions.
-    ///
-    /// That changes a principal's uid, which on an ordinary Unix would orphan
-    /// every file they own. It is safe here for a reason particular to this
-    /// system: under KACS a uid decides nothing. Access is decided by the SID,
-    /// and the SID does not move.
-    #[test]
-    fn a_version_2_store_is_renumbered_onto_the_rid() {
-        let mut w = Writer::new();
-        w.u32(1);
-        w.u32(2);
-        w.u32(3);
-        w.u32(1002); // next_rid
-        w.u32(3); // version 2's Unix ID counter
-        w.u32(1); // one group
-        w.u32(1001); // its rid
-        w.u32(2); // its separately-allocated unix id
-        w.str("developers");
-        w.u32(1); // one principal
-        w.u32(1000); // rid
-        w.u32(1); // its separately-allocated unix id
-        w.u8(Principal::FLAG_ENABLED);
-        w.str("jack");
-        let mut inner = Writer::new();
-        Verifier::create(b"password").unwrap().encode(&mut inner);
-        w.bytes(&inner.finish());
-        w.u32(0); // no memberships
-        w.bytes(default_primary_group().as_ref().as_bytes());
-        w.str("/home/jack");
-        w.str("/bin/sh");
-        w.str("");
-        w.u32(0); // no claims
-        let body = w.finish();
-
-        let store = Store::decode(2, &body).expect("a version 2 store must be readable");
-        assert!(store.needs_rewrite());
-        assert_eq!(store.record("jack").unwrap().unix_id, 1000);
-        assert_eq!(store.group_summaries().unwrap()[0].unix_id, 1001);
-        assert!(store.authenticate(b"jack", b"password").is_some());
-    }
-
-    #[test]
-    fn an_upgraded_store_writes_back_in_the_current_format() {
-        let fs = FaultyFs::new();
-        let body = version_1_body(
-            [1, 2, 3],
-            1001,
-            &[(1000, "jack", Verifier::create(b"pw").unwrap())],
-        );
-        let store = Store::decode(1, &body).expect("must upgrade");
-        store.save(&fs, path()).expect("must save");
-
-        let reloaded = Store::load(&fs, path()).unwrap().unwrap();
-        assert!(
-            !reloaded.needs_rewrite(),
-            "once written back it is a current store, not an upgraded one"
-        );
-        assert_eq!(
-            reloaded.record("jack").unwrap(),
-            store.record("jack").unwrap()
-        );
+    fn previous_layout_under_same_version_is_refused() {
+        let store = seeded();
+        let body = store.encode();
+        // Previous version-4 layout stopped after permitted_logon_types.
+        assert!(Store::decode(codec::VERSION, &body[..body.len() - 5]).is_err());
     }
 
     // -----------------------------------------------------------------------

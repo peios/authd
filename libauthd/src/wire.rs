@@ -187,7 +187,11 @@ impl LogonTypes {
 
     /// The set to apply, substituting the default where nothing was stated.
     pub const fn effective(self) -> LogonTypes {
-        if self.is_unstated() { Self::DEFAULT } else { self }
+        if self.is_unstated() {
+            Self::DEFAULT
+        } else {
+            self
+        }
     }
 
     /// Whether this set permits `logon_type`. Answers against the *effective*
@@ -259,12 +263,15 @@ impl IdentifierType {
 pub enum CredentialType {
     /// Free text, never echoed.
     Password = 1,
+    /// Standard SSH public-key proof, bound to an authorized live transport.
+    SshPublicKey = 2,
 }
 
 impl CredentialType {
     pub fn from_u8(value: u8) -> Option<Self> {
         Some(match value {
             1 => Self::Password,
+            2 => Self::SshPublicKey,
             _ => return None,
         })
     }
@@ -352,6 +359,9 @@ impl Denial {
 /// verified peer is permitted to request.
 #[derive(Debug)]
 pub struct LogonStart {
+    /// None permits intentional credential-free source policy.
+    pub required_credential_type: Option<CredentialType>,
+    pub ssh_binding: Option<crate::ssh::Binding>,
     pub logon_type: LogonType,
     pub identifier_type: IdentifierType,
     /// The identifier itself, interpreted per [`Self::identifier_type`].
@@ -381,6 +391,8 @@ pub struct LogonStart {
 /// One thing the authority wants from the user.
 #[derive(Debug, Clone)]
 pub struct Prompt {
+    /// Typed collection parameters; empty for Password.
+    pub parameters: Vec<u8>,
     /// Correlates the answer. Unique within the conversation; opaque to the
     /// client, which must echo it back unchanged.
     pub credential_ref: u32,
@@ -583,16 +595,42 @@ pub(crate) fn read_logon_start_body(b: &mut Reader<'_>) -> Result<LogonStart, Wi
     let tty = frame::non_empty(b.string(MAX_TTY_BYTES)?);
     let remote_host = frame::non_empty(b.string(MAX_REMOTE_HOST_BYTES)?);
 
-    // Optional trailing field. A client predating it supports exactly the
-    // credential types that existed when it was added — which is Password, the
-    // only one there has ever been.
-    let supported_credential_types = if b.at_end() {
-        vec![CredentialType::Password]
-    } else {
-        read_supported_credential_types(b)?
+    let supported_credential_types = read_supported_credential_types(b)?;
+    let required_credential_type = match b.u8()? {
+        0 => None,
+        v => Some(CredentialType::from_u8(v).ok_or(WireError::UnknownValue)?),
     };
+    let ssh_binding = match b.u8()? {
+        0 => None,
+        1 => {
+            let mut r = b.open()?;
+            let connection = r.take(16)?.try_into().map_err(|_| WireError::Truncated)?;
+            let value = crate::ssh::Binding {
+                connection,
+                session: r.bytes(64)?.to_vec(),
+                username: r.string(256)?.to_owned(),
+            };
+            value.validate()?;
+            if !r.at_end() {
+                return Err(WireError::UnknownValue);
+            }
+            Some(value)
+        }
+        _ => return Err(WireError::UnknownValue),
+    };
+    if required_credential_type.is_some_and(|t| !supported_credential_types.contains(&t))
+        || supported_credential_types.contains(&CredentialType::SshPublicKey)
+            != ssh_binding.is_some()
+        || ssh_binding.as_ref().is_some_and(|b| {
+            identifier_type != IdentifierType::Username || b.username.as_bytes() != identifier
+        })
+    {
+        return Err(WireError::UnknownValue);
+    }
 
     Ok(LogonStart {
+        required_credential_type,
+        ssh_binding,
         logon_type,
         identifier_type,
         identifier,
@@ -603,6 +641,20 @@ pub(crate) fn read_logon_start_body(b: &mut Reader<'_>) -> Result<LogonStart, Wi
 }
 
 pub(crate) fn write_logon_start_body(w: &mut Writer, start: &LogonStart) -> Result<(), WireError> {
+    if start
+        .required_credential_type
+        .is_some_and(|t| !start.supported_credential_types.contains(&t))
+        || start
+            .supported_credential_types
+            .contains(&CredentialType::SshPublicKey)
+            != start.ssh_binding.is_some()
+        || start.ssh_binding.as_ref().is_some_and(|b| {
+            start.identifier_type != IdentifierType::Username
+                || b.username.as_bytes() != start.identifier
+        })
+    {
+        return Err(WireError::UnknownValue);
+    }
     w.u8(start.logon_type as u8);
     w.u8(start.identifier_type as u8);
     w.bytes(&start.identifier, MAX_IDENTIFIER_BYTES)?;
@@ -611,7 +663,20 @@ pub(crate) fn write_logon_start_body(w: &mut Writer, start: &LogonStart) -> Resu
         start.remote_host.as_deref().unwrap_or(""),
         MAX_REMOTE_HOST_BYTES,
     )?;
-    write_supported_credential_types(w, &start.supported_credential_types)
+    write_supported_credential_types(w, &start.supported_credential_types)?;
+    w.u8(start.required_credential_type.map_or(0, |v| v as u8));
+    w.u8(u8::from(start.ssh_binding.is_some()));
+    if let Some(binding) = &start.ssh_binding {
+        binding.validate()?;
+        let at = w.open();
+        for byte in binding.connection {
+            w.u8(byte);
+        }
+        w.bytes(&binding.session, 64)?;
+        w.string(&binding.username, 256)?;
+        w.close(at);
+    }
+    Ok(())
 }
 
 /// A capability list, dropping any value this build does not recognise.
@@ -660,13 +725,26 @@ pub(crate) fn read_credential_request_body(
         })
     })?;
     let prompts = b.array(MAX_PROMPTS, |p| {
-        Ok(Prompt {
+        let prompt = Prompt {
             credential_ref: p.u32()?,
             credential_type: CredentialType::from_u8(p.u8()?).ok_or(WireError::UnknownValue)?,
             credential_name: p.string(MAX_NAME_BYTES)?.to_owned(),
-        })
+            parameters: p.bytes(4096)?.to_vec(),
+        };
+        validate_prompt_parameters(&prompt)?;
+        Ok(prompt)
     })?;
     Ok(CredentialRequest { messages, prompts })
+}
+
+fn validate_prompt_parameters(prompt: &Prompt) -> Result<(), WireError> {
+    match prompt.credential_type {
+        CredentialType::Password if prompt.parameters.is_empty() => Ok(()),
+        CredentialType::SshPublicKey => {
+            crate::ssh::read_disposition(&prompt.parameters).map(|_| ())
+        }
+        _ => Err(WireError::UnknownValue),
+    }
 }
 
 pub(crate) fn write_credential_request_body(
@@ -683,10 +761,12 @@ pub(crate) fn write_credential_request_body(
 
     w.count(req.prompts.len(), MAX_PROMPTS)?;
     for prompt in &req.prompts {
+        validate_prompt_parameters(prompt)?;
         let at = w.open();
         w.u32(prompt.credential_ref);
         w.u8(prompt.credential_type as u8);
         w.string(&prompt.credential_name, MAX_NAME_BYTES)?;
+        w.bytes(&prompt.parameters, 4096)?;
         w.close(at);
     }
     Ok(())
@@ -740,7 +820,11 @@ pub fn encode_logon_start(start: &LogonStart) -> Result<Vec<u8>, WireError> {
 }
 
 pub fn decode_credential_request(buf: &[u8]) -> Result<CredentialRequest, WireError> {
-    read_credential_request_body(&mut frame::open_body(&FRAMING, buf, MSG_CREDENTIAL_REQUEST)?)
+    read_credential_request_body(&mut frame::open_body(
+        &FRAMING,
+        buf,
+        MSG_CREDENTIAL_REQUEST,
+    )?)
 }
 
 pub fn encode_credential_request(req: &CredentialRequest) -> Result<Vec<u8>, WireError> {
@@ -877,6 +961,9 @@ mod tests {
 
     fn start() -> LogonStart {
         LogonStart {
+            required_credential_type: None,
+            ssh_binding: None,
+
             logon_type: LogonType::Interactive,
             identifier_type: IdentifierType::Username,
             identifier: b"jack".to_vec(),
@@ -917,6 +1004,8 @@ mod tests {
                 text: "Password expires in 3 days.".into(),
             }],
             prompts: vec![Prompt {
+                parameters: Vec::new(),
+
                 credential_ref: 1,
                 credential_type: CredentialType::Password,
                 credential_name: "Password".into(),
@@ -1103,27 +1192,15 @@ mod tests {
         );
     }
 
-    /// A client predating the capability field must still be understood, and
-    /// must be read as supporting the types that existed before it.
     #[test]
-    fn absent_capability_field_defaults_to_password() {
+    fn a_logon_start_without_mandatory_binding_fields_is_rejected() {
         let full = encode_logon_start(&start()).unwrap();
-
-        // Truncate the trailing capability field (u32 length + one byte),
-        // fixing up the body and message lengths as an older encoder would
-        // have written them.
-        let mut bytes = full[..full.len() - 5].to_vec();
+        let mut bytes = full[..full.len() - 2].to_vec();
         let body_len = (bytes.len() - HEADER_BYTES - 4) as u32;
         bytes[HEADER_BYTES..HEADER_BYTES + 4].copy_from_slice(&body_len.to_le_bytes());
         let total = bytes.len() as u32;
         bytes[8..12].copy_from_slice(&total.to_le_bytes());
-
-        let decoded = decode_logon_start(&bytes).expect("older client must decode");
-        assert_eq!(decoded.identifier, b"jack");
-        assert_eq!(
-            decoded.supported_credential_types,
-            vec![CredentialType::Password]
-        );
+        assert!(decode_logon_start(&bytes).is_err());
     }
 
     /// The one place an unknown enum value is not fatal. A capability list is a
@@ -1134,8 +1211,8 @@ mod tests {
         let mut bytes = encode_logon_start(&start()).unwrap();
 
         // Append an unknown credential type to the capability list.
-        bytes.push(99);
-        let list_len_at = bytes.len() - 2 - 4;
+        bytes.insert(bytes.len() - 2, 99);
+        let list_len_at = bytes.len() - 2 - 2 - 4;
         let list_len = u32::from_le_bytes(bytes[list_len_at..list_len_at + 4].try_into().unwrap());
         bytes[list_len_at..list_len_at + 4].copy_from_slice(&(list_len + 1).to_le_bytes());
         let body_len = (bytes.len() - HEADER_BYTES - 4) as u32;
@@ -1207,10 +1284,9 @@ mod tests {
     /// an empty profile must survive rather than be confused with an absent one.
     #[test]
     fn an_empty_profile_round_trips() {
-        let granted = decode_access_granted(
-            &encode_access_granted(&AccessGranted::default()).unwrap(),
-        )
-        .unwrap();
+        let granted =
+            decode_access_granted(&encode_access_granted(&AccessGranted::default()).unwrap())
+                .unwrap();
         assert_eq!(granted.profile, Profile::default());
     }
 
@@ -1292,7 +1368,11 @@ mod tests {
     #[test]
     fn terminal_messages_round_trip() {
         let granted = decode_access_granted(
-            &encode_access_granted(&AccessGranted { session_id: 42, ..Default::default() }).unwrap(),
+            &encode_access_granted(&AccessGranted {
+                session_id: 42,
+                ..Default::default()
+            })
+            .unwrap(),
         )
         .unwrap();
         assert_eq!(granted.session_id, 42);
@@ -1376,7 +1456,10 @@ mod tests {
         let bytes = encode_logon_start(&opening).unwrap();
         assert_eq!(u16::from_le_bytes([bytes[4], bytes[5]]), 1);
         assert_eq!(bytes[HEADER_BYTES + 4], 10);
-        assert_eq!(decode_logon_start(&bytes).unwrap().logon_type, LogonType::RemoteInteractive);
+        assert_eq!(
+            decode_logon_start(&bytes).unwrap().logon_type,
+            LogonType::RemoteInteractive
+        );
     }
 
     #[test]
@@ -1432,7 +1515,11 @@ mod tests {
         let messages: Vec<Vec<u8>> = vec![
             encode_logon_start(&start()).unwrap(),
             encode_credential_request(&request()).unwrap(),
-            encode_access_granted(&AccessGranted { session_id: 1, ..Default::default() }).unwrap(),
+            encode_access_granted(&AccessGranted {
+                session_id: 1,
+                ..Default::default()
+            })
+            .unwrap(),
             encode_access_denied(&AccessDenied {
                 denial: Denial::Internal,
                 reason: "x".into(),

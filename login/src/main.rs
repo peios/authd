@@ -322,6 +322,9 @@ fn attempt(
     })?;
 
     let start = LogonStart {
+        required_credential_type: None,
+        ssh_binding: None,
+
         logon_type: LogonType::Interactive,
         identifier_type: IdentifierType::Username,
         identifier: username.as_bytes().to_vec(),
@@ -399,6 +402,9 @@ fn converse(socket: &UnixStream) -> Result<Granted, Rejected> {
                     // echoing a secret to the screen. Unreachable unless an
                     // authority ignores our advertised capabilities.
                     let data = match prompt.credential_type {
+                        CredentialType::SshPublicKey => {
+                            return Err(fatal("Unsupported credential type.".into(), rendered));
+                        }
                         CredentialType::Password => {
                             rendered = true;
                             tty::prompt_secret(&format!("{}: ", prompt.credential_name)).map_err(

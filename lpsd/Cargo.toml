@@ -32,3 +32,9 @@ argon2 = { version = "0.5", default-features = false, features = ["alloc"] }
 # equivalent, and the alternative (`/dev/urandom`) cannot promise the CRNG was
 # seeded, which is exactly the promise first-boot provisioning needs.
 libc = "0.2"
+
+# Public-key parsing and signature verification stay in the principal source.
+ssh-key = { version = "0.6.7", default-features = false, features = ["std", "ed25519", "rsa"] }
+signature = "2"
+rsa = { version = "0.9.10", default-features = false, features = ["std"] }
+sha2 = { version = "0.10", features = ["oid"] }
