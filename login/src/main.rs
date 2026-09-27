@@ -26,8 +26,6 @@
 //! `exec` also replaces the address space, so the credential material this
 //! process handled does not survive into the user's shell.
 
-mod console;
-
 use std::os::fd::OwnedFd;
 use std::os::unix::net::UnixStream;
 use std::os::unix::process::CommandExt;
@@ -103,7 +101,6 @@ enum Identify {
 }
 
 struct Options {
-    console: bool,
     identify: Identify,
     /// `-p`: keep the inherited environment instead of building a fresh one.
     preserve_environment: bool,
@@ -143,7 +140,6 @@ fn parse_arguments() -> Result<Options, String> {
 
 fn parse_from<I: Iterator<Item = String>>(arguments: I) -> Result<Options, String> {
     let mut options = Options {
-        console: false,
         identify: Identify::Prompt,
         preserve_environment: false,
         remote_host: None,
@@ -191,7 +187,6 @@ fn parse_from<I: Iterator<Item = String>>(arguments: I) -> Result<Options, Strin
                     Identify::TryNoPassword(name)
                 };
             }
-            "--console" => options.console = true,
             other => return Err(format!("unknown option: {other}")),
         }
     }
@@ -201,9 +196,6 @@ fn parse_from<I: Iterator<Item = String>>(arguments: I) -> Result<Options, Strin
 
 fn run(options: Options) -> Result<(), String> {
     become_session_leader();
-    if options.console {
-        console::prepare()?;
-    }
 
     let remote = options.remote_host.as_deref();
     let (username, token, profile) = match options.identify {

@@ -348,16 +348,11 @@ expected = {
 for filename, privileges in expected.items():
     value = json.loads((root / filename).read_text())
     services = [key for key in value["keys"] if "\\Services\\" in key["path"]]
-    assert len(services) == (4 if filename == "login-console.reg" else 1), (filename, services)
-    for service in services:
-        values = {entry["name"]: entry for entry in service.get("values", [])}
-        required = values["RequiredPrivileges"]
-        assert required["type"] == "multi", (filename, required)
-        assert required["data"] == privileges, (filename, required["data"])
-        if filename == "login-console.reg":
-            assert values["Arguments"]["data"][0] == "--console"
-            if service["path"].split("\\")[-1] != "login-console":
-                assert values["Arguments"]["data"] == ["--console"]
+    assert len(services) == 1, (filename, services)
+    values = {entry["name"]: entry for entry in services[0].get("values", [])}
+    required = values["RequiredPrivileges"]
+    assert required["type"] == "multi", (filename, required)
+    assert required["data"] == privileges, (filename, required["data"])
 PY
 /usr/bin/sh -n "$PEKIT_OUT/usr/libexec/lpsd/first-account"
 for manual in \
