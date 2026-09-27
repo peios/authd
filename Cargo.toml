@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["libauthd", "libtty", "authd", "lpsd", "lps", "login", "nss"]
+members = ["libauthd", "libtty", "libsession", "authd", "lpsd", "lps", "login", "nss"]
 
 # authd is its own workspace root, like peios-rs and libpeios.
 #
@@ -16,6 +16,8 @@ members = ["libauthd", "libtty", "authd", "lpsd", "lps", "login", "nss"]
 # libtty is the exception that proves the rule: not a trust domain but a
 # utility, shared by login and lps because both must read a password from a
 # terminal and neither should own a second copy of the termios guard.
+# libsession likewise shares user-session preferences between console, SSH
+# and GXWI originators; authentication daemons do not depend on it.
 #
 # Each daemon is a separate crate *because* each sits in a separate trust
 # domain: sharing a crate would make it easy to share code across a boundary by

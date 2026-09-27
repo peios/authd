@@ -690,6 +690,14 @@ fn exec_shell(username: &str, profile: &Profile, preserve_environment: bool) -> 
             .env("TERM", term);
     }
 
+    // Locale is session policy, including with -p: do not inherit an LC_ALL
+    // or category override from the service which hosted the login prompt.
+    command.env_remove("LC_ALL").env_remove("LANGUAGE");
+    for category in libsession::locale::CATEGORIES {
+        command.env_remove(category);
+    }
+    command.envs(libsession::locale::current());
+
     // Only returns on failure.
     Err(format!("could not start {shell}: {}", command.exec()))
 }

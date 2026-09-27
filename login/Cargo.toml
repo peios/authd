@@ -11,6 +11,7 @@ name = "login"
 path = "src/main.rs"
 
 [dependencies]
+libsession = { path = "../libsession" }
 libauthd = { path = "../libauthd" }
 libc = "0.2"
 # Terminal input, shared with `lps`: both must take a password from a terminal

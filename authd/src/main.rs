@@ -64,6 +64,7 @@ mod conversation;
 mod derive;
 mod domain;
 mod home;
+mod user_registry;
 mod ident;
 mod log;
 mod peer;

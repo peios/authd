@@ -41,7 +41,8 @@ errors fail closed. This option grants no authentication authority.
 .TP
 .B \-p
 Preserve the inherited environment instead of constructing a fresh login
-environment.
+environment. Locale preferences are still refreshed from the registry;
+inherited LC_ALL and LANGUAGE are removed.
 .TP
 .B \-H
 Accept the conventional request to suppress a hostname banner.  The current
@@ -61,6 +62,12 @@ the normal prompt.
 .TP
 .B \-\-
 End option processing.
+.SH LOCALE
+New sessions read LANG and individual LC_* preferences from
+Machine\eSystem\eLocale, then Users\e<SID>\eLocale for the granted principal.
+The fallback is C.UTF-8. Invalid or uninstalled locales retain the previous
+default. LC_ALL is not a stored preference. Changes apply at the next login;
+applications inherit the session environment.
 .SH SECURITY
 The traditional
 .B \-f

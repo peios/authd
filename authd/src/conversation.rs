@@ -1067,6 +1067,7 @@ fn grant(
     //
     // Never fatal: a logon is not worth failing over a directory.
     home::ensure(user, &profile.home);
+    crate::user_registry::ensure(user);
 
     let message = encode_access_granted(&AccessGranted {
         session_id: granted.session.0,
