@@ -7,6 +7,9 @@
   ],
   "keys": [
     {"path": "Machine\\System"},
+    {"path": "Machine\\System\\Locale", "values": [
+      {"name": "LANG", "type": "sz", "data": "C.UTF-8"}
+    ]},
     {"path": "Machine\\System\\Services"},
     {
       "path": "Machine\\System\\Services\\login-console",
