@@ -80,11 +80,8 @@ use crate::{derive, log, peer, policy, resolve, service_sid};
 ///
 /// Spelled as the service manager spells them in a service definition's
 /// `Identity`, matched without regard to case.
-const SERVICE_IDENTITIES: &[(&str, u32)] = &[
-    ("SYSTEM", 18),
-    ("LocalService", 19),
-    ("NetworkService", 20),
-];
+const SERVICE_IDENTITIES: &[(&str, u32)] =
+    &[("SYSTEM", 18), ("LocalService", 19), ("NetworkService", 20)];
 
 /// Whether a peer may attest a service identity — obtain a token with no
 /// credential behind it.
@@ -138,7 +135,7 @@ pub fn serve(
     // The authority's own service identities need no lookup: nothing holds
     // them, no credential could exist for them, and they are designated by
     // construction.
-    if let Some(user) = well_known_identity(&attest.identity) {
+    if let Some(user) = virtual_identity(&attest.identity, &service) {
         return mint_and_send(stream, user.as_ref(), &[], &service, &attest.service);
     }
 
@@ -233,6 +230,17 @@ fn resolve_service_principal(registry: &Registry, identity: &str) -> Option<Reso
         .unwrap_or_default();
 
     Some(Resolved { user, groups })
+}
+
+/// `Service` is a distinct virtual account for the attested service name.
+/// Only the authenticated PID-1 attestation path calls this; it does not
+/// create a principal-source account or enable credentialled logon.
+fn virtual_identity(identity: &str, service: &Sid) -> Option<Sid> {
+    if identity.eq_ignore_ascii_case("Service") {
+        Some(service.clone())
+    } else {
+        well_known_identity(identity)
+    }
 }
 
 /// Resolve one of the authority's own service identities, or `None`.
@@ -349,6 +357,30 @@ mod tests {
 
     fn sid(text: &str) -> Sid {
         text.parse().expect("a well-formed SID")
+    }
+
+    #[test]
+    fn service_accounts_are_bound_to_the_attested_name() {
+        let first = service_sid::of("eventd").expect("service SID");
+        let second = service_sid::of("other").expect("service SID");
+        assert_eq!(virtual_identity("Service", &first), Some(first.clone()));
+        assert_eq!(virtual_identity("service", &second), Some(second.clone()));
+        assert_ne!(first, second);
+        assert_eq!(
+            virtual_identity("LocalService", &first),
+            Some(sid("S-1-5-19"))
+        );
+        assert_eq!(virtual_identity("eventd", &first), None);
+        let groups = derive::token_groups(first.as_ref(), &[first.as_ref()], LogonType::Service);
+        assert_eq!(
+            groups.iter().filter(|(value, _)| value == &first).count(),
+            1
+        );
+        assert!(
+            !groups
+                .iter()
+                .any(|(value, _)| value == &sid("S-1-5-19") || value == &sid("S-1-5-18"))
+        );
     }
 
     #[test]
