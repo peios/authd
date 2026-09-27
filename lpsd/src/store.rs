@@ -2168,6 +2168,10 @@ pub fn store_descriptor() -> peios::Result<peios::security::SecurityDescriptor> 
     SdBuilder::new()
         .owner(system.as_ref())
         .group(system.as_ref())
+        .control(
+            peios::security::Control::DACL_PROTECTED,
+            peios::security::Control::empty(),
+        )
         .dacl(&dacl)
         .build()
 }
