@@ -48,6 +48,9 @@
 //!   will not send it and will not read it.
 //! - Adding an **enum value is a breaking change**, because every peer is
 //!   required to understand every value it is sent. That needs a version bump.
+//!   PGSS Logon's authority-bound `LogonType` is an exception: older clients
+//!   never propose the new type, and older authorities reject it. See
+//!   [`crate::wire::VERSION`].
 
 /// Where the `total_len` field sits in every header of both protocols.
 const TOTAL_LEN_AT: usize = 8;

@@ -17,7 +17,7 @@
 //! derived here, from the logon type and from local policy.
 //!
 //! The line is not where it first appears. `Everyone`, `AuthenticatedUsers`,
-//! `Local` and the logon-type SID are all added below and none of them come from
+//! `Local` and the logon-type SIDs are all added below and none of them come from
 //! a source, because they are properties of *how* this logon happened rather
 //! than of who the principal is — a source could not assert them meaningfully
 //! even if the protocol let it. Group *attributes* are on the same side of the
@@ -73,31 +73,42 @@ fn kacs_logon_type(logon_type: LogonType) -> KacsLogonType {
         LogonType::Service => KacsLogonType::Service,
         LogonType::NetworkCleartext => KacsLogonType::NetworkCleartext,
         LogonType::NewCredentials => KacsLogonType::NewCredentials,
+        LogonType::RemoteInteractive => KacsLogonType::RemoteInteractive,
     }
 }
 
-/// The well-known group SID a logon type confers, if any.
+/// The well-known group SIDs a logon type confers.
 ///
 /// This is the derivation rule that makes `logon_type` load-bearing rather than
 /// merely descriptive: AccessCheck never reads the logon type, so an ACE that
-/// wants to distinguish console users from network users matches on the SID
+/// wants to distinguish console users from network users matches on the SIDs
 /// this function returns. Getting it wrong silently changes who can reach what.
 ///
 /// - `NetworkCleartext` confers the same SID as `Network`. The type exists to
 ///   record that the credential crossed the wire in the clear, which is an
 ///   audit distinction, not an access-control one.
+/// - `RemoteInteractive` confers `Interactive` as well as its own SID. The
+///   session is interactive in every sense an ACL written before remoting
+///   existed meant, so it must not fall out of those ACEs; the second SID is
+///   what lets a newer one tell the two apart. It is deliberately not
+///   `Network` — that SID says a credential crossed a wire, not that a screen
+///   did.
 /// - `NewCredentials` confers nothing: the local identity is deliberately
 ///   unchanged, and only outbound credentials differ.
-fn logon_type_sid(logon_type: LogonType) -> Option<Sid> {
-    let sub_authority = match logon_type {
-        LogonType::Network | LogonType::NetworkCleartext => 2,
-        LogonType::Batch => 3,
-        LogonType::Interactive => 4,
-        LogonType::Service => 6,
-        LogonType::NewCredentials => return None,
+fn logon_type_sids(logon_type: LogonType) -> Vec<Sid> {
+    let sub_authorities: &[u32] = match logon_type {
+        LogonType::Network | LogonType::NetworkCleartext => &[2],
+        LogonType::Batch => &[3],
+        LogonType::Interactive => &[4],
+        LogonType::Service => &[6],
+        LogonType::RemoteInteractive => &[4, 14],
+        LogonType::NewCredentials => &[],
     };
-    // NT Authority (5), one sub-authority.
-    Sid::build(5, &[sub_authority]).ok()
+    // NT Authority (5), one sub-authority each.
+    sub_authorities
+        .iter()
+        .filter_map(|sub_authority| Sid::build(5, &[*sub_authority]).ok())
+        .collect()
 }
 
 /// A SID's index in the token's SID array.
@@ -213,8 +224,8 @@ pub fn token_groups(
         enabled,
     );
 
-    // The logon-type SID. This is the derivation that matters most here.
-    if let Some(sid) = logon_type_sid(logon_type) {
+    // The logon-type SIDs. This is the derivation that matters most here.
+    for sid in logon_type_sids(logon_type) {
         add_unique(&mut groups, sid, enabled);
     }
 
@@ -470,13 +481,19 @@ pub fn mint(minting: Minting<'_>) -> peios::Result<Grant> {
 mod tests {
     use super::*;
 
+    fn sids_of(logon_type: LogonType) -> Vec<String> {
+        logon_type_sids(logon_type)
+            .iter()
+            .map(|sid| sid.to_string())
+            .collect()
+    }
+
     #[test]
     fn logon_types_confer_the_documented_sids() {
-        let sid_of = |t| logon_type_sid(t).map(|s| s.to_string());
-        assert_eq!(sid_of(LogonType::Interactive).as_deref(), Some("S-1-5-4"));
-        assert_eq!(sid_of(LogonType::Network).as_deref(), Some("S-1-5-2"));
-        assert_eq!(sid_of(LogonType::Batch).as_deref(), Some("S-1-5-3"));
-        assert_eq!(sid_of(LogonType::Service).as_deref(), Some("S-1-5-6"));
+        assert_eq!(sids_of(LogonType::Interactive), ["S-1-5-4"]);
+        assert_eq!(sids_of(LogonType::Network), ["S-1-5-2"]);
+        assert_eq!(sids_of(LogonType::Batch), ["S-1-5-3"]);
+        assert_eq!(sids_of(LogonType::Service), ["S-1-5-6"]);
     }
 
     #[test]
@@ -484,9 +501,33 @@ mod tests {
         // The distinction is recorded on the session for audit; it must not
         // change what the token can reach.
         assert_eq!(
-            logon_type_sid(LogonType::NetworkCleartext).map(|s| s.to_string()),
-            logon_type_sid(LogonType::Network).map(|s| s.to_string())
+            sids_of(LogonType::NetworkCleartext),
+            sids_of(LogonType::Network)
         );
+    }
+
+    /// A remote desktop is interactive and says so twice: once for every ACL
+    /// written before remoting existed, once so a newer one can single it out.
+    /// It is emphatically not a network logon.
+    #[test]
+    fn remote_interactive_is_interactive_and_not_network() {
+        assert_eq!(
+            sids_of(LogonType::RemoteInteractive),
+            ["S-1-5-4", "S-1-5-14"]
+        );
+
+        let user: Sid = "S-1-5-21-1-2-3-1000".parse().expect("a well-formed SID");
+        let groups = token_groups(user.as_ref(), &[], LogonType::RemoteInteractive);
+        let carries = |text: &str| {
+            let wanted: Sid = text.parse().expect("a well-formed SID");
+            groups
+                .iter()
+                .any(|(sid, _)| sid.as_ref().as_bytes() == wanted.as_ref().as_bytes())
+        };
+
+        assert!(carries("S-1-5-4"), "the token must be Interactive");
+        assert!(carries("S-1-5-14"), "the token must be RemoteInteractive");
+        assert!(!carries("S-1-5-2"), "the token must not be Network");
     }
 
     #[test]
@@ -525,7 +566,7 @@ mod tests {
 
     #[test]
     fn new_credentials_confers_no_group() {
-        assert!(logon_type_sid(LogonType::NewCredentials).is_none());
+        assert!(logon_type_sids(LogonType::NewCredentials).is_empty());
     }
 
     #[test]

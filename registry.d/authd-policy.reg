@@ -114,7 +114,7 @@
     "a graphical greeter gets [\"Interactive\"], a web console [\"Network\"], and",
     "neither can mint itself a console-shaped token by proposing another type.",
     "Names: Interactive, Network, Batch, Service, NetworkCleartext,",
-    "NewCredentials.",
+    "NewCredentials, RemoteInteractive.",
     "",
     "A peer with no LogonTypes originates nothing. SYSTEM is permitted every",
     "type unconditionally, compiled in rather than written here: SYSTEM",

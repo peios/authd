@@ -46,7 +46,14 @@ pub use crate::frame::WireError;
 pub const MAGIC: [u8; 4] = *b"PGSL";
 
 /// Protocol version. Bump for any change to the meaning of an existing field,
-/// or for a new enum value; appending an optional field does not require it.
+/// or for a new enum value a peer may be *sent*; appending an optional field
+/// does not require it.
+///
+/// A value only ever sent *to* the authority is the exception, and [`LogonType`]
+/// is the one such enum: an old client never proposes a type it has not heard
+/// of, and a new client meeting an old authority is refused. Both directions
+/// fail safe without a bump, which a bump would only have turned into a flat
+/// refusal of every mixed pair.
 pub const VERSION: u16 = 1;
 
 pub const HEADER_BYTES: usize = frame::COMMON_HEADER_BYTES;
@@ -106,7 +113,7 @@ pub const MAX_SERVICE_NAME_BYTES: usize = 256;
 /// The nature of the sign-on. The authority derives token group membership from
 /// this, so unknown values are rejected rather than guessed at.
 ///
-/// Values match the KACS logon types. All six KACS defines are present, so the
+/// Values match the KACS logon types. All seven KACS defines are present, so the
 /// protocol can express every session the kernel can create.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
@@ -117,6 +124,9 @@ pub enum LogonType {
     Service = 5,
     NetworkCleartext = 8,
     NewCredentials = 9,
+    /// Interactive, but to a remote graphical desktop rather than to hardware
+    /// this machine owns. GXWI's remoting originates these.
+    RemoteInteractive = 10,
 }
 
 /// Which kinds of sign-on a principal may be used for. PGSS Logon §2.16.
@@ -159,7 +169,8 @@ impl LogonTypes {
             | (1 << LogonType::Network as u32)
             | (1 << LogonType::Batch as u32)
             | (1 << LogonType::NetworkCleartext as u32)
-            | (1 << LogonType::NewCredentials as u32),
+            | (1 << LogonType::NewCredentials as u32)
+            | (1 << LogonType::RemoteInteractive as u32),
     );
 
     /// Exactly one logon type, for a principal that exists to run a service.
@@ -200,6 +211,7 @@ impl LogonType {
             5 => Self::Service,
             8 => Self::NetworkCleartext,
             9 => Self::NewCredentials,
+            10 => Self::RemoteInteractive,
             _ => return None,
         })
     }
@@ -921,6 +933,7 @@ mod tests {
         assert!(unstated.permits(LogonType::Interactive));
         assert!(unstated.permits(LogonType::Network));
         assert!(unstated.permits(LogonType::Batch));
+        assert!(unstated.permits(LogonType::RemoteInteractive));
         assert!(!unstated.permits(LogonType::Service));
     }
 
@@ -938,6 +951,7 @@ mod tests {
         assert!(!only.permits(LogonType::Interactive));
         assert!(!only.permits(LogonType::Network));
         assert!(!only.permits(LogonType::Batch));
+        assert!(!only.permits(LogonType::RemoteInteractive));
     }
 
     #[test]
@@ -1353,6 +1367,16 @@ mod tests {
             decode_credential_request(&bytes).unwrap_err(),
             WireError::UnknownValue
         );
+    }
+
+    #[test]
+    fn remote_interactive_round_trips_on_version_one() {
+        let mut opening = start();
+        opening.logon_type = LogonType::RemoteInteractive;
+        let bytes = encode_logon_start(&opening).unwrap();
+        assert_eq!(u16::from_le_bytes([bytes[4], bytes[5]]), 1);
+        assert_eq!(bytes[HEADER_BYTES + 4], 10);
+        assert_eq!(decode_logon_start(&bytes).unwrap().logon_type, LogonType::RemoteInteractive);
     }
 
     #[test]

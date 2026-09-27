@@ -102,7 +102,7 @@ which is not the same as "none".
 The name is a bare well-known name — `Everyone`, `Administrators`,
 `Users`, `SYSTEM`, `Local Service`, `Network Service`, `Authenticated
 Users`, `Guests`, `Anonymous`, `Local`, `Domain Admins`, or a logon-type
-name (`Interactive`, `Network`, `Batch`, `Service`) — or a literal SID.
+name (`Interactive`, `Network`, `Batch`, `Service`, `Remote Interactive`) — or a literal SID.
 Matching is case-insensitive. `BUILTIN\Administrators` is unrepresentable,
 because a backslash is the registry's path separator.
 
@@ -113,7 +113,7 @@ authoritative forever.
 
 A record applies when the token carries that SID — as the user or as any
 group, including the ones authd derives: `Everyone`, `Authenticated
-Users`, `Local`, and the logon-type SID. So policy can be written against
+Users`, `Local`, and the logon-type SIDs. So policy can be written against
 how a logon happened, not only who it was.
 
 **How records compose differs per value**, because the values are
@@ -248,14 +248,14 @@ may name one, and two groups disagreeing falls back to none.
 canonical: Machine\Generic\Authn\Policy\<principal> LogonTypes
 type: REG_MULTI_SZ
 default: (absent — this principal may originate nothing)
-valid: six logon-type names (below); unknown names dropped with a warning
+valid: seven logon-type names (below); unknown names dropped with a warning
 applies: next logon
 
 The logon types this principal may **originate** — ask authd to perform on
 behalf of somebody else, over `/run/logon.sock`.
 
 Valid names in full: `Interactive`, `Network`, `Batch`, `Service`,
-`NetworkCleartext`, `NewCredentials`. An unknown name is dropped with a
+`NetworkCleartext`, `NewCredentials`, `RemoteInteractive`. An unknown name is dropped with a
 warning, on the same reasoning as `Privileges`.
 
 The other half of "client proposes, authority constrains". This is the
