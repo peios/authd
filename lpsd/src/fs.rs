@@ -227,7 +227,8 @@ impl Fs for RealFs {
         remove_stale_stage(path)?;
         let file = OpenOptions::new()
             .desired_access(
-                FileAccess::WRITE_DATA | FileAccess::WRITE_ATTRIBUTES | FileAccess::SYNCHRONIZE,
+                FileAccess::WRITE_DATA | FileAccess::WRITE_ATTRIBUTES
+                    | FileAccess::WRITE_DAC | FileAccess::SYNCHRONIZE,
             )
             .disposition(Disposition::Create)
             .creator_sd(sd)
