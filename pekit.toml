@@ -336,7 +336,8 @@ for path in files:
 # retain exactly the authority each process needs and no SYSTEM defaults.
 expected = {
     "authd-service.reg": [
-        "SeChangeNotifyPrivilege", "SeCreateTokenPrivilege", "SeTcbPrivilege"
+        "SeChangeNotifyPrivilege", "SeCreateTokenPrivilege", "SeTcbPrivilege",
+        "SeRestorePrivilege"
     ],
     "lpsd-service.reg": ["SeChangeNotifyPrivilege"],
     "login-console.reg": [
