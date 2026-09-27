@@ -62,6 +62,10 @@ const WELL_KNOWN: &[Entry] = &[
     Entry { name: "Network", authority: 5, sub_authorities: &[2], unix_id: None },
     Entry { name: "Batch", authority: 5, sub_authorities: &[3], unix_id: None },
     Entry { name: "Service", authority: 5, sub_authorities: &[6], unix_id: None },
+    // Carried *alongside* Interactive rather than instead of it, so a record
+    // written before remoting existed still applies to a remote desktop. Naming
+    // it is what lets a newer record single one out.
+    Entry { name: "Remote Interactive", authority: 5, sub_authorities: &[14], unix_id: None },
     Entry { name: "Anonymous", authority: 5, sub_authorities: &[7], unix_id: None },
 ];
 
@@ -171,6 +175,7 @@ mod tests {
             ("Network", "S-1-5-2"),
             ("Batch", "S-1-5-3"),
             ("Service", "S-1-5-6"),
+            ("Remote Interactive", "S-1-5-14"),
         ] {
             assert_eq!(by_name(name).as_deref().map(SidRef::to_sid), Some(sid(text)));
             assert_eq!(unix_id(sid(text).as_ref()), None, "{name} must have no gid");

@@ -509,6 +509,7 @@ fn logon_type_by_name(name: &str) -> Option<LogonType> {
         "Service" => LogonType::Service,
         "NetworkCleartext" => LogonType::NetworkCleartext,
         "NewCredentials" => LogonType::NewCredentials,
+        "RemoteInteractive" => LogonType::RemoteInteractive,
         _ => return None,
     })
 }
@@ -1287,9 +1288,10 @@ mod tests {
 
     #[test]
     fn logon_type_names_parse_to_the_bitmask() {
-        let types = parse_logon_type_names(&["Interactive", "Network"], "test");
+        let types = parse_logon_type_names(&["Interactive", "Network", "RemoteInteractive"], "test");
         assert!(types.bits() & (1 << LogonType::Interactive as u32) != 0);
         assert!(types.bits() & (1 << LogonType::Network as u32) != 0);
+        assert!(types.bits() & (1 << LogonType::RemoteInteractive as u32) != 0);
         assert!(types.bits() & (1 << LogonType::Service as u32) == 0);
     }
 
