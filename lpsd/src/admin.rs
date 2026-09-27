@@ -200,13 +200,7 @@ fn protect(path: &Path) {
         }
     };
 
-    if let Err(error) = peios::file::set_sd(
-        None,
-        path,
-        SecInfo::OWNER | SecInfo::GROUP | SecInfo::DACL,
-        &descriptor,
-        0,
-    ) {
+    if let Err(error) = peios::file::set_sd(None, path, SecInfo::DACL, &descriptor, 0) {
         log::error(format_args!(
             "admin: could not set a descriptor on {} ({error}); administrators will not \
              be able to reach {LPSD_ADMIN_SOCKET_PATH}",

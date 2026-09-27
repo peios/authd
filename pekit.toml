@@ -124,7 +124,7 @@ collect_licences nss nss_peios \
 collect_licences debugsource "authd lpsd lps login nss_peios" \
   dev.peios.authd-debugsource
 
-mkdir -p "$PEKIT_OUT/usr/sbin" "$PEKIT_OUT/usr/bin"
+mkdir -p "$PEKIT_OUT/usr/sbin" "$PEKIT_OUT/usr/bin" "$PEKIT_OUT/var/state/lpsd"
 cp "$PEKIT_OUT/target/release/authd" "$PEKIT_OUT/usr/sbin/authd"
 cp "$PEKIT_OUT/target/release/lpsd" "$PEKIT_OUT/usr/sbin/lpsd"
 cp "$PEKIT_OUT/target/release/login" "$PEKIT_OUT/usr/bin/login"
