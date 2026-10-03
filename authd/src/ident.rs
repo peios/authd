@@ -194,7 +194,7 @@ fn enumerate(registry: &Registry, buf: &[u8]) -> io::Result<Vec<u8>> {
     // caller walking a cursor would otherwise see them again with every page.
     let mut entries = page.entries;
     if request.cursor.is_empty() {
-        let mut first = resolve::well_known_page(request.kind, fields);
+        let mut first = resolve::well_known_page(registry, request.kind, fields);
         first.extend(entries);
         entries = first;
     }

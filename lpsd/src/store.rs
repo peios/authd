@@ -219,11 +219,18 @@ pub fn well_known_group(name: &str) -> Option<Sid> {
         .and_then(|(_, authority, subs)| Sid::build(*authority, subs).ok())
 }
 
-/// Groups the authority staples onto every token it mints.
+/// Whether the SID is a `BUILTIN` group (`S-1-5-32-…`), whose membership this
+/// machine records (PSPU §2.19): "dana is in `Administrators`" is a record lpsd
+/// keeps, as it keeps a local group's.
 ///
-/// Nothing records who is in them. `Everyone` and `Authenticated Users` are not
-/// memberships anyone stores; they are a rule authd applies at derivation, so
-/// "who is in this group" has no answer a store could give.
+/// The groups the authority staples onto every token it mints are not among
+/// them. Nothing records who is in `Everyone` or `Authenticated Users`; they
+/// are a rule authd applies at derivation, so "who is in this group" has no
+/// answer a store could give.
+pub fn builtin(sid: &SidRef) -> bool {
+    sid.to_string().starts_with("S-1-5-32-")
+}
+
 /// The name of a well-known group, if this is one.
 pub fn well_known_group_name(sid: &SidRef) -> Option<&'static str> {
     WELL_KNOWN_GROUPS
@@ -812,11 +819,12 @@ impl Store {
     /// lands past the end. That is what lets lpsd page a membership without
     /// holding per-cursor state or ever refusing a cursor it issued.
     ///
-    /// `None` for any group this domain does not own — the only groups the
-    /// query surface can name here since well-known lookups were withdrawn
-    /// (PEI-313), and the only ones whose membership lpsd may assert.
+    /// `None` for any group whose membership lpsd doesn't record: one of
+    /// another domain, or one the authority applies as a rule. Its own
+    /// domain's groups and the `BUILTIN` groups ([`builtin`]) are recorded
+    /// here, and are the ones whose membership lpsd may assert (PSPU §2.19).
     pub fn members_of(&self, sid: &SidRef, after: Option<u32>) -> Option<Vec<Member>> {
-        if self.rid_in_domain(sid).is_none() {
+        if self.rid_in_domain(sid).is_none() && !builtin(sid) {
             return None;
         }
         let sid = sid.to_owned();
@@ -827,9 +835,10 @@ impl Store {
                 .filter(|p| {
                     p.groups.iter().any(|g| g.as_ref().as_bytes() == sid.as_ref().as_bytes())
                         // A primary group is a membership claim (PSPU §2.13).
-                        // Safe to count unconditionally now: the owned-domain
-                        // precondition above means the stapled default
-                        // (`Authenticated Users`) can never reach this line.
+                        // Safe to count unconditionally: the precondition
+                        // above admits only recorded groups, so the stapled
+                        // default (`Authenticated Users`) never reaches this
+                        // line.
                         || p.primary_group.as_ref().as_bytes() == sid.as_ref().as_bytes()
                 })
                 .filter_map(|p| {

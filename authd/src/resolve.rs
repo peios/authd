@@ -124,7 +124,7 @@ fn by_name(
     if !name_is_usable(name) {
         return Answer::of(Outcome::Malformed);
     }
-    if let Some(answer) = well_known_by_name(name, kind, fields) {
+    if let Some(answer) = well_known_by_name(registry, name, kind, fields, deadline) {
         return answer;
     }
 
@@ -286,7 +286,7 @@ fn by_sid(
     fields: Fields,
     deadline: std::time::Instant,
 ) -> Answer {
-    if let Some(answer) = well_known_by_sid(sid, kind, fields) {
+    if let Some(answer) = well_known_by_sid(registry, sid, kind, fields, deadline) {
         return answer;
     }
     let Some(source) = registry.owning(sid) else {
@@ -326,7 +326,7 @@ fn by_unix_id(
     fields: Fields,
     deadline: std::time::Instant,
 ) -> Answer {
-    if let Some(answer) = well_known_by_unix_id(id, kind, fields) {
+    if let Some(answer) = well_known_by_unix_id(registry, id, kind, fields, deadline) {
         return answer;
     }
     let Some((source, relative)) = registry.rebasing(id) else {
@@ -366,22 +366,80 @@ fn by_unix_id(
 // asked about — which is also what stops two sources both claiming `Everyone`.
 // ---------------------------------------------------------------------------
 
-fn well_known_by_name(name: &str, kind: Kind, fields: Fields) -> Option<Answer> {
+fn well_known_by_name(registry: &Registry, name: &str, kind: Kind, fields: Fields, deadline: std::time::Instant) -> Option<Answer> {
     let sid = well_known::by_name(name)?;
-    well_known_answer(sid.as_ref(), kind, fields)
+    well_known_answer(registry, sid.as_ref(), kind, fields, deadline)
 }
 
-fn well_known_by_sid(sid: &SidRef, kind: Kind, fields: Fields) -> Option<Answer> {
+fn well_known_by_sid(registry: &Registry, sid: &SidRef, kind: Kind, fields: Fields, deadline: std::time::Instant) -> Option<Answer> {
     well_known::name_of(sid)?;
-    well_known_answer(sid, kind, fields)
+    well_known_answer(registry, sid, kind, fields, deadline)
 }
 
-fn well_known_by_unix_id(id: u32, kind: Kind, fields: Fields) -> Option<Answer> {
+fn well_known_by_unix_id(registry: &Registry, id: u32, kind: Kind, fields: Fields, deadline: std::time::Instant) -> Option<Answer> {
     let sid = well_known::by_unix_id(id)?;
-    well_known_answer(sid.as_ref(), kind, fields)
+    well_known_answer(registry, sid.as_ref(), kind, fields, deadline)
 }
 
-fn well_known_answer(sid: &SidRef, kind: Kind, fields: Fields) -> Option<Answer> {
+/// The well-known group `of` names, if its membership is recorded: a
+/// `BUILTIN` group, whose members are walked across every source.
+fn recorded_well_known(of: &libauthd::ident::Key) -> Option<peios::security::Sid> {
+    let sid = match of {
+        libauthd::ident::Key::Sid(bytes) => SidRef::from_bytes(bytes)?.to_sid(),
+        libauthd::ident::Key::Name(name) if name_is_usable(name) => well_known::by_name(name)?,
+        libauthd::ident::Key::Name(_) => return None,
+        libauthd::ident::Key::UnixId(id) => well_known::by_unix_id(*id)?,
+    };
+    well_known::recorded(sid.as_ref()).then_some(sid)
+}
+
+/// Who is in a `BUILTIN` group, as every source records it, for `MEMBERS` on
+/// a lookup.
+///
+/// Withheld as `TooLarge` where it won't fit one reply, and as `Declined`
+/// where a source in the order couldn't or wouldn't say: a list missing one
+/// source's members would look complete, and is a wrong answer rather than a
+/// smaller one (§2.16).
+fn recorded_members(registry: &Registry, sid: &SidRef, deadline: std::time::Instant) -> Result<Vec<libauthd::ident::Reference>, WithheldReason> {
+    if !registry.complete() {
+        return Err(WithheldReason::Declined);
+    }
+    let of = psi::Key::Sid(sid.as_bytes().to_vec());
+    let mut members = Vec::new();
+    for source in registry.ordered() {
+        // A source that may not assert a membership outside its domain
+        // records none that a token would carry (PSPU §2.19).
+        if !source.may_assert_foreign_memberships() {
+            continue;
+        }
+        if !source.capabilities().contains(psi::Capabilities::ENUMERATES) {
+            return Err(WithheldReason::Declined);
+        }
+        let mut cursor = Vec::new();
+        loop {
+            let page = page_from(&source, Kind::Principal, Fields::UNIX_ID, Some(of.clone()), &cursor, deadline).ok_or(WithheldReason::Declined)?;
+            for entry in &page.entries {
+                if let Answer { record: Some(record), .. } = found(&source, entry, Kind::Principal, Fields::UNIX_ID) {
+                    let unix_id = match record.value(Fields::UNIX_ID) {
+                        Some(Value::UnixId(id)) => *id,
+                        _ => 0,
+                    };
+                    members.push(libauthd::ident::Reference { sid: record.sid, name: record.qualified_name, unix_id });
+                }
+            }
+            if members.len() > libauthd::ident::MAX_MEMBERS {
+                return Err(WithheldReason::TooLarge);
+            }
+            if page.next.is_empty() {
+                break;
+            }
+            cursor = page.next;
+        }
+    }
+    Ok(members)
+}
+
+fn well_known_answer(registry: &Registry, sid: &SidRef, kind: Kind, fields: Fields, deadline: std::time::Instant) -> Option<Answer> {
     let name = well_known::name_of(sid)?;
 
     // Every one of these is a group. `SYSTEM` is the awkward case — it is a
@@ -406,14 +464,22 @@ fn well_known_answer(sid: &SidRef, kind: Kind, fields: Fields) -> Option<Answer>
             }),
         }
     }
-    // Nothing records who is in these; authd staples them onto a token at
-    // derivation. Absent rather than declined — declining would suggest an
-    // answer exists somewhere and is being kept back.
+    // Who is in a `BUILTIN` group is recorded by the sources, and gathered
+    // from them. Nothing records who is in the rest; authd staples them onto a
+    // token at derivation. Absent rather than declined — declining would
+    // suggest an answer exists somewhere and is being kept back.
     for field in KNOWN
         .difference(Fields::UNIX_ID)
         .intersection(fields)
         .iter()
     {
+        if field == Fields::MEMBERS && well_known::recorded(sid) {
+            match recorded_members(registry, sid, deadline) {
+                Ok(members) => values.push(Value::Members(members)),
+                Err(reason) => withheld.push(Withheld { field, reason }),
+            }
+            continue;
+        }
         withheld.push(Withheld {
             field,
             reason: WithheldReason::Absent,
@@ -829,6 +895,22 @@ pub fn enumerate(
     fields: Fields,
     cursor: &[u8],
 ) -> Result<Page, Outcome> {
+    walk(registry, kind, fields, None, false, cursor)
+}
+
+/// Every source in the order, a page at a time: everything of `kind`, or,
+/// with `of`, every member each source records of that group. `foreign`
+/// leaves out the sources that may not assert a membership outside their
+/// domain, which record none of a `BUILTIN` group's that a token would carry
+/// (PSPU §2.19).
+fn walk(
+    registry: &Registry,
+    kind: Kind,
+    fields: Fields,
+    of: Option<psi::Key>,
+    foreign: bool,
+    cursor: &[u8],
+) -> Result<Page, Outcome> {
     let fields = fields.intersection(KNOWN);
     let deadline = std::time::Instant::now() + QUERY_TIMEOUT;
     let sources = registry.ordered();
@@ -859,6 +941,10 @@ pub fn enumerate(
                 continue;
             }
         }
+        if foreign && !source.may_assert_foreign_memberships() {
+            inner.clear();
+            continue;
+        }
         if !source
             .capabilities()
             .contains(psi::Capabilities::ENUMERATES)
@@ -866,7 +952,7 @@ pub fn enumerate(
             incomplete.push(source.name().to_string());
             continue;
         }
-        match page_from(source, kind, fields, &inner, deadline) {
+        match page_from(source, kind, fields, of.clone(), &inner, deadline) {
             Some(page) => {
                 for entry in &page.entries {
                     if let Answer {
@@ -926,8 +1012,13 @@ pub fn enumerate(
 /// round trip on a path only ever walked after a `TooLarge` withhold, and it
 /// buys the answer's honesty: "no such group" must be `NotFound`, and
 /// without the resolution step it would be indistinguishable from a
-/// source-side refusal. Well-known groups come back `NotFound` too — their
-/// membership is a rule, not a record, and no source can enumerate a rule.
+/// source-side refusal. A well-known group whose membership is a rule comes
+/// back `NotFound` too: no source can enumerate a rule.
+///
+/// A `BUILTIN` group is the exception to the owning source. It is no source's
+/// object, but who is in it is a record each source may keep (PSPU §2.19), so
+/// its members are walked across every source in the order, as the whole
+/// table is, and a source that didn't answer is said to be `incomplete`.
 pub fn enumerate_members(
     registry: &Registry,
     of: &libauthd::ident::Key,
@@ -935,6 +1026,9 @@ pub fn enumerate_members(
     fields: Fields,
     cursor: &[u8],
 ) -> Result<Page, Outcome> {
+    if let Some(sid) = recorded_well_known(of) {
+        return walk(registry, kind, fields, Some(psi::Key::Sid(sid.as_ref().as_bytes().to_vec())), true, cursor);
+    }
     let fields = fields.intersection(KNOWN);
     let deadline = std::time::Instant::now() + QUERY_TIMEOUT;
     let (source, key) = owning_group_source(registry, of, deadline)?;
@@ -1072,6 +1166,7 @@ fn page_from(
     source: &Arc<Source>,
     kind: Kind,
     fields: Fields,
+    of: Option<psi::Key>,
     cursor: &[u8],
     deadline: std::time::Instant,
 ) -> Option<psi::EnumerateResult> {
@@ -1083,7 +1178,7 @@ fn page_from(
     let request = psi::EnumerateSource {
         kind,
         fields,
-        of: None,
+        of,
         cursor: cursor.to_vec(),
     };
     if conversation.enumerate(&request).is_err() {
@@ -1139,13 +1234,14 @@ fn split_cursor(cursor: &[u8]) -> Option<(Option<String>, &[u8])> {
 /// Emitted by authd itself, and only where a caller asked for groups: every one
 /// of them that carries a number is a group, and `getgrent` would otherwise
 /// never see `Everyone` at all.
-pub fn well_known_page(kind: Kind, fields: Fields) -> Vec<libauthd::ident::Record> {
+pub fn well_known_page(registry: &Registry, kind: Kind, fields: Fields) -> Vec<libauthd::ident::Record> {
     if kind != Kind::Group {
         return Vec::new();
     }
+    let deadline = std::time::Instant::now() + QUERY_TIMEOUT;
     well_known::numbered()
         .filter_map(|sid| {
-            well_known_answer(sid.as_ref(), kind, fields.intersection(KNOWN))
+            well_known_answer(registry, sid.as_ref(), kind, fields.intersection(KNOWN), deadline)
                 .and_then(|answer| answer.record)
         })
         .collect()
@@ -2136,13 +2232,14 @@ mod tests {
 
     #[test]
     fn the_well_known_groups_are_authds_to_enumerate() {
-        let page = well_known_page(Kind::Group, Fields::UNIX_ID);
+        let registry = Registry::for_test(&[]);
+        let page = well_known_page(&registry, Kind::Group, Fields::UNIX_ID);
         assert!(page.iter().any(|r| r.qualified_name == "Everyone"));
         assert!(
             !page.iter().any(|r| r.qualified_name == "Interactive"),
             "a session property is not a row in a group table"
         );
-        assert!(well_known_page(Kind::Principal, Fields::empty()).is_empty());
+        assert!(well_known_page(&registry, Kind::Principal, Fields::empty()).is_empty());
     }
 
     // -- routing (PSI §2.11) --------------------------------------------
@@ -2268,6 +2365,52 @@ mod tests {
             Ok(_) => panic!("expected Unavailable, got a page"),
             Err(other) => panic!("expected Unavailable, got {other:?}"),
         }
+    }
+
+    /// Who is in `Administrators` is a record the sources keep (PSPU §2.19),
+    /// so it is gathered from those that may assert it, on a lookup and on a
+    /// walk; who is in `Everyone` is still a rule.
+    #[test]
+    fn a_builtin_group_s_members_come_from_the_sources_that_may_record_them() {
+        let registry = stub_with_foreign("lpsd", DOMAIN, 1, Some(entry("S-1-5-21-1-2-3-1000", "jack", 1000)));
+        let answer = lookup(&registry, &Key::Name("Administrators".into()), Kind::Group, Fields::MEMBERS);
+        let record = answer.record.expect("a record");
+        assert_eq!(
+            record.value(Fields::MEMBERS),
+            Some(&Value::Members(vec![libauthd::ident::Reference {
+                sid: sid("S-1-5-21-1-2-3-1000").as_ref().as_bytes().to_vec(),
+                name: "jack".into(),
+                unix_id: BASE + 1000,
+            }]))
+        );
+        let of = libauthd::ident::Key::Name("Administrators".into());
+        let page = enumerate_members(&registry, &of, Kind::Principal, Fields::PASSWD, b"").expect("a page");
+        assert_eq!(page.entries.len(), 1);
+        assert!(page.incomplete.is_empty());
+
+        let everyone = lookup(&registry, &Key::Name("Everyone".into()), Kind::Group, Fields::MEMBERS).record.expect("a record");
+        assert_eq!(everyone.reason(Fields::MEMBERS), Some(WithheldReason::Absent));
+    }
+
+    /// A source that may not assert a membership outside its domain has
+    /// none of `Administrators` that a token would carry.
+    #[test]
+    fn a_source_confined_to_its_domain_adds_nobody_to_a_builtin_group() {
+        let registry = stub("corp", DOMAIN, 1, Some(entry("S-1-5-21-1-2-3-1000", "jack", 1000)));
+        let record = lookup(&registry, &Key::Name("Administrators".into()), Kind::Group, Fields::MEMBERS).record.expect("a record");
+        assert_eq!(record.value(Fields::MEMBERS), Some(&Value::Members(Vec::new())));
+        let of = libauthd::ident::Key::Name("Administrators".into());
+        let page = enumerate_members(&registry, &of, Kind::Principal, Fields::PASSWD, b"").expect("a page");
+        assert!(page.entries.is_empty() && page.incomplete.is_empty());
+    }
+
+    /// With a source missing, a list of the rest would look complete.
+    #[test]
+    fn a_builtin_group_s_members_are_declined_past_an_absent_source() {
+        let registry = Arc::new(Registry::for_test(&[("first", 1, Some(range())), ("second", 2, Some(range()))]));
+        add_stub_with_foreign(&registry, "first", DOMAIN, 1, Some(entry("S-1-5-21-1-2-3-1000", "jack", 1000)), true);
+        let record = lookup(&registry, &Key::Name("Administrators".into()), Kind::Group, Fields::MEMBERS).record.expect("a record");
+        assert_eq!(record.reason(Fields::MEMBERS), Some(WithheldReason::Declined));
     }
 
     #[test]

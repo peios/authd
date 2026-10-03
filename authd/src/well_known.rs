@@ -80,6 +80,16 @@ impl Entry {
     }
 }
 
+/// Whether who is in this well-known group is recorded: a `BUILTIN` group
+/// (`S-1-5-32-…`). "dana is in `Administrators`" is a record a source keeps
+/// (PSPU §2.19), and its members are asked of the sources. Who is in the rest
+/// is a rule authd applies when it derives a token, and nothing records it.
+pub fn recorded(sid: &SidRef) -> bool {
+    WELL_KNOWN
+        .iter()
+        .any(|entry| entry.authority == 5 && entry.sub_authorities.first() == Some(&32) && entry.is(sid))
+}
+
 /// The POSIX id this machine projects a well-known SID to, if it has one.
 ///
 /// `None` covers both "not a well-known SID" and "well-known but deliberately
