@@ -34,14 +34,12 @@
 
 mod format;
 mod interactive;
-mod session;
 
 use std::process::ExitCode;
 
 use libauthd::claim::{self, Claim, Values};
 use libauthd::lps::{self, Failure};
-
-use crate::session::Session;
+use libauthd_client::admin::{Admin, Refusal};
 
 const USAGE: &str = "\
 usage: lps <command> [arguments]
@@ -126,6 +124,15 @@ impl From<String> for Failed {
     }
 }
 
+impl From<Refusal> for Failed {
+    fn from(refusal: Refusal) -> Self {
+        Self::Refused(match refusal.failure {
+            Some(failure) => describe(failure, &refusal.reason),
+            None => refusal.reason,
+        })
+    }
+}
+
 fn run(arguments: &[&str]) -> Result<(), Failed> {
     match arguments {
         [] | ["-h"] | ["--help"] | ["help"] => {
@@ -178,17 +185,13 @@ fn named(name: &str) -> lps::Named {
 }
 
 fn list() -> Result<(), Failed> {
-    let mut session = Session::open()?;
-    let reply = session.request(&encode(lps::encode_list())?)?;
-    let principals = session.expect(lps::decode_principals(reply.expose()))?;
+    let principals = Admin::new().list()?;
     print!("{}", format::listing(&principals));
     Ok(())
 }
 
 fn group_list() -> Result<(), Failed> {
-    let mut session = Session::open()?;
-    let reply = session.request(&encode(lps::encode_group_list())?)?;
-    let groups = session.expect(lps::decode_groups(reply.expose()))?;
+    let groups = Admin::new().group_list()?;
     print!("{}", format::groups(&groups));
     Ok(())
 }
@@ -196,41 +199,26 @@ fn group_list() -> Result<(), Failed> {
 /// Creating a group allocates a RID, so the daemon answers `MSG_CREATED` with
 /// it rather than a bare `MSG_DONE` — the same shape as creating a principal.
 fn group_create(name: &str) -> Result<(), Failed> {
-    let mut session = Session::open()?;
-    let reply = session.request(&encode(lps::encode_group_create(&named(name)))?)?;
-    let rid = session.expect(lps::decode_created(reply.expose()))?;
+    let rid = Admin::new().group_create(name)?;
     println!("created the group {name} with RID {rid}");
     Ok(())
 }
 
 fn show(name: &str) -> Result<(), Failed> {
-    let mut session = Session::open()?;
-    let reply = session.request(&encode(lps::encode_show(&named(name)))?)?;
-    let detail = session.expect(lps::decode_principal(reply.expose()))?;
+    let detail = Admin::new().show(name)?;
     print!("{}", format::detail(&detail));
     Ok(())
 }
 
 fn domain() -> Result<(), Failed> {
-    let mut session = Session::open()?;
-    let reply = session.request(&encode(lps::encode_domain())?)?;
-    let sid = session.expect(lps::decode_domain_is(reply.expose()))?;
+    let sid = Admin::new().domain()?;
     println!("{}", format::sid(&sid));
     Ok(())
 }
 
 fn password(name: &str) -> Result<(), Failed> {
     let secret = interactive::confirmed_password(&format!("New password for {name}: "))?;
-
-    let mut session = Session::open()?;
-    let message = lps::encode_set_password(&lps::SetPassword {
-        name: name.to_string(),
-        secret: secret.expose(),
-    })
-    .map_err(|error| Failed::Refused(format!("could not encode the request: {error:?}")))?;
-
-    let reply = session.request(message.expose())?;
-    session.expect(lps::decode_done(reply.expose()))?;
+    Admin::new().set_password(name, secret.expose())?;
     println!("set the password for {name}");
     Ok(())
 }
@@ -412,15 +400,9 @@ fn value_for<'a>(option: &str, tail: &'a [&'a str]) -> Result<(&'a str, &'a [&'a
 
 /// Send a request whose only successful answer is "done".
 fn simple(message: Result<Vec<u8>, libauthd::WireError>, done: &str) -> Result<(), Failed> {
-    let mut session = Session::open()?;
-    let reply = session.request(&encode(message)?)?;
-    session.expect(lps::decode_done(reply.expose()))?;
+    Admin::new().done(message)?;
     println!("{done}");
     Ok(())
-}
-
-pub fn encode(message: Result<Vec<u8>, libauthd::WireError>) -> Result<Vec<u8>, Failed> {
-    message.map_err(|error| Failed::Refused(format!("could not encode the request: {error:?}")))
 }
 
 /// Render a refusal the way an operator should read it.
@@ -515,11 +497,7 @@ mod tests {
 }
 
 fn key_list(name: &str) -> Result<(), Failed> {
-    let mut session = Session::open()?;
-    let reply = session.request(&encode(lps::encode_key_request(&lps::KeyRequest::List {
-        name: name.into(),
-    }))?)?;
-    let (policy, keys) = session.expect(lps::decode_keys(reply.expose()))?;
+    let (policy, keys) = Admin::new().keys(name)?;
     println!("Policy: {policy:?}");
     for key in keys {
         let id: String = key.id.iter().map(|b| format!("{b:02x}")).collect();

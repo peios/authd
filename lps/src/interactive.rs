@@ -25,9 +25,9 @@
 //! travels as an absent field rather than as a guess this side made.
 
 use libauthd::lps;
+use libauthd_client::admin::Admin;
 
-use crate::session::Session;
-use crate::{encode, Failed};
+use crate::Failed;
 
 /// Options `lps add` understands, before anything has been asked for.
 #[derive(Default)]
@@ -121,8 +121,7 @@ pub fn add(options: &[&str]) -> Result<(), Failed> {
         }
     }
 
-    let mut session = Session::open()?;
-    let message = lps::encode_add(&lps::Add {
+    let rid = Admin::new().add(&lps::Add {
         name: name.clone(),
         credential: match &secret {
             Some(secret) => lps::Credential::Password(secret.expose()),
@@ -135,11 +134,7 @@ pub fn add(options: &[&str]) -> Result<(), Failed> {
         } else {
             lps::LogonTypes::UNSTATED
         },
-    })
-    .map_err(|error| Failed::Refused(format!("could not encode the request: {error:?}")))?;
-
-    let reply = session.request(message.expose())?;
-    let rid = session.expect(lps::decode_created(reply.expose()))?;
+    })?;
     println!("created {name} with RID {rid}");
 
     // The profile and the primary group are separate requests, because `Add`
@@ -259,9 +254,7 @@ fn describe(name: &str, requested: &Requested) {
 
 /// Send a follow-up request, reporting what it did.
 fn apply(message: Result<Vec<u8>, libauthd::WireError>, done: &str) -> Result<(), Failed> {
-    let mut session = Session::open()?;
-    let reply = session.request(&encode(message)?)?;
-    session.expect(lps::decode_done(reply.expose()))?;
+    Admin::new().done(message)?;
     println!("{done}");
     Ok(())
 }

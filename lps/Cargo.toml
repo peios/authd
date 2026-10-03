@@ -15,5 +15,6 @@ path = "src/main.rs"
 # honour, which is why the store's descriptor can stay as narrow as it is.
 [dependencies]
 libauthd = { path = "../libauthd" }
+libauthd-client = { path = "../libauthd-client" }
 libtty = { path = "../libtty" }
 peios = { git = "https://github.com/peios/peios-rs.git", rev = "3cf23f68d40c4adff252e28241bb3c958fba824f" }
