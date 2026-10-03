@@ -1,0 +1,13 @@
+[package]
+name = "libauthd-client"
+version = "0.0.22"
+edition = "2024"
+license = "MIT"
+description = "Clients of lpsd's admin socket and authd's identity socket, for programs that administer or look up principals."
+publish = false
+
+# Kept apart from libauthd, which the daemons link and which holds types and a
+# codec and nothing that can act. A client connects, waits and gives up, and
+# that belongs to the programs that ask — lps, the GUI apps — not to authd.
+[dependencies]
+libauthd = { path = "../libauthd" }

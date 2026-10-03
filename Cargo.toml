@@ -1,12 +1,15 @@
 [workspace]
 resolver = "2"
-members = ["libauthd", "libtty", "libsession", "authd", "lpsd", "lps", "login", "nss"]
+members = ["libauthd", "libauthd-client", "libtty", "libsession", "authd", "lpsd", "lps", "login", "nss"]
 
 # authd is its own workspace root, like peios-rs and libpeios.
 #
 # Members, and the trust boundaries between them:
 #
 #   libauthd  the wire protocols. No I/O, no policy, no privilege.
+#   libauthd-client
+#             clients of lpsd's admin socket and authd's identity socket,
+#             for the programs that ask: lps, the GUI apps. No daemon links it.
 #   authd     the daemon. Runs at PeiosTcb with SeCreateTokenPrivilege.
 #   lpsd      the local principal source. Owns the local identity bytes.
 #   lps       administers lpsd's store, over a socket. Owns nothing.
