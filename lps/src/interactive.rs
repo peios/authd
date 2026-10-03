@@ -198,6 +198,7 @@ fn parse(options: &[&str]) -> Result<Requested, Failed> {
             }
             "--service" => {
                 requested.service = true;
+                rest = tail;
                 continue;
             }
             "--no-password" => {
@@ -413,6 +414,13 @@ mod tests {
         let requested = parsed(&["kiosk", "--no-password", "--home", "/srv/kiosk"]);
         assert!(requested.no_password);
         assert_eq!(requested.home.as_deref(), Some("/srv/kiosk"));
+    }
+
+    #[test]
+    fn service_is_recorded_without_consuming_a_value() {
+        let requested = parsed(&["backup", "--service", "--home", "/srv/backup"]);
+        assert!(requested.service);
+        assert_eq!(requested.home.as_deref(), Some("/srv/backup"));
     }
 
     #[test]
