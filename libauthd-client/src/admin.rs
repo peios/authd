@@ -78,16 +78,18 @@ impl Admin {
 
     fn connect(&self) -> Result<UnixStream, Refusal> {
         let at = self.path.display();
-        let stream = UnixStream::connect(&self.path).map_err(|error| {
-            Refusal::unreached(match error.kind() {
-                // By far the most common failure, and the least
-                // self-explanatory: the socket exists only while lpsd runs.
-                io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused => {
-                    format!("cannot reach lpsd on {at}: it does not appear to be running")
-                }
-                io::ErrorKind::PermissionDenied => format!("cannot reach lpsd on {at}: permission denied"),
-                _ => format!("cannot reach lpsd on {at}: {error}"),
-            })
+        let stream = UnixStream::connect(&self.path).map_err(|error| match error.kind() {
+            // By far the most common failure, and the least self-explanatory:
+            // the socket exists only while lpsd runs.
+            io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused => {
+                Refusal::unreached(format!("cannot reach lpsd on {at}: it does not appear to be running"))
+            }
+            // The socket's descriptor admits whom lpsd would, so refusing the
+            // connection is refusing the caller, as lpsd itself would have.
+            io::ErrorKind::PermissionDenied => {
+                Refusal { failure: Some(Failure::Denied), reason: format!("cannot reach lpsd on {at}: permission denied") }
+            }
+            _ => Refusal::unreached(format!("cannot reach lpsd on {at}: {error}")),
         })?;
         stream
             .set_read_timeout(Some(REPLY_TIMEOUT))
