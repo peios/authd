@@ -46,6 +46,7 @@
 //! read it into.
 
 use crate::claim::Claim;
+use crate::credential::Policy;
 use crate::frame::{self, Framing, Reader, WireError, Writer};
 use crate::secret::Secret;
 pub use crate::wire::LogonTypes;
@@ -91,6 +92,8 @@ pub const MSG_KEY_LIST: u16 = 0x0011;
 pub const MSG_KEY_ADD: u16 = 0x0012;
 pub const MSG_KEY_REMOVE: u16 = 0x0013;
 pub const MSG_CREDENTIAL_POLICY: u16 = 0x0014;
+pub const MSG_RENAME: u16 = 0x0015;
+pub const MSG_SET_LOGON_TYPES: u16 = 0x0016;
 pub const MSG_KEYS: u16 = 0x8008;
 // lpsd -> client. The high bit marks a message sent by the authority, as in
 // PGSS Logon and PSI — here lpsd is the authority for its own store.
@@ -136,7 +139,9 @@ pub fn reply_to(request: u16) -> Option<u16> {
         | MSG_SET_PROFILE
         | MSG_SET_PRIMARY_GROUP
         | MSG_SET_CLAIM
-        | MSG_REMOVE_CLAIM => MSG_DONE,
+        | MSG_REMOVE_CLAIM
+        | MSG_RENAME
+        | MSG_SET_LOGON_TYPES => MSG_DONE,
         _ => return None,
     })
 }
@@ -164,6 +169,8 @@ pub const REQUEST_TYPES: &[u16] = &[
     MSG_SET_PRIMARY_GROUP,
     MSG_SET_CLAIM,
     MSG_REMOVE_CLAIM,
+    MSG_RENAME,
+    MSG_SET_LOGON_TYPES,
 ];
 
 /// Matches the store's own ceiling on a principal name. A protocol that could
@@ -306,6 +313,12 @@ pub struct Detail {
     pub shell: String,
     pub display_name: String,
     pub claims: Vec<Claim>,
+    /// [`LogonTypes::UNSTATED`] both when the principal states nothing and
+    /// when the daemon predates the field; either way the authority applies
+    /// its default.
+    pub permitted_logon_types: LogonTypes,
+    /// `None` where the daemon did not say.
+    pub credential_policy: Option<Policy>,
 }
 
 /// Set part of a principal's profile. An absent field is left alone, which is
@@ -375,6 +388,31 @@ pub struct Add<'a> {
     /// authority reads as its default — everything a person could use, and
     /// never `Service`. So an old `lps` cannot create a service principal by
     /// accident, which is the property worth having here.
+    pub permitted_logon_types: LogonTypes,
+    /// The rest of the profile, so a principal is created whole rather than
+    /// created and then corrected: a refused shell refuses the account, and
+    /// nothing is left half-made. `None` takes the daemon's default.
+    ///
+    /// The primary group is as the operator wrote it, like `groups`.
+    pub primary_group: Option<String>,
+    pub home: Option<String>,
+    pub shell: Option<String>,
+    pub display_name: Option<String>,
+}
+
+/// Change what a principal is called. Its SID, RID and everything else stay.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Rename {
+    pub name: String,
+    pub new_name: String,
+}
+
+/// Set which kinds of sign-on a principal may be used for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SetLogonTypes {
+    pub name: String,
+    /// [`LogonTypes::UNSTATED`] returns the principal to the authority's
+    /// default.
     pub permitted_logon_types: LogonTypes,
 }
 
@@ -526,6 +564,10 @@ pub fn encode_add(add: &Add<'_>) -> Result<Secret, WireError> {
         w.close(at);
     }
     w.u32(add.permitted_logon_types.bits());
+    write_optional(&mut w, add.primary_group.as_deref(), MAX_NAME_BYTES)?;
+    write_optional(&mut w, add.home.as_deref(), MAX_PATH_BYTES)?;
+    write_optional(&mut w, add.shell.as_deref(), MAX_PATH_BYTES)?;
+    write_optional(&mut w, add.display_name.as_deref(), MAX_DISPLAY_NAME_BYTES)?;
     w.close(body);
 
     let encoded = w.finish()?;
@@ -554,12 +596,63 @@ pub fn decode_add(buf: &[u8]) -> Result<Add<'_>, WireError> {
     } else {
         LogonTypes(b.u32()?)
     };
+    // Each absent from a client predating them, which leaves the daemon's
+    // defaults: what that client would have got anyway.
+    let mut optional = |max| -> Result<Option<String>, WireError> {
+        if b.at_end() {
+            Ok(None)
+        } else {
+            read_optional(&mut b, max)
+        }
+    };
+    let primary_group = optional(MAX_NAME_BYTES)?;
+    let home = optional(MAX_PATH_BYTES)?;
+    let shell = optional(MAX_PATH_BYTES)?;
+    let display_name = optional(MAX_DISPLAY_NAME_BYTES)?;
     Ok(Add {
         name,
         credential,
         enabled,
         groups,
         permitted_logon_types,
+        primary_group,
+        home,
+        shell,
+        display_name,
+    })
+}
+
+pub fn encode_rename(rename: &Rename) -> Result<Vec<u8>, WireError> {
+    let mut w = begin(MSG_RENAME);
+    let body = w.open();
+    w.string(&rename.name, MAX_NAME_BYTES)?;
+    w.string(&rename.new_name, MAX_NAME_BYTES)?;
+    w.close(body);
+    w.finish()
+}
+
+pub fn decode_rename(buf: &[u8]) -> Result<Rename, WireError> {
+    let mut b = open_body(buf, MSG_RENAME)?;
+    Ok(Rename {
+        name: b.string(MAX_NAME_BYTES)?.to_owned(),
+        new_name: b.string(MAX_NAME_BYTES)?.to_owned(),
+    })
+}
+
+pub fn encode_set_logon_types(set: &SetLogonTypes) -> Result<Vec<u8>, WireError> {
+    let mut w = begin(MSG_SET_LOGON_TYPES);
+    let body = w.open();
+    w.string(&set.name, MAX_NAME_BYTES)?;
+    w.u32(set.permitted_logon_types.bits());
+    w.close(body);
+    w.finish()
+}
+
+pub fn decode_set_logon_types(buf: &[u8]) -> Result<SetLogonTypes, WireError> {
+    let mut b = open_body(buf, MSG_SET_LOGON_TYPES)?;
+    Ok(SetLogonTypes {
+        name: b.string(MAX_NAME_BYTES)?.to_owned(),
+        permitted_logon_types: LogonTypes(b.u32()?),
     })
 }
 
@@ -712,6 +805,10 @@ pub fn encode_principal(detail: &Detail) -> Result<Vec<u8>, WireError> {
     w.string(&detail.shell, MAX_PATH_BYTES)?;
     w.string(&detail.display_name, MAX_DISPLAY_NAME_BYTES)?;
     crate::claim::write_claims(&mut w, &detail.claims)?;
+    w.u32(detail.permitted_logon_types.bits());
+    if let Some(policy) = detail.credential_policy {
+        w.u8(policy as u8);
+    }
 
     w.close(body);
     w.finish()
@@ -754,6 +851,18 @@ pub fn decode_principal(buf: &[u8]) -> Result<Detail, WireError> {
     } else {
         crate::claim::read_claims(&mut b)?
     };
+    let permitted_logon_types = if b.at_end() {
+        LogonTypes::UNSTATED
+    } else {
+        LogonTypes(b.u32()?)
+    };
+    let credential_policy = if b.at_end() {
+        None
+    } else {
+        // Closed: a policy this build does not know is a version mismatch,
+        // not something to show as one it does.
+        Some(Policy::from_u8(b.u8()?).ok_or(WireError::UnknownValue)?)
+    };
 
     Ok(Detail {
         name,
@@ -767,6 +876,8 @@ pub fn decode_principal(buf: &[u8]) -> Result<Detail, WireError> {
         shell,
         display_name,
         claims,
+        permitted_logon_types,
+        credential_policy,
     })
 }
 
@@ -1012,7 +1123,11 @@ mod tests {
     fn add_round_trips() {
         let add = Add {
             permitted_logon_types: LogonTypes::UNSTATED,
-            name: "jack".into(),
+            primary_group: None,
+            home: None,
+            shell: None,
+            display_name: None,
+            name:"jack".into(),
             credential: Credential::Password(b"hunter2"),
             enabled: true,
             groups: vec!["Administrators".into()],
@@ -1032,7 +1147,11 @@ mod tests {
     fn add_with_no_groups_round_trips() {
         let add = Add {
             permitted_logon_types: LogonTypes::UNSTATED,
-            name: "guest".into(),
+            primary_group: None,
+            home: None,
+            shell: None,
+            display_name: None,
+            name:"guest".into(),
             credential: Credential::None,
             enabled: false,
             groups: vec![],
@@ -1052,7 +1171,11 @@ mod tests {
     fn an_unknown_credential_kind_is_refused() {
         let encoded = encode_add(&Add {
             permitted_logon_types: LogonTypes::UNSTATED,
-            name: "jack".into(),
+            primary_group: None,
+            home: None,
+            shell: None,
+            display_name: None,
+            name:"jack".into(),
             credential: Credential::Password(b"pw"),
             enabled: true,
             groups: vec![],
@@ -1081,7 +1204,11 @@ mod tests {
     fn no_credential_and_an_empty_password_are_distinguishable() {
         let none = encode_add(&Add {
             permitted_logon_types: LogonTypes::UNSTATED,
-            name: "jack".into(),
+            primary_group: None,
+            home: None,
+            shell: None,
+            display_name: None,
+            name:"jack".into(),
             credential: Credential::None,
             enabled: true,
             groups: vec![],
@@ -1089,7 +1216,11 @@ mod tests {
         .unwrap();
         let empty = encode_add(&Add {
             permitted_logon_types: LogonTypes::UNSTATED,
-            name: "jack".into(),
+            primary_group: None,
+            home: None,
+            shell: None,
+            display_name: None,
+            name:"jack".into(),
             credential: Credential::Password(b""),
             enabled: true,
             groups: vec![],
@@ -1214,6 +1345,8 @@ mod tests {
                 flags: crate::claim::FLAG_MANDATORY,
                 values: crate::claim::Values::String(vec!["Engineering".into()]),
             }],
+            permitted_logon_types: LogonTypes::DEFAULT,
+            credential_policy: Some(Policy::PasswordOrKey),
         }
     }
 
@@ -1250,6 +1383,80 @@ mod tests {
         assert_eq!(decoded.unix_id, 0);
         assert_eq!(decoded.home, "");
         assert!(decoded.claims.is_empty());
+        assert_eq!(decoded.permitted_logon_types, LogonTypes::UNSTATED);
+        assert_eq!(decoded.credential_policy, None);
+    }
+
+    /// A credential policy this build does not know is a version mismatch,
+    /// and must not be shown as one it does.
+    #[test]
+    fn an_unknown_credential_policy_is_refused() {
+        let mut bytes = encode_principal(&detail()).unwrap();
+        *bytes.last_mut().unwrap() = 0x7f;
+        assert_eq!(decode_principal(&bytes).unwrap_err(), WireError::UnknownValue);
+    }
+
+    #[test]
+    fn an_add_carrying_a_profile_round_trips() {
+        let add = Add {
+            name: "dana".into(),
+            credential: Credential::Password(b"pw"),
+            enabled: true,
+            groups: vec![],
+            permitted_logon_types: LogonTypes::DEFAULT,
+            primary_group: Some("developers".into()),
+            home: Some("/srv/dana".into()),
+            shell: None,
+            display_name: Some(String::new()),
+        };
+        let encoded = encode_add(&add).unwrap();
+        let decoded = decode_add(encoded.expose()).unwrap();
+        assert_eq!(decoded.permitted_logon_types, LogonTypes::DEFAULT);
+        assert_eq!(decoded.primary_group.as_deref(), Some("developers"));
+        assert_eq!(decoded.home.as_deref(), Some("/srv/dana"));
+        assert_eq!(decoded.shell, None);
+        assert_eq!(decoded.display_name.as_deref(), Some(""));
+    }
+
+    /// An `lps` from before the profile travelled on `Add` sends none of it,
+    /// and the daemon must take its defaults rather than refuse.
+    #[test]
+    fn an_add_from_before_the_profile_decodes_with_defaults() {
+        let mut w = begin(MSG_ADD);
+        let body = w.open();
+        w.string("dana", MAX_NAME_BYTES).unwrap();
+        w.u8(Credential::TAG_NONE);
+        w.bytes(&[], MAX_SECRET_BYTES).unwrap();
+        w.u8(1);
+        w.count(0, MAX_GROUPS).unwrap();
+        w.u32(0);
+        w.close(body);
+        let bytes = w.finish().unwrap();
+
+        let decoded = decode_add(&bytes).unwrap();
+        assert_eq!(decoded.name, "dana");
+        assert_eq!(decoded.primary_group, None);
+        assert_eq!(decoded.home, None);
+        assert_eq!(decoded.shell, None);
+        assert_eq!(decoded.display_name, None);
+    }
+
+    #[test]
+    fn rename_and_set_logon_types_round_trip() {
+        let rename = Rename {
+            name: "dana".into(),
+            new_name: "dscully".into(),
+        };
+        assert_eq!(decode_rename(&encode_rename(&rename).unwrap()).unwrap(), rename);
+
+        let set = SetLogonTypes {
+            name: "dana".into(),
+            permitted_logon_types: LogonTypes::SERVICE_ONLY,
+        };
+        assert_eq!(
+            decode_set_logon_types(&encode_set_logon_types(&set).unwrap()).unwrap(),
+            set
+        );
     }
 
     #[test]
@@ -1450,7 +1657,11 @@ mod tests {
         assert_eq!(
             encode_add(&Add {
                 permitted_logon_types: LogonTypes::UNSTATED,
-                name: "jack".into(),
+                primary_group: None,
+                home: None,
+                shell: None,
+                display_name: None,
+                name:"jack".into(),
                 credential: Credential::Password(&long),
                 enabled: true,
                 groups: vec![],
@@ -1465,7 +1676,11 @@ mod tests {
         assert_eq!(
             encode_add(&Add {
                 permitted_logon_types: LogonTypes::UNSTATED,
-                name: "jack".into(),
+                primary_group: None,
+                home: None,
+                shell: None,
+                display_name: None,
+                name:"jack".into(),
                 credential: Credential::Password(b"pw"),
                 enabled: true,
                 groups: vec!["Administrators".to_string(); MAX_GROUPS + 1],
@@ -1573,6 +1788,16 @@ mod tests {
                 claim_name: "Level".into(),
             })
             .unwrap(),
+            encode_rename(&Rename {
+                name: "jack".into(),
+                new_name: "jpalfrey".into(),
+            })
+            .unwrap(),
+            encode_set_logon_types(&SetLogonTypes {
+                name: "jack".into(),
+                permitted_logon_types: LogonTypes::DEFAULT,
+            })
+            .unwrap(),
             encode_domain_is(&sid()).unwrap(),
             encode_created(1000).unwrap(),
             encode_done().unwrap(),
@@ -1593,6 +1818,8 @@ mod tests {
                 let _ = decode_failed(partial);
                 let _ = decode_show(partial);
                 let _ = decode_add(partial);
+                let _ = decode_rename(partial);
+                let _ = decode_set_logon_types(partial);
             }
         }
     }

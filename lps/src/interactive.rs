@@ -134,35 +134,15 @@ pub fn add(options: &[&str]) -> Result<(), Failed> {
         } else {
             lps::LogonTypes::UNSTATED
         },
+        // All in the one request, so the principal is made whole or not at
+        // all: a refused shell refuses the account, rather than leaving one
+        // with the daemon's default shell for the operator to notice.
+        primary_group: requested.primary_group,
+        home: requested.home,
+        shell: requested.shell,
+        display_name: requested.display_name,
     })?;
     println!("created {name} with RID {rid}");
-
-    // The profile and the primary group are separate requests, because `Add`
-    // carries a password and every extra field on it is another field beside a
-    // secret in the same buffer. They run after the principal exists, so a
-    // rejected home directory leaves an account that can be corrected rather
-    // than no account at all — and each prints its own line, so an operator can
-    // see exactly how far it got.
-    if requested.home.is_some() || requested.shell.is_some() || requested.display_name.is_some() {
-        apply(
-            lps::encode_set_profile(&lps::SetProfile {
-                name: name.clone(),
-                home: requested.home,
-                shell: requested.shell,
-                display_name: requested.display_name,
-            }),
-            "set the profile",
-        )?;
-    }
-    if let Some(group) = requested.primary_group {
-        apply(
-            lps::encode_set_primary_group(&lps::Membership {
-                name: name.clone(),
-                group: group.clone(),
-            }),
-            &format!("set the primary group to {group}"),
-        )?;
-    }
     Ok(())
 }
 
@@ -251,13 +231,6 @@ fn describe(name: &str, requested: &Requested) {
         println!("  state          disabled");
     }
     println!();
-}
-
-/// Send a follow-up request, reporting what it did.
-fn apply(message: Result<Vec<u8>, libauthd::WireError>, done: &str) -> Result<(), Failed> {
-    Admin::new().done(message)?;
-    println!("{done}");
-    Ok(())
 }
 
 fn non_empty(value: String) -> Option<String> {

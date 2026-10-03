@@ -88,7 +88,7 @@ use std::path::Path;
 
 use libauthd::claim::{self, Claim, Values};
 use libauthd::credential::{MAX_KEYS, MAX_LABEL, Policy, PublicKey};
-use libauthd::wire::LogonTypes;
+use libauthd::wire::{LogonType, LogonTypes};
 use peios::security::{Sid, SidRef, WellKnown};
 
 use crate::codec::{self, CodecError, Reader, Writer};
@@ -252,6 +252,9 @@ pub enum StoreError {
     NotFound(String),
     /// No group by that name, and it does not parse as a SID either.
     NoSuchGroup(String),
+    /// The name asked for is already held, by a principal or a group. Its own
+    /// variant so the admin socket can say `Exists` without reading the words.
+    Exists(String),
     Verifier(VerifierError),
 }
 
@@ -260,7 +263,7 @@ impl core::fmt::Display for StoreError {
         match self {
             Self::Io(e) => write!(f, "{e}"),
             Self::Corrupt(e) => write!(f, "{e}"),
-            Self::Invalid(what) => write!(f, "{what}"),
+            Self::Invalid(what) | Self::Exists(what) => write!(f, "{what}"),
             Self::NotFound(name) => write!(f, "there is no principal named {name}"),
             Self::NoSuchGroup(name) => {
                 write!(f, "there is no group named {name}, and it is not a SID")
@@ -921,6 +924,32 @@ impl Store {
             .ok_or_else(|| StoreError::NotFound(name.to_string()))
     }
 
+    /// Refuse `name` if a principal or a local group already holds it, other
+    /// than the principal with RID `except`.
+    ///
+    /// One namespace for both, as PSPU §10.5 has it. A name lookup tries
+    /// groups first, so a principal sharing a group's name could be found by
+    /// SID and never by name.
+    fn refuse_if_taken(&self, name: &str, except: Option<u32>) -> Result<(), StoreError> {
+        if let Some(principal) = self
+            .principals
+            .iter()
+            .find(|p| p.matches(name.as_bytes()) && Some(p.rid) != except)
+        {
+            return Err(StoreError::Exists(format!(
+                "{} already exists",
+                principal.name
+            )));
+        }
+        if let Some(group) = self.groups.iter().find(|g| g.matches(name)) {
+            return Err(StoreError::Exists(format!(
+                "there is already a group named {}",
+                group.name
+            )));
+        }
+        Ok(())
+    }
+
     fn position(&self, name: &str) -> Result<usize, StoreError> {
         self.principals
             .iter()
@@ -1016,9 +1045,7 @@ impl Store {
                 "the store already holds {MAX_PRINCIPALS} principals"
             )));
         }
-        if self.principals.iter().any(|p| p.matches(name.as_bytes())) {
-            return Err(StoreError::Invalid(format!("{name} already exists")));
-        }
+        self.refuse_if_taken(&name, None)?;
 
         let home = match new.home {
             Some(home) => check_path(&home, "home directory")?,
@@ -1070,6 +1097,59 @@ impl Store {
         self.refuse_if_last_administrator(name, "removing them")?;
         self.principals.remove(at);
         Ok(())
+    }
+
+    /// Change what a principal is called. Returns whether anything changed.
+    ///
+    /// The SID, RID and Unix ID stay, so everything that names the principal
+    /// by SID — every descriptor, every token already minted — still does.
+    /// The home directory stays too: it is a path the principal's files are
+    /// at, not a spelling of its name, and moving it is not the store's
+    /// business.
+    ///
+    /// A change of case alone is a rename, and the only one that may match
+    /// the principal's own name.
+    pub fn rename(&mut self, name: &str, new_name: &str) -> Result<bool, StoreError> {
+        let at = self.position(name)?;
+        let new_name = check_name(new_name, "principal")?;
+        if self.principals[at].name == new_name {
+            return Ok(false);
+        }
+        self.refuse_if_taken(&new_name, Some(self.principals[at].rid))?;
+        self.principals[at].name = new_name;
+        Ok(true)
+    }
+
+    /// Set which kinds of sign-on a principal may be used for. Returns
+    /// whether anything changed.
+    ///
+    /// [`LogonTypes::UNSTATED`] returns the principal to the authority's
+    /// default. Bits for logon types this build does not name are kept as
+    /// given, as on `add`: the authority checks the types it knows, and a
+    /// newer one may know more.
+    pub fn set_logon_types(&mut self, name: &str, types: LogonTypes) -> Result<bool, StoreError> {
+        let at = self.position(name)?;
+        // Disabling is not the only way to leave nobody able to sign in and
+        // administer. A last administrator who may only be a batch job is
+        // as locked out as a disabled one.
+        let reachable = [
+            LogonType::Interactive,
+            LogonType::RemoteInteractive,
+            LogonType::Network,
+        ]
+        .into_iter()
+        .any(|logon_type| types.permits(logon_type));
+        if !reachable {
+            self.refuse_if_last_administrator(
+                name,
+                "allowing them no sign-in at the machine, remotely or over the network",
+            )?;
+        }
+        if self.principals[at].permitted_logon_types == types {
+            return Ok(false);
+        }
+        self.principals[at].permitted_logon_types = types;
+        Ok(true)
     }
 
     /// Enable or disable a principal. Returns whether anything changed.
@@ -1219,11 +1299,7 @@ impl Store {
     /// Create a local group, returning the RID allocated to it.
     pub fn create_group(&mut self, name: &str) -> Result<u32, StoreError> {
         let name = check_name(name, "group")?;
-        if self.groups.iter().any(|g| g.matches(&name)) {
-            return Err(StoreError::Invalid(format!(
-                "the group {name} already exists"
-            )));
-        }
+        self.refuse_if_taken(&name, None)?;
         if self.groups.len() >= MAX_GROUP_OBJECTS {
             return Err(StoreError::Invalid(format!(
                 "the store already holds {MAX_GROUP_OBJECTS} groups"
@@ -2421,6 +2497,104 @@ mod tests {
         assert!(store.authenticate(b"jack", b"password").is_some());
     }
 
+    #[test]
+    fn a_renamed_principal_keeps_its_sid_and_signs_in_by_the_new_name() {
+        let mut store = seeded();
+        let before = store.record("jack").unwrap();
+
+        assert!(store.rename("jack", "jpalfrey").unwrap());
+
+        let after = store.record("jpalfrey").unwrap();
+        assert_eq!(after.sid, before.sid);
+        assert_eq!(after.unix_id, before.unix_id);
+        assert_eq!(after.home, before.home, "the home directory is not moved");
+        assert!(matches!(store.record("jack"), Err(StoreError::NotFound(_))));
+        assert!(store.authenticate(b"jpalfrey", b"password").is_some());
+        assert!(store.authenticate(b"jack", b"password").is_none());
+    }
+
+    #[test]
+    fn a_change_of_case_is_a_rename_and_the_same_name_is_not() {
+        let mut store = seeded();
+        assert!(!store.rename("jack", "jack").unwrap());
+        assert!(store.rename("jack", "Jack").unwrap());
+        assert_eq!(store.record("jack").unwrap().name, "Jack");
+    }
+
+    #[test]
+    fn a_rename_is_refused_a_name_already_held() {
+        let mut store = seeded();
+        store.add(new("dana", vec![]), None).unwrap();
+        store.create_group("developers").unwrap();
+
+        assert!(matches!(store.rename("dana", "JACK"), Err(StoreError::Exists(_))));
+        assert!(matches!(store.rename("dana", "Developers"), Err(StoreError::Exists(_))));
+        assert!(matches!(store.rename("dana", "Administrators"), Err(StoreError::Invalid(_))));
+        assert!(matches!(store.rename("dana", "a/b"), Err(StoreError::Invalid(_))));
+        assert!(matches!(store.rename("nobody", "x"), Err(StoreError::NotFound(_))));
+        assert_eq!(store.record("dana").unwrap().name, "dana");
+    }
+
+    /// A principal and a group are one namespace (PSPU §10.5): a name lookup
+    /// tries groups first, so a principal sharing a group's name would be
+    /// unreachable by name.
+    #[test]
+    fn a_principal_and_a_group_may_not_share_a_name() {
+        let mut store = seeded();
+        store.create_group("developers").unwrap();
+
+        assert!(matches!(
+            store.add(new("DEVELOPERS", vec![]), None),
+            Err(StoreError::Exists(_))
+        ));
+        assert!(matches!(store.create_group("Jack"), Err(StoreError::Exists(_))));
+        assert!(matches!(
+            store.add(new("jack", vec![]), None),
+            Err(StoreError::Exists(_))
+        ));
+        assert!(matches!(store.create_group("developers"), Err(StoreError::Exists(_))));
+    }
+
+    #[test]
+    fn logon_types_are_set_and_returned_to_the_default() {
+        let mut store = seeded();
+        store.add(new("dana", vec![]), None).unwrap();
+
+        assert!(store.set_logon_types("dana", LogonTypes::SERVICE_ONLY).unwrap());
+        assert!(!store.set_logon_types("dana", LogonTypes::SERVICE_ONLY).unwrap());
+        assert_eq!(
+            store.record("dana").unwrap().permitted_logon_types,
+            LogonTypes::SERVICE_ONLY
+        );
+
+        assert!(store.set_logon_types("dana", LogonTypes::UNSTATED).unwrap());
+        assert_eq!(
+            store.record("dana").unwrap().permitted_logon_types,
+            LogonTypes::UNSTATED
+        );
+    }
+
+    /// A last administrator who may sign in only as a service is as locked out
+    /// as a disabled one.
+    #[test]
+    fn the_last_administrator_keeps_a_way_to_sign_in() {
+        let mut store = seeded();
+
+        assert!(matches!(
+            store.set_logon_types("jack", LogonTypes::SERVICE_ONLY),
+            Err(StoreError::Invalid(_))
+        ));
+        assert!(
+            store
+                .set_logon_types("jack", LogonTypes::UNSTATED.with(LogonType::Network))
+                .unwrap()
+        );
+
+        // With a second administrator, the first may be anything.
+        store.add(new("dana", vec![administrators()]), None).unwrap();
+        assert!(store.set_logon_types("jack", LogonTypes::SERVICE_ONLY).unwrap());
+    }
+
     /// Adding material does not silently change the authentication policy.
     #[test]
     fn adding_a_password_requires_an_explicit_policy_change() {
@@ -2638,7 +2812,7 @@ mod tests {
         let mut store = seeded();
         assert!(matches!(
             store.add(new("JACK", vec![]), Some(b"other")),
-            Err(StoreError::Invalid(_))
+            Err(StoreError::Exists(_))
         ));
     }
 
@@ -2894,7 +3068,7 @@ mod tests {
         store.create_group("developers").unwrap();
         assert!(matches!(
             store.create_group("DEVELOPERS"),
-            Err(StoreError::Invalid(_))
+            Err(StoreError::Exists(_))
         ));
     }
 

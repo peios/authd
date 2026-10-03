@@ -59,6 +59,7 @@ usage: lps <command> [arguments]
       --service                 may sign in only as a service
       --no-prompt               fail rather than ask for anything missing
   remove <name>               delete a principal
+  rename <name> <new-name>    rename one; its SID and home directory stay
   enable <name>               allow it to log on
   disable <name>              refuse it, keeping the account
   key list <name>             list public keys and credential policy
@@ -66,6 +67,11 @@ usage: lps <command> [arguments]
   key remove <name> <id>      remove an enrolled key
   policy <name> <mode>        password, key, either, none, or denied
   password <name>             set a principal's password
+  logon-types <name> <type>...
+                              the kinds of sign-on it may be used for, or
+                              `default`. types: interactive remote-interactive
+                              network network-cleartext batch new-credentials
+                              service
 
   set <name> [options]        change a principal's profile
       --home <path>
@@ -152,6 +158,14 @@ fn run(arguments: &[&str]) -> Result<(), Failed> {
 
         ["add", options @ ..] => interactive::add(options),
         ["remove", name] => simple(lps::encode_remove(&named(name)), &format!("removed {name}")),
+        ["rename", name, new_name] => simple(
+            lps::encode_rename(&lps::Rename {
+                name: name.to_string(),
+                new_name: new_name.to_string(),
+            }),
+            &format!("renamed {name} to {new_name}"),
+        ),
+        ["logon-types", name, types @ ..] => logon_types(name, types),
         ["enable", name] => set_enabled(name, true),
         ["disable", name] => set_enabled(name, false),
         ["password", name] => password(name),
@@ -272,6 +286,35 @@ fn set(name: &str, options: &[&str]) -> Result<(), Failed> {
         )?;
     }
     Ok(())
+}
+
+/// `lps logon-types`.
+fn logon_types(name: &str, words: &[&str]) -> Result<(), Failed> {
+    let types = parse_logon_types(words)?;
+    simple(
+        lps::encode_set_logon_types(&lps::SetLogonTypes {
+            name: name.to_string(),
+            permitted_logon_types: types,
+        }),
+        &format!("set the logon types for {name}"),
+    )
+}
+
+/// `default` alone, or one or more of [`format::LOGON_TYPES`]' words.
+fn parse_logon_types(words: &[&str]) -> Result<lps::LogonTypes, Failed> {
+    match words {
+        [] => Err(Failed::Usage(
+            "name at least one logon type, or `default`".into(),
+        )),
+        ["default"] => Ok(lps::LogonTypes::UNSTATED),
+        words => words.iter().try_fold(lps::LogonTypes::UNSTATED, |types, word| {
+            format::LOGON_TYPES
+                .iter()
+                .find(|(_, known)| known == word)
+                .map(|(logon_type, _)| types.with(*logon_type))
+                .ok_or_else(|| Failed::Usage(format!("unknown logon type {word:?}")))
+        }),
+    }
 }
 
 fn set_claim(name: &str, claim_name: &str, kind: &str, values: &[&str]) -> Result<(), Failed> {
@@ -504,6 +547,25 @@ mod tests {
     }
 
     #[test]
+    fn logon_types_parse_from_their_words() {
+        use libauthd::wire::LogonType;
+        assert_eq!(parse_logon_types(&["default"]).unwrap(), lps::LogonTypes::UNSTATED);
+        assert_eq!(
+            parse_logon_types(&["network", "batch"]).unwrap(),
+            lps::LogonTypes::UNSTATED
+                .with(LogonType::Network)
+                .with(LogonType::Batch)
+        );
+        assert!(matches!(parse_logon_types(&[]), Err(Failed::Usage(_))));
+        assert!(matches!(parse_logon_types(&["console"]), Err(Failed::Usage(_))));
+        // `default` is a word of its own, not one type among others.
+        assert!(matches!(
+            parse_logon_types(&["default", "service"]),
+            Err(Failed::Usage(_))
+        ));
+    }
+
+    #[test]
     fn an_option_without_a_value_says_which_one() {
         let error = value_for("--home", &[]).err().expect("must fail");
         match error {
@@ -555,18 +617,10 @@ fn key_remove(name: &str, text: &str) -> Result<(), Failed> {
     )
 }
 fn credential_policy(name: &str, mode: &str) -> Result<(), Failed> {
-    use libauthd::credential::Policy;
-    let policy = match mode {
-        "password" => Policy::Password,
-        "key" => Policy::SshPublicKey,
-        "either" => Policy::PasswordOrKey,
-        "none" => Policy::NoCredential,
-        "denied" => Policy::Denied,
-        _ => {
-            return Err(Failed::Usage(
-                "policy must be password, key, either, none, or denied".into(),
-            ));
-        }
+    let Some(&(policy, _)) = format::POLICIES.iter().find(|(_, word)| *word == mode) else {
+        return Err(Failed::Usage(
+            "policy must be password, key, either, none, or denied".into(),
+        ));
     };
     simple(
         lps::encode_key_request(&lps::KeyRequest::Policy {
