@@ -16,7 +16,7 @@ path = "src/main.rs"
 [dependencies]
 libauthd = { path = "../libauthd" }
 libc = "0.2"
-peios = { git = "https://github.com/peios/peios-rs.git", rev = "3dffee949a457509078ffc2f423613de330b5401" }
+peios = { git = "https://github.com/peios/peios-rs.git", rev = "fa833541e1837042765072f092140f4af683edc2" }
 # Deriving a service's SID from its name, which is how a principal source is
 # identified. Pure computation with no I/O and no unsafe; peinit carries the
 # same dependency for the same derivation. The duplication wants resolving by
