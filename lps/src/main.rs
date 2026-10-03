@@ -424,6 +424,22 @@ pub fn describe(failure: Failure, reason: &str) -> String {
 mod tests {
     use super::*;
 
+    /// A refusal from lpsd, or from its socket, says what administering the
+    /// store needs; one that never reached lpsd says only what went wrong.
+    #[test]
+    fn a_refusal_says_what_administering_the_store_needs() {
+        let denied = Refusal { failure: Some(Failure::Denied), reason: "cannot reach lpsd on /run/lpsd/admin.sock: permission denied".into() };
+        match Failed::from(denied) {
+            Failed::Refused(said) => assert!(said.ends_with("requires membership of BUILTIN\\Administrators."), "{said}"),
+            Failed::Usage(_) => panic!("a refusal is not a usage error"),
+        }
+        let unreached = Refusal { failure: None, reason: "lpsd did not answer in time".into() };
+        match Failed::from(unreached) {
+            Failed::Refused(said) => assert_eq!(said, "lpsd did not answer in time"),
+            Failed::Usage(_) => panic!("a refusal is not a usage error"),
+        }
+    }
+
     #[test]
     fn hex_parses_even_length_input_only() {
         assert_eq!(hex("dead"), Some(vec![0xde, 0xad]));
