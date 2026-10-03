@@ -18,4 +18,4 @@ libc = "0.2"
 # without echoing it, and the termios guard that restores echo afterwards is
 # exactly the sort of thing that should exist once.
 libtty = { path = "../libtty" }
-peios = { git = "https://github.com/peios/peios-rs.git", rev = "a32489b50fe6119551219155b2daba426421e7ae" }
+peios = { git = "https://github.com/peios/peios-rs.git", rev = "3cf23f68d40c4adff252e28241bb3c958fba824f" }
