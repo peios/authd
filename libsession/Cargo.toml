@@ -7,4 +7,4 @@ description = "Shared Peios user-session environment policy"
 publish = false
 
 [dependencies]
-peios = { git = "https://github.com/peios/peios-rs.git", rev = "3dffee949a457509078ffc2f423613de330b5401" }
+peios = { git = "https://github.com/peios/peios-rs.git", rev = "fa833541e1837042765072f092140f4af683edc2" }
