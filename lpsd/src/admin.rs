@@ -89,13 +89,10 @@ impl From<StoreError> for Refused {
 impl Refused {
     fn failure(&self) -> Failure {
         match self {
-            Self::Store(StoreError::NotFound(_)) => Failure::NotFound,
-            // `add` is the only operation that reports a name collision, and
-            // reporting it distinctly lets a script tell "already so" from "you
-            // asked for something impossible".
-            Self::Store(StoreError::Invalid(what)) if what.contains("already exists") => {
-                Failure::Exists
-            }
+            Self::Store(StoreError::NotFound(_) | StoreError::NoSuchGroup(_)) => Failure::NotFound,
+            // Distinct, so a script can tell "already so" from "you asked for
+            // something impossible".
+            Self::Store(StoreError::Exists(_)) => Failure::Exists,
             Self::Store(StoreError::Invalid(_)) => Failure::Invalid,
             Self::Store(_) | Self::Encode => Failure::Internal,
         }
@@ -375,6 +372,8 @@ fn describe(msg_type: u16) -> &'static str {
         lps::MSG_KEY_ADD => "key-add",
         lps::MSG_KEY_REMOVE => "key-remove",
         lps::MSG_CREDENTIAL_POLICY => "credential-policy",
+        lps::MSG_RENAME => "rename",
+        lps::MSG_SET_LOGON_TYPES => "set-logon-types",
         _ => "an unknown request",
     }
 }
@@ -485,6 +484,8 @@ fn dispatch(
                 shell: record.shell,
                 display_name: record.display_name,
                 claims: record.claims,
+                permitted_logon_types: record.permitted_logon_types,
+                credential_policy: Some(store.credential_policy(&named.name)?),
             };
             Ok((Changed::No, encoded(lps::encode_principal(&detail))?))
         }
@@ -498,14 +499,24 @@ fn dispatch(
                 .iter()
                 .map(|group| store.resolve_group(group))
                 .collect::<Result<Vec<_>, _>>()?;
-            // Created disabled rather than created and then disabled. The two
-            // differ on an empty store: the second step would trip the
-            // last-administrator guard and leave a half-made account behind.
+            let primary_group = add
+                .primary_group
+                .as_deref()
+                .map(|group| store.resolve_group(group))
+                .transpose()?;
+            // Created whole, disabled and profiled, rather than created and
+            // then changed. The two differ on an empty store, where disabling
+            // afterwards would trip the last-administrator guard, and wherever
+            // a later step is refused: half an account would be left behind.
             let rid = store.add(
                 NewPrincipal {
                     permitted_logon_types: add.permitted_logon_types,
                     enabled: add.enabled,
                     groups,
+                    primary_group,
+                    home: add.home,
+                    shell: add.shell,
+                    display_name: add.display_name,
                     ..NewPrincipal::named(&add.name)
                 },
                 match add.credential {
@@ -613,6 +624,18 @@ fn dispatch(
             Ok((changed_flag(changed), encoded(lps::encode_done())?))
         }
 
+        lps::MSG_RENAME => {
+            let rename = request(lps::decode_rename(buf))?;
+            let changed = store.rename(&rename.name, &rename.new_name)?;
+            Ok((changed_flag(changed), encoded(lps::encode_done())?))
+        }
+
+        lps::MSG_SET_LOGON_TYPES => {
+            let set = request(lps::decode_set_logon_types(buf))?;
+            let changed = store.set_logon_types(&set.name, set.permitted_logon_types)?;
+            Ok((changed_flag(changed), encoded(lps::encode_done())?))
+        }
+
         _ => Err(Refused::Store(StoreError::Invalid(
             "this daemon does not understand that request".into(),
         ))),
@@ -647,4 +670,164 @@ fn refuse(stream: &UnixStream, failure: Failure, reason: &str) {
         return;
     };
     send(stream, &message);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ask(store: &mut Store, msg_type: u16, message: &[u8]) -> Result<Vec<u8>, Failure> {
+        dispatch(store, psi::Registered::default(), msg_type, message)
+            .map(|(_, reply)| reply)
+            .map_err(|refused| refused.failure())
+    }
+
+    fn add(store: &mut Store, add: &lps::Add<'_>) -> Result<Vec<u8>, Failure> {
+        let message = lps::encode_add(add).unwrap();
+        ask(store, lps::MSG_ADD, message.expose())
+    }
+
+    fn dana<'a>() -> lps::Add<'a> {
+        lps::Add {
+            name: "dana".into(),
+            credential: lps::Credential::None,
+            enabled: true,
+            groups: vec!["Administrators".into()],
+            permitted_logon_types: lps::LogonTypes::UNSTATED,
+            primary_group: None,
+            home: None,
+            shell: None,
+            display_name: None,
+        }
+    }
+
+    fn show(store: &mut Store, name: &str) -> lps::Detail {
+        let message = lps::encode_show(&lps::Named { name: name.into() }).unwrap();
+        lps::decode_principal(&ask(store, lps::MSG_SHOW, &message).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn an_add_carries_the_whole_profile() {
+        let mut store = Store::provision().unwrap();
+        store.create_group("developers").unwrap();
+        add(
+            &mut store,
+            &lps::Add {
+                primary_group: Some("developers".into()),
+                home: Some("/srv/dana".into()),
+                shell: Some("/bin/bash".into()),
+                display_name: Some("Dana Scully".into()),
+                permitted_logon_types: lps::LogonTypes::DEFAULT,
+                ..dana()
+            },
+        )
+        .unwrap();
+
+        let detail = show(&mut store, "dana");
+        assert_eq!(detail.primary_group.name, "developers");
+        assert_eq!(detail.home, "/srv/dana");
+        assert_eq!(detail.shell, "/bin/bash");
+        assert_eq!(detail.display_name, "Dana Scully");
+        assert_eq!(detail.permitted_logon_types, lps::LogonTypes::DEFAULT);
+        assert_eq!(
+            detail.credential_policy,
+            Some(libauthd::credential::Policy::NoCredential)
+        );
+    }
+
+    /// Half an account is not left behind: a refused shell refuses the add.
+    #[test]
+    fn an_add_with_a_refused_field_creates_nothing() {
+        let mut store = Store::provision().unwrap();
+        let refused = add(
+            &mut store,
+            &lps::Add {
+                shell: Some("bash".into()),
+                ..dana()
+            },
+        );
+        assert_eq!(refused.unwrap_err(), Failure::Invalid);
+        assert!(store.is_empty());
+    }
+
+    #[test]
+    fn failures_are_coded_by_kind_not_by_words() {
+        let mut store = Store::provision().unwrap();
+        add(&mut store, &dana()).unwrap();
+
+        assert_eq!(add(&mut store, &dana()).unwrap_err(), Failure::Exists);
+        assert_eq!(
+            add(
+                &mut store,
+                &lps::Add {
+                    name: "erin".into(),
+                    primary_group: Some("nonesuch".into()),
+                    ..dana()
+                }
+            )
+            .unwrap_err(),
+            Failure::NotFound
+        );
+        let delete = lps::encode_group_delete(&lps::Named {
+            name: "nonesuch".into(),
+        })
+        .unwrap();
+        assert_eq!(
+            ask(&mut store, lps::MSG_GROUP_DELETE, &delete).unwrap_err(),
+            Failure::NotFound
+        );
+        let rename = lps::encode_rename(&lps::Rename {
+            name: "nobody".into(),
+            new_name: "x".into(),
+        })
+        .unwrap();
+        assert_eq!(
+            ask(&mut store, lps::MSG_RENAME, &rename).unwrap_err(),
+            Failure::NotFound
+        );
+    }
+
+    #[test]
+    fn rename_and_logon_types_reach_the_store() {
+        let mut store = Store::provision().unwrap();
+        add(&mut store, &dana()).unwrap();
+        add(
+            &mut store,
+            &lps::Add {
+                name: "erin".into(),
+                groups: vec![],
+                ..dana()
+            },
+        )
+        .unwrap();
+
+        let rename = lps::encode_rename(&lps::Rename {
+            name: "erin".into(),
+            new_name: "erin.k".into(),
+        })
+        .unwrap();
+        lps::decode_done(&ask(&mut store, lps::MSG_RENAME, &rename).unwrap()).unwrap();
+
+        let set = lps::encode_set_logon_types(&lps::SetLogonTypes {
+            name: "erin.k".into(),
+            permitted_logon_types: lps::LogonTypes::SERVICE_ONLY,
+        })
+        .unwrap();
+        lps::decode_done(&ask(&mut store, lps::MSG_SET_LOGON_TYPES, &set).unwrap()).unwrap();
+        assert_eq!(
+            show(&mut store, "erin.k").permitted_logon_types,
+            lps::LogonTypes::SERVICE_ONLY
+        );
+
+        // dana is the only administrator.
+        let set = lps::encode_set_logon_types(&lps::SetLogonTypes {
+            name: "dana".into(),
+            permitted_logon_types: lps::LogonTypes::SERVICE_ONLY,
+        })
+        .unwrap();
+        assert_eq!(
+            ask(&mut store, lps::MSG_SET_LOGON_TYPES, &set).unwrap_err(),
+            Failure::Invalid
+        );
+    }
 }

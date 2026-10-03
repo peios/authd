@@ -159,6 +159,18 @@ impl Admin {
         self.done(lps::encode_remove(&named(name)))
     }
 
+    /// Renames a principal. Its SID, and everything that names it by SID,
+    /// stays; so does its home directory.
+    pub fn rename(&self, name: &str, new_name: &str) -> Result<(), Refusal> {
+        self.done(lps::encode_rename(&lps::Rename { name: name.into(), new_name: new_name.into() }))
+    }
+
+    /// Sets which kinds of sign-on the principal may be used for;
+    /// [`lps::LogonTypes::UNSTATED`] returns it to the authority's default.
+    pub fn set_logon_types(&self, name: &str, permitted_logon_types: lps::LogonTypes) -> Result<(), Refusal> {
+        self.done(lps::encode_set_logon_types(&lps::SetLogonTypes { name: name.into(), permitted_logon_types }))
+    }
+
     pub fn set_enabled(&self, name: &str, enabled: bool) -> Result<(), Refusal> {
         self.done(lps::encode_set_enabled(&lps::SetEnabled { name: name.into(), enabled }))
     }

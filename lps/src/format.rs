@@ -9,7 +9,9 @@
 //! in a terminal that renders anything clever.
 
 use libauthd::claim::{Claim, Values};
-use libauthd::lps::{Detail, GroupRef, GroupSummary, Summary};
+use libauthd::credential::Policy;
+use libauthd::lps::{Detail, GroupRef, GroupSummary, LogonTypes, Summary};
+use libauthd::wire::LogonType;
 use peios::security::SidRef;
 
 /// Render a SID, or say plainly that it could not be read.
@@ -112,6 +114,44 @@ pub fn groups(groups: &[GroupSummary]) -> String {
     out
 }
 
+/// The kinds of sign-on, as `lps` names them, in the order it lists them.
+pub const LOGON_TYPES: &[(LogonType, &str)] = &[
+    (LogonType::Interactive, "interactive"),
+    (LogonType::RemoteInteractive, "remote-interactive"),
+    (LogonType::Network, "network"),
+    (LogonType::NetworkCleartext, "network-cleartext"),
+    (LogonType::Batch, "batch"),
+    (LogonType::NewCredentials, "new-credentials"),
+    (LogonType::Service, "service"),
+];
+
+/// The credential policies, as `lps policy` names them.
+pub const POLICIES: &[(Policy, &str)] = &[
+    (Policy::Password, "password"),
+    (Policy::SshPublicKey, "key"),
+    (Policy::PasswordOrKey, "either"),
+    (Policy::NoCredential, "none"),
+    (Policy::Denied, "denied"),
+];
+
+/// A principal's logon types, saying where nothing was stated rather than
+/// listing the default as though it had been.
+fn logon_types(types: LogonTypes) -> String {
+    let named = LOGON_TYPES
+        .iter()
+        .filter(|(logon_type, _)| types.permits(*logon_type))
+        .map(|(_, word)| *word)
+        .collect::<Vec<_>>()
+        .join(", ");
+    if types.is_unstated() {
+        format!("default ({named})")
+    } else if named.is_empty() {
+        "none".to_string()
+    } else {
+        named
+    }
+}
+
 /// One claim, as `lps show` prints it.
 fn claim(claim: &Claim) -> String {
     let values = match &claim.values {
@@ -161,6 +201,16 @@ pub fn detail(principal: &Detail) -> String {
     field(&mut out, "primary group", &group(&principal.primary_group));
     field(&mut out, "home", &principal.home);
     field(&mut out, "shell", &principal.shell);
+    field(&mut out, "logon types", &logon_types(principal.permitted_logon_types));
+    // Absent from a daemon that predates it, and then better unsaid than
+    // guessed.
+    if let Some(policy) = principal.credential_policy {
+        let word = POLICIES
+            .iter()
+            .find(|(known, _)| *known == policy)
+            .map_or("unknown", |(_, word)| *word);
+        field(&mut out, "credential", word);
+    }
 
     if principal.groups.is_empty() {
         field(&mut out, "groups", "none");
@@ -330,6 +380,29 @@ mod tests {
         assert!(rendered.contains("/home/jack"), "{rendered}");
         assert!(rendered.contains("/bin/sh"), "{rendered}");
         assert!(rendered.contains("Jack Palfrey"), "{rendered}");
+    }
+
+    #[test]
+    fn detail_shows_logon_types_and_the_credential_policy() {
+        let rendered = detail_of(Detail {
+            name: "backup".into(),
+            sid: jack(),
+            permitted_logon_types: LogonTypes::SERVICE_ONLY,
+            credential_policy: Some(Policy::NoCredential),
+            ..Detail::default()
+        });
+        assert!(rendered.contains("logon types    service\n"), "{rendered}");
+        assert!(rendered.contains("credential     none\n"), "{rendered}");
+
+        // Unstated is the authority's default, and says so.
+        let rendered = detail_of(Detail {
+            name: "jack".into(),
+            sid: jack(),
+            ..Detail::default()
+        });
+        assert!(rendered.contains("logon types    default (interactive,"), "{rendered}");
+        assert!(!rendered.contains("service"), "{rendered}");
+        assert!(!rendered.contains("\ncredential "), "an unsaid policy is not guessed: {rendered}");
     }
 
     #[test]
