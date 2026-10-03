@@ -29,7 +29,7 @@ use libauthd::psi;
 use peios::security::SidRef;
 
 use crate::log;
-use crate::store::{GroupRecord, Member, Object, Record, Store};
+use crate::store::{self, GroupRecord, Member, Object, Record, Store};
 
 /// How much of a message body one page may fill before lpsd stops adding to it.
 ///
@@ -450,15 +450,27 @@ fn group_members_page(
     after: Option<u32>,
     fields: Fields,
 ) -> Option<(Vec<psi::QueryEntry>, Option<u32>)> {
-    let object = match key {
-        psi::Key::Name(name) => store.lookup_name(name),
-        psi::Key::RelativeId(rid) => store.lookup_relative_id(*rid),
-        psi::Key::Sid(bytes) => SidRef::from_bytes(bytes).and_then(|sid| store.lookup_sid(sid)),
-    }?;
-    let Object::Group(group) = object else {
-        return None;
+    // A `BUILTIN` group is no object of lpsd's to look up, but who is in it
+    // is recorded here, so its members are answered by its SID (PSPU §2.16).
+    let builtin = match key {
+        psi::Key::Sid(bytes) => SidRef::from_bytes(bytes).filter(|sid| store::builtin(sid)).map(SidRef::to_sid),
+        _ => None,
     };
-    let found = store.members_of(group.sid.as_ref(), after)?;
+    let group = match builtin {
+        Some(sid) => sid,
+        None => {
+            let object = match key {
+                psi::Key::Name(name) => store.lookup_name(name),
+                psi::Key::RelativeId(rid) => store.lookup_relative_id(*rid),
+                psi::Key::Sid(bytes) => SidRef::from_bytes(bytes).and_then(|sid| store.lookup_sid(sid)),
+            }?;
+            let Object::Group(group) = object else {
+                return None;
+            };
+            group.sid
+        }
+    };
+    let found = store.members_of(group.as_ref(), after)?;
 
     // Each member comes back as a principal record, so a caller filling a
     // `group` table gets names and numbers without a lookup apiece.
@@ -904,6 +916,31 @@ mod tests {
         assert!(page.next.is_empty());
     }
 
+    /// Who is in a `BUILTIN` group is recorded here (PSPU §2.19), so a walk of
+    /// its members by its SID is answered, as a local group's is: a membership,
+    /// and a primary group, both count.
+    #[test]
+    fn enumerating_a_builtin_groups_members_answers_what_is_recorded() {
+        let mut store = seeded();
+        let administrators = store::well_known_group("Administrators").unwrap();
+        store.add(NewPrincipal::named("ada"), Some(b"pw")).unwrap();
+        store.add_membership("ada", administrators.clone()).unwrap();
+        store.add(NewPrincipal::named("grace"), Some(b"pw")).unwrap();
+        let page = enumerate(
+            &store,
+            &psi::EnumerateSource {
+                kind: Kind::Principal,
+                fields: Fields::UNIX_ID,
+                of: Some(psi::Key::Sid(administrators.as_ref().as_bytes().to_vec())),
+                cursor: Vec::new(),
+            },
+            u32::MAX,
+        );
+        assert_eq!(page.outcome, Outcome::Found);
+        let names: Vec<&str> = page.entries.iter().map(|e| e.canonical_name.as_str()).collect();
+        assert!(names.contains(&"ada") && !names.contains(&"grace"), "{names:?}");
+    }
+
     /// `groups_page` paged on `unix_id` while `Store::groups_after` filters on
     /// `rid`. The two agree only because `create_group` sets them equal — the
     /// store format does not require it, `decode` does not check it, and
@@ -1028,8 +1065,10 @@ mod tests {
     fn a_membership_lpsd_will_not_produce_is_refused_not_reported_empty() {
         let store = seeded();
         for key in [
-            // A stapled group: its membership is a rule, not a record.
+            // A stapled group: its membership is a rule, not a record, by
+            // its name or its SID.
             psi::Key::Name("Everyone".into()),
+            psi::Key::Sid(store::well_known_group("Everyone").unwrap().as_ref().as_bytes().to_vec()),
             // A principal where a group was required.
             psi::Key::Name("jack".into()),
             // A key that resolves to nothing at all.
