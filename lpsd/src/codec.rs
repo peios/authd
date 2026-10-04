@@ -34,10 +34,11 @@
 /// `PEIOSLPS` — Peios Local Principal Store.
 pub const MAGIC: [u8; 8] = *b"PEIOSLPS";
 
-/// Development layout replaced in place; only the current layout is accepted.
-/// Existing development stores must be explicitly reprovisioned.
-pub const VERSION: u16 = 4;
-pub const OLDEST_READABLE_VERSION: u16 = VERSION;
+/// The layout written. 5 gave groups a description.
+pub const VERSION: u16 = 5;
+/// The oldest layout read. A store of format 4 loads, and is written as
+/// [`VERSION`] at the next change; anything older must be reprovisioned.
+pub const OLDEST_READABLE_VERSION: u16 = 4;
 
 /// `magic[8] | version u16 | body_len u32 | body_crc u32`
 pub const HEADER_BYTES: usize = 18;
@@ -159,7 +160,7 @@ pub fn open(file: &[u8]) -> Result<(u16, &[u8]), CodecError> {
         return Err(CodecError::BadMagic);
     }
     let version = u16::from_le_bytes([file[8], file[9]]);
-    if version > VERSION || version < OLDEST_READABLE_VERSION {
+    if !(OLDEST_READABLE_VERSION..=VERSION).contains(&version) {
         return Err(CodecError::UnsupportedVersion(version));
     }
     let body_len = u32::from_le_bytes([file[10], file[11], file[12], file[13]]) as usize;

@@ -463,6 +463,8 @@ pub struct Profile {
 
 pub const MAX_PATH_BYTES: usize = 4096;
 pub const MAX_DISPLAY_NAME_BYTES: usize = 256;
+/// A group's description: a sentence or two for a person, not a document.
+pub const MAX_DESCRIPTION_BYTES: usize = 1024;
 
 /// The logon succeeded. Authority to client.
 ///

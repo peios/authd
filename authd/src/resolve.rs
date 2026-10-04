@@ -480,6 +480,12 @@ fn well_known_answer(registry: &Registry, sid: &SidRef, kind: Kind, fields: Fiel
             }
             continue;
         }
+        if field == Fields::DESCRIPTION
+            && let Some(description) = well_known::description_of(sid)
+        {
+            values.push(Value::Description(description.to_string()));
+            continue;
+        }
         withheld.push(Withheld {
             field,
             reason: WithheldReason::Absent,
@@ -2390,6 +2396,18 @@ mod tests {
 
         let everyone = lookup(&registry, &Key::Name("Everyone".into()), Kind::Group, Fields::MEMBERS).record.expect("a record");
         assert_eq!(everyone.reason(Fields::MEMBERS), Some(WithheldReason::Absent));
+    }
+
+    /// authd says what each of its own groups is, after the fields before it.
+    #[test]
+    fn a_well_known_group_is_described() {
+        let registry = stub_with_foreign("lpsd", DOMAIN, 1, None);
+        let record = lookup(&registry, &Key::Name("Administrators".into()), Kind::Group, Fields::UNIX_ID | Fields::DESCRIPTION)
+            .record
+            .expect("a record");
+        assert_eq!(record.values.len(), 2);
+        assert_eq!(record.values[0], Value::UnixId(102));
+        assert!(matches!(&record.values[1], Value::Description(said) if said.contains("change anything")));
     }
 
     /// A source that may not assert a membership outside its domain has

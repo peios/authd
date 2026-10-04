@@ -80,7 +80,12 @@ usage: lps <command> [arguments]
       --primary-group <group>
 
   group list                  every local group
-  group create <name>         create a local group
+  group create <name> [description]
+                              create a local group
+  group rename <name> <new-name>
+                              rename one; its SID and members stay
+  group describe <name> <description>
+                              say what it is for; an empty one clears it
   group delete <name>         delete one, if nobody is in it
   group add <name> <group>    grant a membership
   group remove <name> <group> revoke one
@@ -172,7 +177,18 @@ fn run(arguments: &[&str]) -> Result<(), Failed> {
         ["set", name, options @ ..] => set(name, options),
 
         ["group", "list"] => group_list(),
-        ["group", "create", name] => group_create(name),
+        ["group", "create", name] => group_create(name, ""),
+        ["group", "create", name, description] => group_create(name, description),
+        ["group", "rename", name, new_name] => {
+            Admin::new().group_rename(name, new_name)?;
+            println!("renamed the group {name} to {new_name}");
+            Ok(())
+        }
+        ["group", "describe", name, description] => {
+            Admin::new().group_describe(name, description)?;
+            println!("set the description of the group {name}");
+            Ok(())
+        }
         ["group", "delete", name] => simple(
             lps::encode_group_delete(&named(name)),
             &format!("deleted the group {name}"),
@@ -213,8 +229,8 @@ fn group_list() -> Result<(), Failed> {
 
 /// Creating a group allocates a RID, so the daemon answers `MSG_CREATED` with
 /// it rather than a bare `MSG_DONE` — the same shape as creating a principal.
-fn group_create(name: &str) -> Result<(), Failed> {
-    let rid = Admin::new().group_create(name)?;
+fn group_create(name: &str, description: &str) -> Result<(), Failed> {
+    let rid = Admin::new().group_create(name, description)?;
     println!("created the group {name} with RID {rid}");
     Ok(())
 }
