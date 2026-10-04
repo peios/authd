@@ -306,7 +306,7 @@ pub(crate) fn serve(
     ));
 
     let mut live = Live::new();
-    let outcome = if own_connection {
+    if own_connection {
         // The caller is in the session being ended, and will be gone before
         // there is anything to report. So the answer goes first, saying what
         // was found, and then the work is done.
@@ -322,21 +322,30 @@ pub(crate) fn serve(
                 "could not answer {peer} before ending its own session: {error}"
             ));
         }
-        end(&mut live, logon_session_id, found)
+        // The terminal has been sent, so nothing more is said here (§2.3).
+        // The socket itself closes when the conversation returns; until then
+        // it holds the caller's identity, and with it the session.
+        let _ = stream.shutdown(std::net::Shutdown::Both);
+        let outcome = end(&mut live, logon_session_id, found);
+        log_outcome(peer, &target, &outcome);
+        Ok(())
     } else {
         let first = live.holding(logon_session_id);
         let outcome = end(&mut live, logon_session_id, first);
+        // Recorded before it is sent: the work is done whether or not the
+        // caller is still there to hear about it.
+        log_outcome(peer, &target, &outcome);
         let message = encode_session_ended(&outcome)
             .map_err(|_| io::Error::other("could not encode SessionEnded"))?;
-        send_message(stream, &message)?;
-        outcome
-    };
+        send_message(stream, &message)
+    }
+}
 
+fn log_outcome(peer: &Sid, target: &Listed, outcome: &SessionEnded) {
     log::info(format_args!(
         "ended session {} (user={}) at the request of {peer}: {} processes ended, {} remaining",
         target.id, target.user, outcome.ended, outcome.remaining
     ));
-    Ok(())
 }
 
 // ---------------------------------------------------------------------------
