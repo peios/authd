@@ -93,6 +93,18 @@ pub const MSG_SERVICE_ATTEST: u16 = 0x0020;
 pub const MSG_CREDENTIAL_CHANGE_START: u16 = 0x0030;
 pub const MSG_CREDENTIAL_CHANGED: u16 = 0x8030;
 
+// Ending a logon session. PGSS Logon §2.22. Each is a whole conversation in
+// one message: the client asks, the authority answers with the success
+// terminal beside it or with `MSG_ACCESS_DENIED`, and nothing else is said.
+//
+// The question and the act are separate messages rather than one carrying a
+// flag, so that no corruption or confusion of a field can turn "may I?" into
+// "do it".
+pub const MSG_SESSION_END: u16 = 0x0040;
+pub const MSG_SESSION_ENDED: u16 = 0x8040;
+pub const MSG_SESSION_END_QUERY: u16 = 0x0041;
+pub const MSG_SESSION_END_ALLOWED: u16 = 0x8041;
+
 pub const MAX_IDENTIFIER_BYTES: usize = 1024;
 pub const MAX_CREDENTIAL_BYTES: usize = 32 * 1024;
 pub const MAX_PROMPTS: usize = 16;
@@ -328,6 +340,13 @@ pub enum Denial {
     ConversationLimit = 8,
     /// The authority failed internally. Detail belongs in its log, not here.
     Internal = 9,
+    /// There is no live logon session by the number asked about. Only ever
+    /// the answer to [`SessionEnd`] or [`SessionEndQuery`] (§2.22).
+    ///
+    /// Added without a [`VERSION`] bump, under the exception §2.6 states for
+    /// it: a peer that predates §2.22 never sends either message, so it is
+    /// never sent this code.
+    NoSuchSession = 10,
 }
 
 impl Denial {
@@ -342,6 +361,7 @@ impl Denial {
             7 => Self::AuthorityUnavailable,
             8 => Self::ConversationLimit,
             9 => Self::Internal,
+            10 => Self::NoSuchSession,
             _ => return None,
         })
     }
@@ -566,6 +586,63 @@ pub struct CredentialChangeStart {
 /// and the change created nothing it could be handed.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct CredentialChanged;
+
+/// End a logon session. Client to authority. PGSS Logon §2.22.
+///
+/// The whole conversation is this message and the authority's answer:
+/// [`SessionEnded`] or [`AccessDenied`]. The authority ends the processes
+/// running in the session; the kernel destroys the session when the last
+/// reference to it goes.
+///
+/// Unlike [`CredentialChangeStart`], this names its subject, because the
+/// caller is often not in the session it ends — an administrator signing
+/// somebody else out. Whether it may is the authority's decision, made from the
+/// connected peer's token and never from anything here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SessionEnd {
+    /// The logon session's identifier: the `auth_id` its tokens carry.
+    pub logon_session_id: u64,
+}
+
+/// Ask whether [`SessionEnd`] would be permitted, and change nothing. Client
+/// to authority. PGSS Logon §2.22.
+///
+/// For a program deciding whether to offer the act at all — a window that
+/// should not show a button that can only fail. Answered with
+/// [`SessionEndAllowed`] or [`AccessDenied`], with the same denial the act
+/// would have drawn.
+///
+/// A separate message rather than a flag on [`SessionEnd`], so that a probe
+/// can never end a session by a flipped bit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SessionEndQuery {
+    /// The logon session asked about.
+    pub logon_session_id: u64,
+}
+
+/// The authority has ended what it could of a session. Authority to client.
+/// PGSS Logon §2.22.
+///
+/// The counts are of processes, not of references: a token descriptor held by
+/// a process outside the session keeps the session alive and is counted
+/// nowhere, because the authority cannot see it.
+///
+/// Where the session being ended is the one the asking connection belongs to,
+/// the authority answers *before* it acts, since afterwards there is nobody to
+/// answer. The counts are then what it found to end, not what it managed.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct SessionEnded {
+    /// Processes of the session that the authority ended.
+    pub ended: u32,
+    /// Processes still holding the session that it could not end, or could
+    /// not examine.
+    pub remaining: u32,
+}
+
+/// [`SessionEnd`] would be permitted for this session. Authority to client.
+/// PGSS Logon §2.22. No fields, and nothing was changed.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct SessionEndAllowed;
 
 // ---------------------------------------------------------------------------
 // Bodies
@@ -952,6 +1029,84 @@ pub fn decode_credential_changed(buf: &[u8]) -> Result<CredentialChanged, WireEr
 
 pub fn encode_credential_changed(_: &CredentialChanged) -> Result<Vec<u8>, WireError> {
     let mut w = Writer::new(&FRAMING, MSG_CREDENTIAL_CHANGED);
+    let body = w.open();
+    w.close(body);
+    w.finish()
+}
+
+/// Read an [`AccessDenied`] without requiring its code to be one this build
+/// knows, returning the code as sent.
+///
+/// For a client of a message newer than some of its denials: a code added
+/// after it was built is still a refusal, and saying so — with the number and
+/// the authority's reason — is better than calling the answer unreadable.
+/// [`decode_access_denied`] stays strict, because the clients that use it were
+/// written against the closed vocabulary §2.B gives them.
+pub fn decode_access_denied_code(buf: &[u8]) -> Result<(u32, String), WireError> {
+    let mut b = frame::open_body(&FRAMING, buf, MSG_ACCESS_DENIED)?;
+    let code = b.u32()?;
+    Ok((code, b.string(MAX_REASON_BYTES)?.to_owned()))
+}
+
+fn encode_session_id(msg_type: u16, logon_session_id: u64) -> Result<Vec<u8>, WireError> {
+    let mut w = Writer::new(&FRAMING, msg_type);
+    let body = w.open();
+    w.u64(logon_session_id);
+    w.close(body);
+    w.finish()
+}
+
+pub fn decode_session_end(buf: &[u8]) -> Result<SessionEnd, WireError> {
+    let mut b = frame::open_body(&FRAMING, buf, MSG_SESSION_END)?;
+    Ok(SessionEnd {
+        logon_session_id: b.u64()?,
+    })
+}
+
+pub fn encode_session_end(end: &SessionEnd) -> Result<Vec<u8>, WireError> {
+    encode_session_id(MSG_SESSION_END, end.logon_session_id)
+}
+
+pub fn decode_session_end_query(buf: &[u8]) -> Result<SessionEndQuery, WireError> {
+    let mut b = frame::open_body(&FRAMING, buf, MSG_SESSION_END_QUERY)?;
+    Ok(SessionEndQuery {
+        logon_session_id: b.u64()?,
+    })
+}
+
+pub fn encode_session_end_query(query: &SessionEndQuery) -> Result<Vec<u8>, WireError> {
+    encode_session_id(MSG_SESSION_END_QUERY, query.logon_session_id)
+}
+
+/// Decode a [`SessionEnded`]. Both counts are mandatory: the message is newer
+/// than the rule that lets a trailing field be absent, so there is no older
+/// authority whose silence needs a default.
+pub fn decode_session_ended(buf: &[u8]) -> Result<SessionEnded, WireError> {
+    let mut b = frame::open_body(&FRAMING, buf, MSG_SESSION_ENDED)?;
+    Ok(SessionEnded {
+        ended: b.u32()?,
+        remaining: b.u32()?,
+    })
+}
+
+pub fn encode_session_ended(ended: &SessionEnded) -> Result<Vec<u8>, WireError> {
+    let mut w = Writer::new(&FRAMING, MSG_SESSION_ENDED);
+    let body = w.open();
+    w.u32(ended.ended);
+    w.u32(ended.remaining);
+    w.close(body);
+    w.finish()
+}
+
+/// Decode a [`SessionEndAllowed`]. Anything in its body is a field appended
+/// by a newer authority, and skipped.
+pub fn decode_session_end_allowed(buf: &[u8]) -> Result<SessionEndAllowed, WireError> {
+    frame::open_body(&FRAMING, buf, MSG_SESSION_END_ALLOWED)?;
+    Ok(SessionEndAllowed)
+}
+
+pub fn encode_session_end_allowed(_: &SessionEndAllowed) -> Result<Vec<u8>, WireError> {
+    let mut w = Writer::new(&FRAMING, MSG_SESSION_END_ALLOWED);
     let body = w.open();
     w.close(body);
     w.finish()
@@ -1532,6 +1687,20 @@ mod tests {
             })
             .unwrap(),
             encode_credential_changed(&CredentialChanged).unwrap(),
+            encode_session_end(&SessionEnd {
+                logon_session_id: 7,
+            })
+            .unwrap(),
+            encode_session_end_query(&SessionEndQuery {
+                logon_session_id: 7,
+            })
+            .unwrap(),
+            encode_session_ended(&SessionEnded {
+                ended: 3,
+                remaining: 1,
+            })
+            .unwrap(),
+            encode_session_end_allowed(&SessionEndAllowed).unwrap(),
         ];
         for message in &messages {
             for cut in 0..message.len() {
@@ -1541,9 +1710,171 @@ mod tests {
                 let _ = decode_credential_response(prefix);
                 let _ = decode_access_granted(prefix);
                 let _ = decode_access_denied(prefix);
+                let _ = decode_access_denied_code(prefix);
                 let _ = decode_credential_change_start(prefix);
                 let _ = decode_credential_changed(prefix);
+                let _ = decode_session_end(prefix);
+                let _ = decode_session_end_query(prefix);
+                let _ = decode_session_ended(prefix);
+                let _ = decode_session_end_allowed(prefix);
             }
         }
+    }
+
+    #[test]
+    fn session_end_and_its_query_round_trip() {
+        let end = SessionEnd {
+            logon_session_id: 0x1234_5678_9abc,
+        };
+        assert_eq!(
+            decode_session_end(&encode_session_end(&end).unwrap()).unwrap(),
+            end
+        );
+        let query = SessionEndQuery {
+            logon_session_id: u64::MAX,
+        };
+        assert_eq!(
+            decode_session_end_query(&encode_session_end_query(&query).unwrap()).unwrap(),
+            query
+        );
+    }
+
+    /// The two encode the same body. Only the message type tells "may I?"
+    /// from "do it", so a decoder accepting either for either would let a
+    /// probe end a session.
+    #[test]
+    fn a_query_never_decodes_as_the_act_or_the_reverse() {
+        let query = encode_session_end_query(&SessionEndQuery {
+            logon_session_id: 1042,
+        })
+        .unwrap();
+        let end = encode_session_end(&SessionEnd {
+            logon_session_id: 1042,
+        })
+        .unwrap();
+        assert_eq!(
+            decode_session_end(&query).unwrap_err(),
+            WireError::UnexpectedMessage(MSG_SESSION_END_QUERY)
+        );
+        assert_eq!(
+            decode_session_end_query(&end).unwrap_err(),
+            WireError::UnexpectedMessage(MSG_SESSION_END)
+        );
+        assert_eq!(query[6..8], MSG_SESSION_END_QUERY.to_le_bytes());
+        assert_eq!(end[6..8], MSG_SESSION_END.to_le_bytes());
+    }
+
+    /// The wire layout is the standard's, so it is pinned here byte for byte:
+    /// a body of one length-framed `u64`.
+    #[test]
+    fn session_end_is_a_u64_in_a_framed_body() {
+        let bytes = encode_session_end(&SessionEnd {
+            logon_session_id: 999,
+        })
+        .unwrap();
+        assert_eq!(bytes.len(), HEADER_BYTES + 4 + 8);
+        assert_eq!(bytes[HEADER_BYTES..HEADER_BYTES + 4], 8u32.to_le_bytes());
+        assert_eq!(bytes[HEADER_BYTES + 4..], 999u64.to_le_bytes());
+
+        let ended = encode_session_ended(&SessionEnded {
+            ended: 5,
+            remaining: 2,
+        })
+        .unwrap();
+        assert_eq!(ended.len(), HEADER_BYTES + 4 + 8);
+        assert_eq!(ended[HEADER_BYTES + 4..HEADER_BYTES + 8], 5u32.to_le_bytes());
+        assert_eq!(ended[HEADER_BYTES + 8..], 2u32.to_le_bytes());
+    }
+
+    /// A body that stops short of the session id is malformed, never read as
+    /// session zero.
+    #[test]
+    fn a_session_end_without_its_id_is_malformed() {
+        let mut w = Writer::new(&FRAMING, MSG_SESSION_END);
+        let body = w.open();
+        w.u32(7);
+        w.close(body);
+        let bytes = w.finish().unwrap();
+        assert_eq!(decode_session_end(&bytes).unwrap_err(), WireError::Truncated);
+    }
+
+    #[test]
+    fn session_ended_round_trips_and_needs_both_counts() {
+        let ended = SessionEnded {
+            ended: 12,
+            remaining: 0,
+        };
+        assert_eq!(
+            decode_session_ended(&encode_session_ended(&ended).unwrap()).unwrap(),
+            ended
+        );
+
+        let mut w = Writer::new(&FRAMING, MSG_SESSION_ENDED);
+        let body = w.open();
+        w.u32(12);
+        w.close(body);
+        assert!(decode_session_ended(&w.finish().unwrap()).is_err());
+    }
+
+    /// Both success terminals step over a field a newer authority appends.
+    #[test]
+    fn a_field_appended_to_a_session_answer_is_skipped() {
+        let mut w = Writer::new(&FRAMING, MSG_SESSION_ENDED);
+        let body = w.open();
+        w.u32(1);
+        w.u32(2);
+        w.u32(0xdead_beef);
+        w.close(body);
+        assert_eq!(
+            decode_session_ended(&w.finish().unwrap()).unwrap(),
+            SessionEnded {
+                ended: 1,
+                remaining: 2
+            }
+        );
+
+        let mut w = Writer::new(&FRAMING, MSG_SESSION_END_ALLOWED);
+        let body = w.open();
+        w.u32(0xdead_beef);
+        w.close(body);
+        assert_eq!(
+            decode_session_end_allowed(&w.finish().unwrap()).unwrap(),
+            SessionEndAllowed
+        );
+    }
+
+    #[test]
+    fn no_such_session_round_trips() {
+        let bytes = encode_access_denied(&AccessDenied {
+            denial: Denial::NoSuchSession,
+            reason: "No such session.".into(),
+        })
+        .unwrap();
+        assert_eq!(
+            decode_access_denied(&bytes).unwrap().denial,
+            Denial::NoSuchSession
+        );
+        assert_eq!(Denial::from_u32(10), Some(Denial::NoSuchSession));
+        assert_eq!(Denial::from_u32(11), None);
+    }
+
+    /// A code newer than the client is still a refusal: the lenient decoder
+    /// hands it over as a number, and the strict one keeps refusing it.
+    #[test]
+    fn an_unknown_denial_code_is_read_by_the_lenient_decoder_only() {
+        let mut w = Writer::new(&FRAMING, MSG_ACCESS_DENIED);
+        let body = w.open();
+        w.u32(77);
+        w.string("Something newer.", MAX_REASON_BYTES).unwrap();
+        w.close(body);
+        let bytes = w.finish().unwrap();
+        assert_eq!(
+            decode_access_denied_code(&bytes).unwrap(),
+            (77, "Something newer.".to_string())
+        );
+        assert_eq!(
+            decode_access_denied(&bytes).unwrap_err(),
+            WireError::UnknownValue
+        );
     }
 }
