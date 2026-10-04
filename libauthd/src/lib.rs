@@ -96,7 +96,8 @@ pub use secret::Secret;
 pub use wire::{
     AccessDenied, AccessGranted, Answer, CredentialChangeStart, CredentialChanged,
     CredentialRequest, CredentialResponse, CredentialType, Denial, IdentifierType, LogonStart,
-    LogonType, Message, MessageSeverity, Prompt, WireError,
+    LogonType, Message, MessageSeverity, Prompt, SessionEnd, SessionEndAllowed, SessionEndQuery,
+    SessionEnded, WireError,
 };
 
 /// The socket a PGSS Logon authority listens on.
