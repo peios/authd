@@ -489,3 +489,77 @@ forest".
 
 This grants a permission rather than restoring a default, so silence means
 no: absent, zero, or a value that is not a REG_DWORD all leave it off.
+
+--- machine\system\locale
+canonical: Machine\System\Locale
+
+The machine's language and formats: the locale every session starts in,
+unless the person has chosen their own under `Users\<SID>\Locale`.
+
+A **locale** names a language and the conventions that go with it — how
+dates, numbers and money are written, how text sorts — such as
+`en_GB.UTF-8`. Each is installed by a language pack
+(`org.gnu.glibc-langpack-<language>`); `C.UTF-8`, plain English with
+international conventions, is always there.
+
+Read when a session starts — a sign-in at the console, over SSH, or on
+the desktop — and put in that session's environment as `LANG` and
+`LC_*`. A change applies to sessions that start afterwards; services are
+not sessions and are not affected. A value naming a locale that is not
+installed, or not a locale name, is ignored, and the session falls back
+to what is below it.
+
+Default security: inherits the Machine hive root (SYSTEM and Administrators
+full, Authenticated Users read).
+
+--- machine\system\locale lang
+canonical: Machine\System\Locale LANG
+type: REG_SZ
+default: C.UTF-8
+valid: an installed locale name, such as en_GB.UTF-8
+applies: new sessions
+
+The machine's language and formats, all at once. The `LC_*` values, where
+present, override it for one kind of thing each.
+
+--- machine\system\locale lc_<category>
+canonical: Machine\System\Locale LC_<category>
+type: REG_SZ
+default: (absent — LANG applies)
+valid: an installed locale name; the categories are LC_CTYPE, LC_NUMERIC, LC_TIME, LC_COLLATE, LC_MONETARY, LC_MESSAGES, LC_PAPER, LC_NAME, LC_ADDRESS, LC_TELEPHONE, LC_MEASUREMENT and LC_IDENTIFICATION
+applies: new sessions
+
+One kind of thing in a different locale from `LANG`: `LC_TIME` =
+`en_GB.UTF-8` with `LANG` = `en_US.UTF-8` writes American English with
+British dates. `LC_ALL`, `LANGUAGE` and `LOCPATH` are not read, by design:
+the first would override a person's own choices, and the other two would
+let a value reach outside the installed locales.
+
+--- users\<sid>\locale
+canonical: Users\<SID>\Locale
+
+A person's own language and formats, over the machine's. The same values
+as `Machine\System\Locale`, read the same way when one of their sessions
+starts; each one present replaces the machine's for that person.
+
+`Users\<SID>` is the person's own (authd creates it at their first
+sign-in), so they may set these themselves — My Settings does — as may
+Administrators.
+
+--- users\<sid>\locale lang
+canonical: Users\<SID>\Locale LANG
+type: REG_SZ
+default: (absent — the machine's applies)
+valid: an installed locale name, such as en_GB.UTF-8
+applies: new sessions
+
+The person's language and formats, all at once.
+
+--- users\<sid>\locale lc_<category>
+canonical: Users\<SID>\Locale LC_<category>
+type: REG_SZ
+default: (absent — the person's LANG, or the machine's, applies)
+valid: an installed locale name; the categories are those of Machine\System\Locale
+applies: new sessions
+
+One kind of thing in a different locale, for this person.
