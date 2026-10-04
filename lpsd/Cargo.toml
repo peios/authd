@@ -16,7 +16,7 @@ path = "src/main.rs"
 # thing an offline attack is run against.
 [dependencies]
 libauthd = { path = "../libauthd" }
-peios = { git = "https://github.com/peios/peios-rs.git", rev = "3cf23f68d40c4adff252e28241bb3c958fba824f" }
+peios = { git = "https://github.com/peios/peios-rs.git", rev = "2a2a6bb022192f6e98d4e4a6a7efdbdd40d53b35" }
 # The password verifier. This is the one dependency lpsd exists to have: a
 # memory-hard KDF is not something to own outright, because the value is in the
 # scrutiny the implementation has had, not in the algorithm being hard to write.
