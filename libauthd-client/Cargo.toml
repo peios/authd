@@ -3,7 +3,7 @@ name = "libauthd-client"
 version = "0.0.22"
 edition = "2024"
 license = "MIT"
-description = "Clients of lpsd's admin socket and authd's identity socket, for programs that administer or look up principals."
+description = "Clients of lpsd's admin socket and authd's identity and logon sockets, for programs that administer or look up principals, or end sessions."
 publish = false
 
 # Kept apart from libauthd, which the daemons link and which holds types and a

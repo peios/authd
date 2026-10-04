@@ -8,9 +8,10 @@ members = ["libauthd", "libauthd-client", "libauthd-policy", "libtty", "libsessi
 #
 #   libauthd  the wire protocols. No I/O, no policy, no privilege.
 #   libauthd-client
-#             clients of lpsd's admin socket and authd's identity socket,
-#             for the programs that ask: lps, nss, the userland's ls and the
-#             GUI apps. std and libauthd alone. No daemon links it.
+#             clients of lpsd's admin socket and of authd's identity and
+#             logon sockets (the logon one only for ending a session), for
+#             the programs that ask: lps, nss, the userland's ls and logonse,
+#             and the GUI apps. std and libauthd alone. No daemon links it.
 #   libauthd-policy
 #             what this machine grants a principal, read from the registry,
 #             and the well-known principals. authd mints from it; Principals
