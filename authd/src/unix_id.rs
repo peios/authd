@@ -474,4 +474,14 @@ mod tests {
             "a primary group with no number must not silently borrow the uid"
         );
     }
+
+    /// No well-known number collides with the band a principal source's
+    /// range can reach.
+    #[test]
+    fn the_well_known_numbers_are_below_the_source_band() {
+        for sid in crate::well_known::numbered() {
+            let id = crate::well_known::unix_id(sid.as_ref()).expect("numbered");
+            assert!(id < RESERVED, "{sid} at {id} is inside the band sources can reach");
+        }
+    }
 }
