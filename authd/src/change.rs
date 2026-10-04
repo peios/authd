@@ -326,6 +326,32 @@ mod tests {
         assert_eq!(denial(&client), Denial::Internal);
     }
 
+    /// NoSuchSession answers only a request to end a session, which no source
+    /// is asked; from a source it is never relayed (PSPU §2.13).
+    #[test]
+    fn a_sources_no_such_session_is_not_relayed() {
+        let (registry, _source, psi_end) = with_source(Capabilities::CHANGES_CREDENTIALS);
+
+        let fake_source = std::thread::spawn(move || {
+            let received = recv_message(&psi::FRAMING, &psi_end).expect("a change");
+            let envelope = psi::decode_envelope(received.expose()).expect("an envelope");
+            let reply = psi::encode_refusal(
+                envelope.conversation,
+                &psi::Refusal {
+                    denial: Denial::NoSuchSession,
+                    reason: "No such session.".into(),
+                },
+            )
+            .expect("encodes");
+            libauthd::transport::send_message(&psi_end, &reply).expect("sends");
+        });
+
+        let (client, result) = serve_for(&registry, &sid("S-1-5-21-1-2-3-1000"));
+        result.expect("served");
+        fake_source.join().expect("the fake source");
+        assert_eq!(denial(&client), Denial::Internal);
+    }
+
     /// A source's refusal is relayed, code and all.
     #[test]
     fn a_refusal_is_relayed() {
