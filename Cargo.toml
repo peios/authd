@@ -9,7 +9,8 @@ members = ["libauthd", "libauthd-client", "libauthd-policy", "libtty", "libsessi
 #   libauthd  the wire protocols. No I/O, no policy, no privilege.
 #   libauthd-client
 #             clients of lpsd's admin socket and authd's identity socket,
-#             for the programs that ask: lps, the GUI apps. No daemon links it.
+#             for the programs that ask: lps, nss, the userland's ls and the
+#             GUI apps. std and libauthd alone. No daemon links it.
 #   libauthd-policy
 #             what this machine grants a principal, read from the registry,
 #             and the well-known principals. authd mints from it; Principals
@@ -19,7 +20,9 @@ members = ["libauthd", "libauthd-client", "libauthd-policy", "libtty", "libsessi
 #   lpsd      the local principal source. Owns the local identity bytes.
 #   lps       administers lpsd's store, over a socket. Owns nothing.
 #   login     /bin/login. Runs as LogonService.
-#   nss       libnss_peios.so.2. Loaded into every process on the system.
+#   nss       libnss_peios.so.2. Loaded into every process on the system, so
+#             it depends on libauthd, libauthd-client and libc, and nothing
+#             else; it asks the identity socket as every other program does.
 #
 # libtty is the exception that proves the rule: not a trust domain but a
 # utility, shared by login and lps because both must read a password from a
