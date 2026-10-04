@@ -7,6 +7,11 @@
 //!   and a group's members.
 //! - [`logon`]: authd's logon socket, for ending a logon session and asking
 //!   whether one may (PGSS Logon §2.22). Signing in is not here.
+//! - [`credential`]: authd's logon socket again, for changing one's own
+//!   password (§2.20) and adding or removing one's own SSH keys (§2.23) —
+//!   conversations the caller renders through a [`credential::Collector`].
+//! - [`own`]: lpsd's self socket (PSPU §10.11), on which a principal reads
+//!   their own account and sets their own display name.
 //!
 //! All connect for what they ask and close: lpsd answers one request a
 //! connection, and authd closes a lookup connection left idle, so a client
@@ -15,5 +20,7 @@
 //! answer, and a daemon that isn't there won't be there a moment later either.
 
 pub mod admin;
+pub mod credential;
 pub mod ident;
 pub mod logon;
+pub mod own;
