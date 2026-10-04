@@ -31,7 +31,7 @@
 //! how much this machine trusts a principal, keyed on the SIDs it ends up
 //! carrying — and neither will ever come from a source. Both are read per logon
 //! from `Machine\Generic\Authn\Policy`, alongside the owner and the default
-//! DACL; see [`crate::policy::principal`].
+//! DACL; see [`crate::policy::principal`] and [`libauthd_policy`].
 
 use peios::security::{GroupAttributes, Sid, SidRef};
 use peios::token::{
@@ -77,39 +77,11 @@ fn kacs_logon_type(logon_type: LogonType) -> KacsLogonType {
     }
 }
 
-/// The well-known group SIDs a logon type confers.
-///
-/// This is the derivation rule that makes `logon_type` load-bearing rather than
-/// merely descriptive: AccessCheck never reads the logon type, so an ACE that
-/// wants to distinguish console users from network users matches on the SIDs
-/// this function returns. Getting it wrong silently changes who can reach what.
-///
-/// - `NetworkCleartext` confers the same SID as `Network`. The type exists to
-///   record that the credential crossed the wire in the clear, which is an
-///   audit distinction, not an access-control one.
-/// - `RemoteInteractive` confers `Interactive` as well as its own SID. The
-///   session is interactive in every sense an ACL written before remoting
-///   existed meant, so it must not fall out of those ACEs; the second SID is
-///   what lets a newer one tell the two apart. It is deliberately not
-///   `Network` — that SID says a credential crossed a wire, not that a screen
-///   did.
-/// - `NewCredentials` confers nothing: the local identity is deliberately
-///   unchanged, and only outbound credentials differ.
-fn logon_type_sids(logon_type: LogonType) -> Vec<Sid> {
-    let sub_authorities: &[u32] = match logon_type {
-        LogonType::Network | LogonType::NetworkCleartext => &[2],
-        LogonType::Batch => &[3],
-        LogonType::Interactive => &[4],
-        LogonType::Service => &[6],
-        LogonType::RemoteInteractive => &[4, 14],
-        LogonType::NewCredentials => &[],
-    };
-    // NT Authority (5), one sub-authority each.
-    sub_authorities
-        .iter()
-        .filter_map(|sub_authority| Sid::build(5, &[*sub_authority]).ok())
-        .collect()
-}
+// The well-known group SIDs a logon type confers, and the rest every token
+// carries, are libauthd-policy's: policy is evaluated against them, so a
+// program saying what someone gets has to add exactly what this does.
+#[cfg(test)]
+use libauthd_policy::logon_type_sids;
 
 /// A SID's index in the token's SID array.
 ///
@@ -206,26 +178,11 @@ pub fn token_groups(
         add_unique(&mut groups, asserted.to_sid(), enabled);
     }
 
-    // Derived: how this logon happened, rather than who they are. A source
-    // could not assert these meaningfully even if the protocol let it.
-    add_unique(
-        &mut groups,
-        Sid::well_known(peios::security::WellKnown::Everyone),
-        enabled,
-    );
-    add_unique(
-        &mut groups,
-        Sid::well_known(peios::security::WellKnown::AuthenticatedUsers),
-        enabled,
-    );
-    add_unique(
-        &mut groups,
-        Sid::well_known(peios::security::WellKnown::Local),
-        enabled,
-    );
-
-    // The logon-type SIDs. This is the derivation that matters most here.
-    for sid in logon_type_sids(logon_type) {
+    // Derived: how this logon happened, rather than who they are — Everyone,
+    // Authenticated Users, Local and the logon-type SIDs, the last being the
+    // derivation that matters most here. A source could not assert these
+    // meaningfully even if the protocol let it.
+    for sid in libauthd_policy::derived_sids(logon_type) {
         add_unique(&mut groups, sid, enabled);
     }
 

@@ -1,0 +1,22 @@
+[package]
+name = "libauthd-policy"
+version = "0.0.22"
+edition = "2024"
+license = "MIT"
+description = "What this machine grants a principal: the local policy authd mints from, read the one way for authd and for the programs that show and edit it."
+publish = false
+
+[dependencies]
+libauthd = { path = "../libauthd" }
+peios = { git = "https://github.com/peios/peios-rs.git", rev = "3cf23f68d40c4adff252e28241bb3c958fba824f" }
+# Deriving a service's SID from its name: records are keyed by them, and a
+# program naming a record's service derives it as authd does. Pure
+# computation with no I/O and no unsafe; peinit carries the same dependency
+# for the same derivation.
+sha1 = "0.10"
+
+[features]
+# Writing the policy key, for the programs that edit it. authd does not turn
+# this on, so the process holding SeCreateTokenPrivilege links no code that
+# opens a registry key for writing.
+write = []

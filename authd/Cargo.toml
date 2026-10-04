@@ -15,10 +15,10 @@ path = "src/main.rs"
 # list stays short and every addition needs a reason.
 [dependencies]
 libauthd = { path = "../libauthd" }
+# authd's own policy reading, its well-known principals and the derivation
+# of a service's SID (which is how a principal source is identified), lifted
+# out so a window saying what a principal gets reads them as authd does.
+# Without its `write` feature it opens no key for writing.
+libauthd-policy = { path = "../libauthd-policy" }
 libc = "0.2"
 peios = { git = "https://github.com/peios/peios-rs.git", rev = "3cf23f68d40c4adff252e28241bb3c958fba824f" }
-# Deriving a service's SID from its name, which is how a principal source is
-# identified. Pure computation with no I/O and no unsafe; peinit carries the
-# same dependency for the same derivation. The duplication wants resolving by
-# moving the derivation into libpeios — see src/service_sid.rs.
-sha1 = "0.10"
