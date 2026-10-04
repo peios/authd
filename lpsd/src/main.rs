@@ -58,6 +58,7 @@ mod admin;
 mod codec;
 mod fs;
 mod log;
+mod own;
 mod query;
 mod random;
 mod store;
@@ -238,13 +239,26 @@ fn main() -> ExitCode {
         }
     };
 
+    // Not fatal, unlike the admin socket: it is a convenience for principals,
+    // and the machine still signs people in and is administered without it.
+    let own = match own::listen() {
+        Ok(own) => Some(own),
+        Err(error) => {
+            log::error(format_args!(
+                "could not listen on {}: {error}; principals cannot read their own accounts",
+                libauthd::LPSD_SELF_SOCKET_PATH
+            ));
+            None
+        }
+    };
+
     // Only once registration is acknowledged: a service ordered after lpsd is
     // entitled to assume the system can authenticate, not merely that a process
     // exists.
     notify_ready();
     log::info(format_args!("registered as {SOURCE_NAME}"));
 
-    match pump(&stream, &listener, &mut store, registered) {
+    match pump(&stream, &listener, own.as_ref(), &mut store, registered) {
         // The authority went away. Exiting is the honest response: peinit owns
         // supervision and restart, and reimplementing reconnection here would
         // be a second, worse copy of it.
@@ -267,16 +281,27 @@ fn connect() -> io::Result<UnixStream> {
 struct Ready {
     logon: bool,
     admin: bool,
+    /// The self socket's listener.
+    own: bool,
+    /// The self socket's connections, as `poll` left them, in table order.
+    connections: Vec<libc::pollfd>,
 }
 
-/// Block until either descriptor is readable.
+/// Block until a descriptor is ready, or the next self-socket deadline.
 ///
-/// `poll` rather than a thread apiece, for the reason in [`pump`]. No timeout:
-/// lpsd has nothing to do on a tick, and waking up to discover that would be
-/// work performed to no end on every idle machine.
-fn wait(stream: &UnixStream, listener: &UnixListener) -> io::Result<Ready> {
+/// `poll` rather than a thread apiece, for the reason in [`pump`]. With no
+/// self-socket connection open there is no timeout: lpsd has nothing to do on
+/// a tick, and waking up to discover that would be work performed to no end on
+/// every idle machine. With one open, the earliest deadline is the timeout, so
+/// a peer that stops talking is dropped on time rather than at the next logon.
+fn wait(
+    stream: &UnixStream,
+    listener: &UnixListener,
+    own: Option<&UnixListener>,
+    table: &own::Table,
+) -> io::Result<Ready> {
     loop {
-        let mut fds = [
+        let mut fds = vec![
             libc::pollfd {
                 fd: stream.as_raw_fd(),
                 events: libc::POLLIN,
@@ -287,10 +312,23 @@ fn wait(stream: &UnixStream, listener: &UnixListener) -> io::Result<Ready> {
                 events: libc::POLLIN,
                 revents: 0,
             },
+            libc::pollfd {
+                // A negative descriptor is ignored by `poll`: no self socket.
+                fd: own.map_or(-1, |own| own.as_raw_fd()),
+                events: libc::POLLIN,
+                revents: 0,
+            },
         ];
+        fds.extend(table.pollfds());
 
-        // SAFETY: `fds` is a live, exclusively borrowed array of two pollfds.
-        let ready = unsafe { libc::poll(fds.as_mut_ptr(), 2, -1) };
+        let timeout = table.next_deadline().map_or(-1, |deadline| {
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            // Rounded up, so the wake is never before the deadline it is for.
+            left.as_millis().saturating_add(1).min(i32::MAX as u128) as i32
+        });
+
+        // SAFETY: `fds` is a live, exclusively borrowed array of pollfds.
+        let ready = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, timeout) };
         if ready < 0 {
             let error = io::Error::last_os_error();
             // A signal arriving is not a failure; go back to waiting.
@@ -303,11 +341,14 @@ fn wait(stream: &UnixStream, listener: &UnixListener) -> io::Result<Ready> {
         // POLLHUP and POLLERR are reported in `revents` whether or not they
         // were requested, and both must count as readable: a hung-up authority
         // is discovered by reading end-of-file from it, not by ignoring it and
-        // spinning.
+        // spinning. The table reads them the same way.
         let interesting = libc::POLLIN | libc::POLLHUP | libc::POLLERR;
+        let connections = fds.split_off(3);
         return Ok(Ready {
             logon: fds[0].revents & interesting != 0,
             admin: fds[1].revents & interesting != 0,
+            own: fds[2].revents & interesting != 0,
+            connections,
         });
     }
 }
@@ -411,13 +452,31 @@ fn register(stream: &UnixStream, store: &Store) -> io::Result<psi::Registered> {
 fn pump(
     stream: &UnixStream,
     listener: &UnixListener,
+    own: Option<&UnixListener>,
     store: &mut Store,
     registered: psi::Registered,
 ) -> io::Result<()> {
     let mut pending: HashMap<u64, Pending> = HashMap::new();
+    let mut table = own::Table::new();
 
     loop {
-        let ready = wait(stream, listener)?;
+        let ready = wait(stream, listener, own, &table)?;
+
+        // The self socket first, and never blocking: each connection is
+        // taken only as far as `poll` said it could go, and dropped at its
+        // deadline. A write it makes is saved and announced exactly as an
+        // administrative one is.
+        let now = std::time::Instant::now();
+        table.serve(&ready.connections, now, store, &mut |store| {
+            let saved = save_store(store);
+            if saved.is_ok() {
+                notify_changed(stream);
+            }
+            saved
+        });
+        if let (true, Some(own)) = (ready.own, own) {
+            table.accept(own, now);
+        }
 
         if ready.admin {
             match listener.accept() {

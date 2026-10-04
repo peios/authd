@@ -12,7 +12,13 @@ provider.  It cannot mint or install tokens.
 The daemon also serves the local administration protocol used by
 .BR lps (1)
 on
-.IR /run/lpsd/admin.sock .
+.IR /run/lpsd/admin.sock ,
+and, on
+.IR /run/lpsd/self.sock ,
+lets any authenticated principal read its own account and set its own
+display name.  Requests there never name a principal: the subject is the
+caller.  That socket is served without blocking, with at most 32 connections,
+4 from any one user, 4 KiB a request and 5 seconds a connection.
 It reports ready only after its source registration has been acknowledged by
 .BR authd (8).
 .PP
@@ -27,6 +33,13 @@ username and initial session hash bound by the trusted SSH monitor through PGSS.
 Key probes do not authenticate. Revocation or policy changes invalidate pending
 proofs; existing sessions are not terminated.
 .PP
+A principal may add or remove its own keys through
+.BR authd (8)'s
+logon socket.  lpsd asks for the current password first, so an account
+with no password to prove (key-only, no credential, or no password set) is
+refused and must ask an administrator.  Adding a key does not change the
+credential policy.
+.PP
 This unpublished development layout is replaced in place. Old or corrupt stores
 are refused. Development stores must be explicitly reprovisioned; lpsd never
 silently resets a store which exists but cannot be read.
@@ -37,6 +50,10 @@ Persistent local-principal state.
 .TP
 .I /run/lpsd/admin.sock
 Local administration socket.
+.TP
+.I /run/lpsd/self.sock
+A principal's own account: read it, and set its display name.  SYSTEM and
+Administrators have full access; every authenticated principal may connect.
 .TP
 .I /run/psi.sock
 Authentication-authority source socket.

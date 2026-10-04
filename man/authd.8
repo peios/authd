@@ -11,7 +11,9 @@ coordinates credential verification with registered principal sources on
 .IR /run/psi.sock ,
 and returns a KACS primary token and profile for an authenticated principal.
 The same socket also lets any authenticated principal change its own
-credential, relayed to the principal source that holds it; see
+credential, and add or remove its own SSH public keys, relayed to the
+principal source that holds it after the source has asked for the current
+password; see
 .BR passwd (1).
 On the same socket authd ends a logon session on request: it sends every
 process whose primary token belongs to the session SIGTERM, waits up to five
@@ -52,8 +54,8 @@ A value that is present but unusable lets nobody, and is logged.
 .TP
 .I /run/logon.sock
 PGSS Logon client socket.  SYSTEM and Administrators may connect, and so may
-every authenticated principal, to change its own credential and to end its
-own session.  Reaching it does not permit originating a logon; that is
+every authenticated principal, to change its own credential, add or remove
+its own SSH keys, and end its own session.  Reaching it does not permit originating a logon; that is
 decided per peer.
 .TP
 .I /run/psi.sock
