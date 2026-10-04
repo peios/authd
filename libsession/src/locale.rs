@@ -116,11 +116,100 @@ fn directory(value: &str) -> String {
     )
 }
 
+/// Where glibc's compiled locales are, one directory each.
+pub const LOCALE_ROOT: &str = "/usr/lib/x86_64-linux-peios/locale";
+
+/// Would `value` be honoured for `name` (`LANG` or one of [`CATEGORIES`])?
+/// The check a session makes, for a program choosing what to write: a value
+/// that fails it is ignored when a session starts.
+pub fn usable(name: &str, value: &str) -> bool {
+    (name == "LANG" || CATEGORIES.contains(&name)) && valid_name(value) && installed(name, value)
+}
+
+/// A locale installed in full, which can be a `LANG`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Available {
+    /// The value to write: `en_GB.UTF-8`, with the codeset as people write
+    /// it rather than as glibc names the directory.
+    pub name: String,
+    /// The language, in English, as the locale names itself (`English`).
+    pub language: Option<String>,
+    /// Where, likewise (`United Kingdom`).
+    pub territory: Option<String>,
+}
+
+/// Every locale installed in full, sorted by name, `C.UTF-8` included. A
+/// language pack adds to it (`org.gnu.glibc-langpack-<language>`).
+pub fn available() -> Vec<Available> {
+    let mut found = vec![Available {
+        name: DEFAULT.into(),
+        language: None,
+        territory: None,
+    }];
+    let Ok(entries) = std::fs::read_dir(LOCALE_ROOT) else {
+        return found;
+    };
+    for entry in entries.flatten() {
+        let Some(directory) = entry.file_name().to_str().map(str::to_string) else {
+            continue;
+        };
+        let name = written(&directory);
+        if name == DEFAULT || !valid_name(&name) || !installed("LANG", &name) {
+            continue;
+        }
+        let (language, territory) =
+            identification(&entry.path().join("LC_IDENTIFICATION")).unwrap_or_default();
+        found.push(Available {
+            name,
+            language,
+            territory,
+        });
+    }
+    found.sort_by(|a, b| a.name.cmp(&b.name));
+    found.dedup_by(|a, b| a.name == b.name);
+    found
+}
+
+/// A directory name as people write the value: `en_GB.utf8` is
+/// `en_GB.UTF-8`. Other codesets are left as glibc names them, which
+/// `directory` maps back to the same place.
+fn written(directory: &str) -> String {
+    match directory.split_once('.') {
+        Some((language, rest)) if rest == "utf8" || rest.starts_with("utf8@") => {
+            format!("{language}.UTF-8{}", &rest[4..])
+        }
+        _ => directory.to_string(),
+    }
+}
+
+/// The language and territory a compiled `LC_IDENTIFICATION` names. The
+/// file is a magic number, a count, that many offsets, then the strings
+/// they point at; glibc lists the category's items in a fixed order, and
+/// language and territory are the eighth and ninth.
+fn identification(path: &Path) -> Option<(Option<String>, Option<String>)> {
+    let bytes = std::fs::read(path).ok()?;
+    let word = |at: usize| -> Option<usize> {
+        Some(u32::from_ne_bytes(bytes.get(at..at + 4)?.try_into().ok()?) as usize)
+    };
+    let count = word(4)?;
+    let string = |index: usize| -> Option<String> {
+        if index >= count {
+            return None;
+        }
+        let start = word(8 + index * 4)?;
+        let tail = bytes.get(start..)?;
+        let end = tail.iter().position(|&b| b == 0)?;
+        let text = std::str::from_utf8(&tail[..end]).ok()?.trim();
+        (!text.is_empty()).then(|| text.to_string())
+    };
+    Some((string(7), string(8)))
+}
+
 fn installed(name: &str, value: &str) -> bool {
     if matches!(value, "C" | "POSIX") {
         return true;
     }
-    let root = Path::new("/usr/lib/x86_64-linux-peios/locale").join(directory(value));
+    let root = Path::new(LOCALE_ROOT).join(directory(value));
     let exists = |category: &str| {
         root.join(if category == "LC_MESSAGES" {
             "LC_MESSAGES/SYS_LC_MESSAGES"
@@ -207,5 +296,47 @@ mod tests {
         assert_eq!(text(&value(ValueType::DWORD, b"C")), None);
         assert_eq!(directory("en_GB.UTF-8"), "en_GB.utf8");
         assert_eq!(directory("de_DE.ISO-8859-15@euro"), "de_DE.iso885915@euro");
+    }
+    #[test]
+    fn a_directory_is_listed_as_the_value_people_write() {
+        assert_eq!(written("en_GB.utf8"), "en_GB.UTF-8");
+        assert_eq!(written("sr_RS.utf8@latin"), "sr_RS.UTF-8@latin");
+        assert_eq!(written("de_DE.iso885915@euro"), "de_DE.iso885915@euro");
+        // And each maps back to the same directory.
+        for d in ["en_GB.utf8", "sr_RS.utf8@latin", "de_DE.iso885915@euro"] {
+            assert_eq!(directory(&written(d)), d);
+        }
+    }
+    #[test]
+    fn identification_reads_language_and_territory() {
+        // Built the way localedef lays the category out: magic, count,
+        // offsets, strings. Fifteen items; the eighth and ninth matter.
+        let items = [
+            "English locale for Britain", "", "", "", "", "", "",
+            "English", "United Kingdom", "", "", "", "1.0", "2000-06-24", "",
+        ];
+        let header = 8 + items.len() * 4;
+        let mut strings = Vec::new();
+        let mut offsets = Vec::new();
+        for item in items {
+            offsets.push((header + strings.len()) as u32);
+            strings.extend_from_slice(item.as_bytes());
+            strings.push(0);
+        }
+        let mut file = 0x2005_1017u32.to_ne_bytes().to_vec();
+        file.extend_from_slice(&(items.len() as u32).to_ne_bytes());
+        for o in offsets {
+            file.extend_from_slice(&o.to_ne_bytes());
+        }
+        file.extend_from_slice(&strings);
+        let path = std::env::temp_dir().join(format!("libsession-id-{}", std::process::id()));
+        std::fs::write(&path, &file).unwrap();
+        assert_eq!(
+            identification(&path),
+            Some((Some("English".into()), Some("United Kingdom".into())))
+        );
+        std::fs::write(&path, b"short").unwrap();
+        assert_eq!(identification(&path), None);
+        let _ = std::fs::remove_file(&path);
     }
 }
