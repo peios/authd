@@ -1010,6 +1010,20 @@ impl Store {
         }
     }
 
+    /// Whether a principal with this policy, a password or not, and this many
+    /// keys has anything it may sign in with. Disabling is not the only way to
+    /// lock someone out: a policy naming a credential they don't have does it
+    /// as surely.
+    fn can_sign_in_with(policy: Policy, password: bool, keys: usize) -> bool {
+        match policy {
+            Policy::Denied => false,
+            Policy::NoCredential => true,
+            Policy::Password => password,
+            Policy::SshPublicKey => keys > 0,
+            Policy::PasswordOrKey => password || keys > 0,
+        }
+    }
+
     fn refuse_if_last_administrator(&self, name: &str, what: &str) -> Result<(), StoreError> {
         if self.is_last_administrator(name) {
             return Err(StoreError::Invalid(format!(
@@ -1609,6 +1623,10 @@ impl Store {
 
     pub fn set_credential_policy(&mut self, name: &str, policy: Policy) -> Result<(), StoreError> {
         let at = self.position(name)?;
+        let p = &self.principals[at];
+        if !Self::can_sign_in_with(policy, p.verifier.is_some(), p.keys.len()) {
+            self.refuse_if_last_administrator(name, "leaving them nothing to sign in with")?;
+        }
         self.principals[at].policy = policy;
         self.principals[at].credential_generation += 1;
         Ok(())
@@ -1630,7 +1648,13 @@ impl Store {
     ) -> Result<PublicKey, StoreError> {
         let at = self.position(name)?;
         let (blob, comment) = crate::ssh::import(line)
-            .ok_or_else(|| StoreError::Invalid("unsupported or invalid SSH public key".into()))?;
+            .ok_or_else(|| {
+                StoreError::Invalid(
+                    "that is not an SSH public key this machine accepts: one line of an \
+                     OpenSSH .pub file, Ed25519, or RSA of 3072 to 8192 bits"
+                        .into(),
+                )
+            })?;
         let label = if label.is_empty() {
             comment
         } else {
@@ -1640,10 +1664,13 @@ impl Store {
             return Err(StoreError::Invalid("invalid key label".into()));
         }
         let p = &mut self.principals[at];
-        if p.keys.len() >= MAX_KEYS || p.keys.iter().any(|k| k.blob == blob) {
-            return Err(StoreError::Invalid(
-                "duplicate key or key limit reached".into(),
-            ));
+        if p.keys.iter().any(|k| k.blob == blob) {
+            return Err(StoreError::Invalid(format!("{name} has that key already")));
+        }
+        if p.keys.len() >= MAX_KEYS {
+            return Err(StoreError::Invalid(format!(
+                "{name} already has the most keys a principal may, {MAX_KEYS}"
+            )));
         }
         let id = loop {
             let id = random::array::<16>()?;
@@ -1668,10 +1695,14 @@ impl Store {
 
     pub fn remove_key(&mut self, name: &str, id: [u8; 16]) -> Result<(), StoreError> {
         let at = self.position(name)?;
-        let p = &mut self.principals[at];
+        let p = &self.principals[at];
         let Some(i) = p.keys.iter().position(|k| k.id == id) else {
             return Err(StoreError::NotFound("SSH key".into()));
         };
+        if !Self::can_sign_in_with(p.policy, p.verifier.is_some(), p.keys.len() - 1) {
+            self.refuse_if_last_administrator(name, "removing the last key they sign in with")?;
+        }
+        let p = &mut self.principals[at];
         p.keys.remove(i);
         p.credential_generation += 1;
         Ok(())
@@ -2668,6 +2699,46 @@ mod tests {
         // With a second administrator, the first may be anything.
         store.add(new("dana", vec![administrators()]), None).unwrap();
         assert!(store.set_logon_types("jack", LogonTypes::SERVICE_ONLY).unwrap());
+    }
+
+    /// Nor may the last administrator be left a policy naming nothing they
+    /// have: refused outright, or key-only with no key.
+    #[test]
+    fn the_last_administrator_keeps_something_to_sign_in_with() {
+        let mut store = seeded();
+        let refused = |result| matches!(result, Err(StoreError::Invalid(_)));
+
+        assert!(refused(store.set_credential_policy("jack", Policy::Denied)));
+        assert!(refused(store.set_credential_policy("jack", Policy::SshPublicKey)));
+        store.set_credential_policy("jack", Policy::PasswordOrKey).unwrap();
+
+        let (line, _, _) = ssh_fixture();
+        let key = store.add_key("jack", &line, "").unwrap();
+        store.set_credential_policy("jack", Policy::SshPublicKey).unwrap();
+        assert!(refused(store.remove_key("jack", key.id)));
+        assert_eq!(store.keys("jack").unwrap().len(), 1);
+
+        // With a second administrator, the first may be left anything.
+        store.add(new("dana", vec![administrators()]), None).unwrap();
+        store.remove_key("jack", key.id).unwrap();
+        store.set_credential_policy("jack", Policy::Denied).unwrap();
+    }
+
+    /// A key enrolled twice, or one past the limit, is refused, each with its
+    /// own reason.
+    #[test]
+    fn a_key_refused_says_why() {
+        let mut store = seeded();
+        let (line, _, _) = ssh_fixture();
+        store.add_key("jack", &line, "laptop").unwrap();
+        let Err(StoreError::Invalid(why)) = store.add_key("jack", &line, "again") else {
+            panic!("a key enrolled twice must be refused");
+        };
+        assert_eq!(why, "jack has that key already");
+        let Err(StoreError::Invalid(why)) = store.add_key("jack", "ssh-dss AAAA", "") else {
+            panic!("a key that isn't one must be refused");
+        };
+        assert!(why.contains("one line of an OpenSSH .pub file"), "{why}");
     }
 
     /// Adding material does not silently change the authentication policy.

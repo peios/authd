@@ -10,7 +10,7 @@
 
 use libauthd::claim::{Claim, Values};
 use libauthd::credential::Policy;
-use libauthd::lps::{Detail, GroupRef, GroupSummary, LogonTypes, Summary};
+use libauthd::lps::{Detail, GroupRef, GroupSummary, KeyInfo, LogonTypes, Summary};
 use libauthd::wire::LogonType;
 use peios::security::SidRef;
 
@@ -209,11 +209,7 @@ pub fn detail(principal: &Detail) -> String {
     // Absent from a daemon that predates it, and then better unsaid than
     // guessed.
     if let Some(policy) = principal.credential_policy {
-        let word = POLICIES
-            .iter()
-            .find(|(known, _)| *known == policy)
-            .map_or("unknown", |(_, word)| *word);
-        field(&mut out, "credential", word);
+        field(&mut out, "credential", policy_word(policy));
     }
 
     if principal.groups.is_empty() {
@@ -232,6 +228,51 @@ pub fn detail(principal: &Detail) -> String {
             let label = if index == 0 { "claims" } else { "" };
             out.push_str(&format!("{label:<14} {}\n", claim(held)));
         }
+    }
+    out
+}
+
+/// A credential policy as `lps policy` names it.
+fn policy_word(policy: Policy) -> &'static str {
+    POLICIES
+        .iter()
+        .find(|(known, _)| *known == policy)
+        .map_or("unknown", |(_, word)| *word)
+}
+
+/// A day, as `YYYY-MM-DD` in UTC, from seconds since the Unix epoch.
+///
+/// Howard Hinnant's `civil_from_days`, so that printing when a key was added
+/// needs no calendar crate.
+fn date(seconds: u64) -> String {
+    let days = (seconds / 86_400) as i64 + 719_468;
+    let era = days.div_euclid(146_097);
+    let of_era = days.rem_euclid(146_097);
+    let year_of_era = (of_era - of_era / 1460 + of_era / 36_524 - of_era / 146_096) / 365;
+    let of_year = of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let shifted_month = (5 * of_year + 2) / 153;
+    let day = of_year - (153 * shifted_month + 2) / 5 + 1;
+    let month = if shifted_month < 10 { shifted_month + 3 } else { shifted_month - 9 };
+    let year = year_of_era + era * 400 + i64::from(month <= 2);
+    format!("{year:04}-{month:02}-{day:02}")
+}
+
+/// `lps key list`: the credential policy, then the keys, with the ID
+/// `lps key remove` takes.
+pub fn keys(policy: Policy, keys: &[KeyInfo]) -> String {
+    let mut out = format!("credential  {}\n", policy_word(policy));
+    if keys.is_empty() {
+        out.push_str("no keys\n");
+        return out;
+    }
+    let width = keys.iter().map(|key| key.fingerprint.len()).max().unwrap_or(0).max("FINGERPRINT".len());
+    let line = |id: &str, fingerprint: &str, added: &str, label: &str| {
+        format!("{}\n", format!("{id:<32}  {fingerprint:<width$}  {added:<10}  {label}").trim_end())
+    };
+    out.push_str(&line("ID", "FINGERPRINT", "ADDED", "LABEL"));
+    for key in keys {
+        let id: String = key.id.iter().map(|b| format!("{b:02x}")).collect();
+        out.push_str(&line(&id, &key.fingerprint, &date(key.created), &key.label));
     }
     out
 }
@@ -404,6 +445,21 @@ mod tests {
         let lines: Vec<&str> = described.lines().collect();
         assert!(lines[0].ends_with("DESCRIPTION"), "{described}");
         assert!(lines[2].ends_with("Keeps it running"), "{described}");
+    }
+
+    #[test]
+    fn keys_are_listed_with_the_policy_in_words_and_the_day_each_was_added() {
+        let listed = keys(
+            Policy::PasswordOrKey,
+            &[KeyInfo { id: [0xab; 16], fingerprint: "SHA256:abc".into(), label: "laptop".into(), created: 1_791_072_000 }],
+        );
+        let lines: Vec<&str> = listed.lines().collect();
+        assert_eq!(lines[0], "credential  either");
+        assert!(lines[1].starts_with("ID ") && lines[1].ends_with("LABEL"), "{listed}");
+        assert_eq!(lines[2], format!("{}  SHA256:abc   2026-10-04  laptop", "ab".repeat(16)));
+        assert_eq!(keys(Policy::Denied, &[]), "credential  denied\nno keys\n");
+        assert_eq!(date(0), "1970-01-01");
+        assert_eq!(date(951_782_400), "2000-02-29");
     }
 
     #[test]

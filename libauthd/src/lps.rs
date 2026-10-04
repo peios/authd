@@ -2040,6 +2040,7 @@ pub fn decode_key_request(buf: &[u8]) -> Result<KeyRequest, WireError> {
     Ok(result)
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KeyInfo {
     pub id: [u8; 16],
     pub fingerprint: String,
