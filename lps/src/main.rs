@@ -593,11 +593,7 @@ mod tests {
 
 fn key_list(name: &str) -> Result<(), Failed> {
     let (policy, keys) = Admin::new().keys(name)?;
-    println!("Policy: {policy:?}");
-    for key in keys {
-        let id: String = key.id.iter().map(|b| format!("{b:02x}")).collect();
-        println!("{id} {} {} {}", key.fingerprint, key.created, key.label);
-    }
+    print!("{}", format::keys(policy, &keys));
     Ok(())
 }
 fn key_add(name: &str, path: &str, label: &str) -> Result<(), Failed> {
