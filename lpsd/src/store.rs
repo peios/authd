@@ -510,6 +510,21 @@ pub struct ChangeTarget {
     pub name: String,
 }
 
+/// A principal's own account, as the self socket shows it. See
+/// [`Store::own_account`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OwnAccount {
+    pub rid: u32,
+    pub name: String,
+    pub sid: Sid,
+    pub display_name: String,
+    pub enabled: bool,
+    pub policy: Policy,
+    /// Whether a password verifier is held. Not the password.
+    pub has_password: bool,
+    pub keys: Vec<PublicKey>,
+}
+
 /// That a principal's current password held, and against which verifier. See
 /// [`Store::prove_current`].
 ///
@@ -1508,6 +1523,38 @@ impl Store {
             return Err(ChangeRefused::NoCredential);
         }
         Ok(principal)
+    }
+
+    /// The current name of the principal with `rid`, for a change that took
+    /// it from a SID one round and acts on it by name in the next: a rename
+    /// between the two must not send the change to nobody, or to a principal
+    /// that took the old name since.
+    pub fn name_of(&self, rid: u32) -> Option<String> {
+        self.principals
+            .iter()
+            .find(|p| p.rid == rid)
+            .map(|p| p.name.clone())
+    }
+
+    /// A principal's own account, from the SID the caller's token carries,
+    /// for the self socket (PSPU §10.11).
+    ///
+    /// No eligibility check, unlike [`Store::change_target`]: reading one's
+    /// own account is not changing what one signs in with, and a disabled or
+    /// passwordless principal may see what they are.
+    pub fn own_account(&self, sid: &SidRef) -> Option<OwnAccount> {
+        let rid = self.rid_in_domain(sid)?;
+        let principal = self.principals.iter().find(|p| p.rid == rid)?;
+        Some(OwnAccount {
+            rid,
+            name: principal.name.clone(),
+            sid: self.sid_of(rid).ok()?,
+            display_name: principal.display_name.clone(),
+            enabled: principal.enabled,
+            policy: principal.policy,
+            has_password: principal.verifier.is_some(),
+            keys: principal.keys.clone(),
+        })
     }
 
     // -----------------------------------------------------------------------

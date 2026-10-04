@@ -104,6 +104,11 @@ pub fn fingerprint(blob: &[u8]) -> Option<String> {
     Some(parse(blob)?.fingerprint(HashAlg::Sha256).to_string())
 }
 
+/// The key's type as OpenSSH names it: `ssh-ed25519` or `ssh-rsa`.
+pub fn algorithm(blob: &[u8]) -> Option<String> {
+    Some(parse(blob)?.algorithm().as_str().to_owned())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

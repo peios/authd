@@ -77,8 +77,8 @@ use libauthd::PSI_SOCKET_PATH;
 use libauthd::psi;
 use libauthd::transport::{recv_message, send_message};
 use libauthd::wire::{
-    CredentialRequest, CredentialResponse, CredentialType, Denial, IdentifierType, Message,
-    MessageSeverity, Prompt,
+    CredentialRequest, CredentialResponse, CredentialType, Denial, EnrollAction, IdentifierType,
+    Message, MessageSeverity, Prompt,
 };
 use peios::security::SidRef;
 
@@ -128,6 +128,21 @@ enum Pending {
     },
     /// A principal changing their own password (PSPU §2.21).
     Change(Change),
+    /// A principal adding or removing one of their own SSH keys (PSPU §2.23),
+    /// waiting for the current password.
+    Enroll(Enroll),
+}
+
+/// An enrolment between asking for the current password and being answered.
+struct Enroll {
+    /// Who, from the SID authd vouched for. Acted on by RID, so a rename
+    /// between the rounds cannot redirect it.
+    rid: u32,
+    name: String,
+    action: EnrollAction,
+    /// The key line to add, or the fingerprint of the key to remove — from the
+    /// opening, checked once there and again when it is applied.
+    material: String,
 }
 
 /// A change of a principal's own password, between rounds.
@@ -354,7 +369,8 @@ fn register(stream: &UnixStream, store: &Store) -> io::Result<psi::Registered> {
             | psi::Capabilities::ENUMERATES
             | psi::Capabilities::MEMBERS
             | psi::Capabilities::PUSHES_CHANGES
-            | psi::Capabilities::CHANGES_CREDENTIALS,
+            | psi::Capabilities::CHANGES_CREDENTIALS
+            | psi::Capabilities::ENROLLS_CREDENTIALS,
         // Zero, and correct rather than lazy: lpsd pushes an invalidation on
         // every write, so an entry stays good until it says otherwise. A time
         // limit would only make authd re-ask for answers it already knows are
@@ -466,6 +482,13 @@ fn pump(
                 registered.unix_id_count,
             )?,
             psi::MSG_CHANGE_CREDENTIAL => begin_change(
+                stream,
+                store,
+                &mut pending,
+                envelope.conversation,
+                received.expose(),
+            )?,
+            psi::MSG_ENROLL_CREDENTIAL => begin_enroll(
                 stream,
                 store,
                 &mut pending,
@@ -908,6 +931,7 @@ fn answer(
             &response,
             save,
         ),
+        Pending::Enroll(enroll) => answer_enroll(stream, store, conversation, enroll, &response, save),
     }
 }
 
@@ -1272,6 +1296,282 @@ fn refuse_change(
     refuse(stream, conversation, denial, reason)
 }
 
+// ---------------------------------------------------------------------------
+// Adding and removing one's own SSH keys (PSPU §2.23)
+// ---------------------------------------------------------------------------
+
+/// What an account that cannot prove itself is told. Every key change here
+/// asks for the current password, so an account with none — signing in with
+/// a key alone, with nothing, or with a policy naming a password it has not
+/// got — cannot make one, and an administrator must.
+const NO_PASSWORD_TO_PROVE: &str = "This account has no password to confirm it is you, so it cannot \
+     add or remove its own SSH keys. Ask an administrator to change them for you.";
+
+/// Open an enrolment: resolve whose keys they are, check the key or the
+/// fingerprint, and ask for the current password.
+///
+/// The checks on the material run here, before anything is asked, so a person
+/// whose key is unreadable is told so before they type a password for
+/// nothing. They are the store's own, run against a copy: [`commit_enroll`]
+/// runs them again on the real store, which may have changed in between.
+fn begin_enroll(
+    stream: &UnixStream,
+    store: &Store,
+    pending: &mut HashMap<u64, Pending>,
+    conversation: u64,
+    buf: &[u8],
+) -> io::Result<()> {
+    let Ok(request) = psi::decode_enroll_credential(buf) else {
+        return refuse(
+            stream,
+            conversation,
+            Denial::MalformedRequest,
+            "Malformed credential enrolment.",
+        );
+    };
+
+    if pending.len() >= MAX_CONVERSATIONS {
+        return refuse(
+            stream,
+            conversation,
+            Denial::AuthorityUnavailable,
+            "Too many conversations in flight.",
+        );
+    }
+    if pending.contains_key(&conversation) {
+        return Err(io::Error::other(
+            "the authority reused a conversation identifier that is still live",
+        ));
+    }
+
+    let Some(principal) = SidRef::from_bytes(&request.principal) else {
+        return refuse(
+            stream,
+            conversation,
+            Denial::MalformedRequest,
+            "The principal is not a SID.",
+        );
+    };
+
+    // `change_target` is the password change's eligibility, and exactly the
+    // enrolment's too: the proof is the current password, so an account
+    // without one is refused here, before anything is asked.
+    let target = match store.change_target(principal) {
+        Ok(target) => target,
+        Err(refused) => {
+            log::info(format_args!(
+                "refused an SSH key change for {principal}: {refused:?}"
+            ));
+            return refuse_enroll(stream, conversation, &refused);
+        }
+    };
+
+    let start = request.start;
+    if start.credential_type != CredentialType::SshPublicKey {
+        return refuse(
+            stream,
+            conversation,
+            Denial::PermissionDenied,
+            "Only SSH public keys can be added or removed here.",
+        );
+    }
+    if !start
+        .supported_credential_types
+        .contains(&CredentialType::Password)
+    {
+        return refuse(
+            stream,
+            conversation,
+            Denial::AccountRestricted,
+            "This client cannot collect the password this account uses.",
+        );
+    }
+
+    let mut trial = store.clone();
+    if let Err(problem) = apply_enroll(&mut trial, &target.name, start.action, &start.material) {
+        log::info(format_args!(
+            "refused an SSH key change for {}: {problem}",
+            target.name
+        ));
+        return refuse(
+            stream,
+            conversation,
+            Denial::CredentialRejected,
+            &problem.to_string(),
+        );
+    }
+
+    let text = match start.action {
+        EnrollAction::Add => format!("Adding an SSH key to {}", target.name),
+        EnrollAction::Remove => format!("Removing an SSH key from {}", target.name),
+    };
+    pending.insert(
+        conversation,
+        Pending::Enroll(Enroll {
+            rid: target.rid,
+            name: target.name,
+            action: start.action,
+            material: start.material,
+        }),
+    );
+    ask_for(
+        stream,
+        conversation,
+        Message {
+            severity: MessageSeverity::Info,
+            text,
+        },
+        &[(PASSWORD_REF, "Current password")],
+    )
+}
+
+/// Add the key, or remove the key with the fingerprint, through the paths the
+/// administrative `KeyAdd` and `KeyRemove` take — the same import, algorithm
+/// and size checks, the same duplicate and count limits, and the same
+/// last-administrator rule.
+fn apply_enroll(
+    store: &mut Store,
+    name: &str,
+    action: EnrollAction,
+    material: &str,
+) -> Result<(), StoreError> {
+    match action {
+        // No label: the key's own comment becomes it, as with `lps key add`
+        // given none.
+        EnrollAction::Add => store.add_key(name, material, "").map(|_| ()),
+        EnrollAction::Remove => {
+            let wanted = material.trim();
+            let id = store
+                .keys(name)?
+                .iter()
+                .find(|key| ssh::fingerprint(&key.blob).as_deref() == Some(wanted))
+                .map(|key| key.id)
+                // `Invalid` rather than `NotFound`, whose words are about a
+                // missing principal.
+                .ok_or_else(|| {
+                    StoreError::Invalid(format!(
+                        "This account has no SSH key with the fingerprint {wanted}."
+                    ))
+                })?;
+            store.remove_key(name, id)
+        }
+    }
+}
+
+/// Prove the current password, then apply the change.
+fn answer_enroll(
+    stream: &UnixStream,
+    store: &mut Store,
+    conversation: u64,
+    enroll: Enroll,
+    response: &CredentialResponse,
+    save: &dyn Fn(&Store) -> Result<(), StoreError>,
+) -> io::Result<()> {
+    if let Err(refused) = store.prove_current(enroll.rid, answered(response, PASSWORD_REF)) {
+        log::warn(format_args!(
+            "SSH key change for {} refused: {refused:?}",
+            enroll.name
+        ));
+        return refuse_enroll(stream, conversation, &refused);
+    }
+    commit_enroll(stream, store, conversation, &enroll, save)
+}
+
+/// Apply the change and make it durable, or change nothing — the discipline
+/// of an administrative write, invalidation included.
+fn commit_enroll(
+    stream: &UnixStream,
+    store: &mut Store,
+    conversation: u64,
+    enroll: &Enroll,
+    save: &dyn Fn(&Store) -> Result<(), StoreError>,
+) -> io::Result<()> {
+    // `prove_current` has just found the RID, so a missing name is a store
+    // that changed under the conversation — refused as the change refuses it.
+    let Some(name) = store.name_of(enroll.rid) else {
+        return refuse_enroll(stream, conversation, &store::ChangeRefused::NoSuchPrincipal);
+    };
+
+    let snapshot = store.clone();
+    if let Err(problem) = apply_enroll(store, &name, enroll.action, &enroll.material) {
+        *store = snapshot;
+        log::info(format_args!(
+            "SSH key change for {name} refused: {problem}"
+        ));
+        // The key went between the rounds (`remove_key`'s `NotFound`), or the
+        // store now refuses what it accepted then: either way, the material.
+        let (denial, reason) = match problem {
+            StoreError::NotFound(_) => (
+                Denial::CredentialRejected,
+                "That SSH key is no longer on this account.".to_string(),
+            ),
+            StoreError::Invalid(what) | StoreError::Exists(what) => {
+                (Denial::CredentialRejected, what)
+            }
+            _ => (
+                Denial::Internal,
+                "The keys could not be changed. They are unchanged.".to_string(),
+            ),
+        };
+        return refuse(stream, conversation, denial, &reason);
+    }
+    if let Err(error) = save(store) {
+        *store = snapshot;
+        log::error(format_args!(
+            "could not save an SSH key change for {name}: {error}; it was not applied"
+        ));
+        return refuse(
+            stream,
+            conversation,
+            Denial::Internal,
+            "The change could not be saved. The keys are unchanged.",
+        );
+    }
+
+    // What an administrative write sends, and for the same reason: before the
+    // change is acknowledged, so nothing the authority holds about this store
+    // outlives it (PSPU §2.17).
+    notify_changed(stream);
+
+    // By fingerprint, never the whole line: the log wants which key, not the
+    // key.
+    let fingerprint = match enroll.action {
+        EnrollAction::Add => ssh::import(&enroll.material)
+            .and_then(|(blob, _)| ssh::fingerprint(&blob))
+            .unwrap_or_default(),
+        EnrollAction::Remove => enroll.material.trim().to_string(),
+    };
+    log::info(format_args!(
+        "{name} {} their own SSH key {fingerprint}",
+        match enroll.action {
+            EnrollAction::Add => "added",
+            EnrollAction::Remove => "removed",
+        },
+    ));
+    let message = psi::encode_credential_changed(conversation)
+        .map_err(|_| io::Error::other("could not encode a credential change"))?;
+    send_message(stream, &message)
+}
+
+/// End an enrolment with the refusal that says what stopped it: a password
+/// change's refusals, except that an account with no password to prove is
+/// told who can change its keys instead.
+fn refuse_enroll(
+    stream: &UnixStream,
+    conversation: u64,
+    refused: &store::ChangeRefused,
+) -> io::Result<()> {
+    match refused {
+        store::ChangeRefused::NoCredential => refuse(
+            stream,
+            conversation,
+            Denial::AccountRestricted,
+            NO_PASSWORD_TO_PROVE,
+        ),
+        other => refuse_change(stream, conversation, other),
+    }
+}
+
 /// Tell the authority who this is.
 ///
 /// Every relative identifier is confined to the assigned count on the way
@@ -1387,6 +1687,8 @@ mod tests {
         Request(CredentialRequest),
         Changed,
         Refused(Denial),
+        /// A `Changed` on conversation 0: the cache invalidation.
+        Invalidated,
     }
 
     struct Harness {
@@ -1394,6 +1696,8 @@ mod tests {
         pending: HashMap<u64, Pending>,
         lpsd: UnixStream,
         authd: UnixStream,
+        /// Every refusal's reason, in the order sent.
+        reasons: std::cell::RefCell<Vec<String>>,
     }
 
     impl Harness {
@@ -1408,7 +1712,47 @@ mod tests {
                 pending: HashMap::new(),
                 lpsd,
                 authd,
+                reasons: Default::default(),
             }
+        }
+
+        fn last_reason(&self) -> String {
+            self.reasons.borrow().last().cloned().expect("a refusal")
+        }
+
+        fn enroll(&mut self, name: &str, action: EnrollAction, material: &str) -> Sent {
+            let principal = self.sid_of(name);
+            let message = psi::encode_enroll_credential(
+                CONVERSATION,
+                &psi::EnrollCredential {
+                    start: libauthd::wire::CredentialEnrollStart {
+                        supported_credential_types: vec![CredentialType::Password],
+                        action,
+                        credential_type: CredentialType::SshPublicKey,
+                        material: material.into(),
+                    },
+                    principal,
+                },
+            )
+            .expect("encodes");
+            begin_enroll(
+                &self.lpsd,
+                &self.store,
+                &mut self.pending,
+                CONVERSATION,
+                &message,
+            )
+            .expect("served");
+            self.sent()
+        }
+
+        fn fingerprints(&self, name: &str) -> Vec<String> {
+            self.store
+                .keys(name)
+                .expect("keys")
+                .iter()
+                .map(|key| ssh::fingerprint(&key.blob).expect("a fingerprint"))
+                .collect()
         }
 
         fn sid_of(&self, name: &str) -> Vec<u8> {
@@ -1482,17 +1826,22 @@ mod tests {
         fn sent(&self) -> Sent {
             let received = recv_message(&psi::FRAMING, &self.authd).expect("a reply");
             let envelope = psi::decode_envelope(received.expose()).expect("an envelope");
+            // An invalidation travels on the control conversation.
+            if envelope.msg_type == psi::MSG_CHANGED {
+                assert_eq!(envelope.conversation, psi::CONVERSATION_CONTROL);
+                return Sent::Invalidated;
+            }
             assert_eq!(envelope.conversation, CONVERSATION);
             match envelope.msg_type {
                 psi::MSG_CREDENTIAL_REQUEST => Sent::Request(
                     psi::decode_credential_request(received.expose()).expect("a request"),
                 ),
                 psi::MSG_CREDENTIAL_CHANGED => Sent::Changed,
-                psi::MSG_REFUSAL => Sent::Refused(
-                    psi::decode_refusal(received.expose())
-                        .expect("a refusal")
-                        .denial,
-                ),
+                psi::MSG_REFUSAL => {
+                    let refusal = psi::decode_refusal(received.expose()).expect("a refusal");
+                    self.reasons.borrow_mut().push(refusal.reason);
+                    Sent::Refused(refusal.denial)
+                }
                 other => panic!("unexpected message {other:#06x}"),
             }
         }
@@ -1690,6 +2039,180 @@ mod tests {
         .expect("served");
         assert!(h.authenticates("jack", b"old"));
         assert!(!h.authenticates("jack", b"new"));
+    }
+
+    // -- Enrolment (PSPU §2.23) --------------------------------------------
+
+    /// An OpenSSH public key line for a key made from `seed`.
+    fn key_line(seed: u8, comment: &str) -> String {
+        use ssh_key::private::{Ed25519Keypair, Ed25519PrivateKey};
+        let pair = Ed25519Keypair::from(Ed25519PrivateKey::from_bytes(&[seed; 32]));
+        ssh_key::PublicKey::new(pair.public.into(), comment)
+            .to_openssh()
+            .expect("encodes")
+    }
+
+    fn fingerprint_of(line: &str) -> String {
+        let (blob, _) = ssh::import(line).expect("a key");
+        ssh::fingerprint(&blob).expect("a fingerprint")
+    }
+
+    /// Adding a key asks for the current password first, and only then adds
+    /// it — with the invalidation before the acknowledgement, as an
+    /// administrative write sends it.
+    #[test]
+    fn adding_a_key_proves_the_password_and_invalidates_before_acknowledging() {
+        let mut h = Harness::with("jack", Some(b"old"));
+        let line = key_line(1, "laptop");
+
+        let asked = h.enroll("jack", EnrollAction::Add, &line);
+        assert_eq!(refs(&asked), vec![PASSWORD_REF], "the proof first");
+        let Sent::Request(request) = &asked else {
+            unreachable!()
+        };
+        assert!(request.messages[0].text.contains("jack"));
+        assert!(h.fingerprints("jack").is_empty(), "nothing before the proof");
+
+        assert!(matches!(
+            h.reply(&[(PASSWORD_REF, b"old")], &saved),
+            Sent::Invalidated
+        ));
+        assert!(matches!(h.sent(), Sent::Changed));
+        assert_eq!(h.fingerprints("jack"), vec![fingerprint_of(&line)]);
+        let key = &h.store.keys("jack").unwrap()[0];
+        assert_eq!(key.label, "laptop", "the key's comment becomes its label");
+        assert!(h.pending.is_empty());
+    }
+
+    #[test]
+    fn removing_a_key_names_it_by_fingerprint() {
+        let mut h = Harness::with("jack", Some(b"old"));
+        let keep = key_line(1, "keep");
+        let drop = key_line(2, "drop");
+        h.store.add_key("jack", &keep, "").unwrap();
+        h.store.add_key("jack", &drop, "").unwrap();
+
+        h.enroll("jack", EnrollAction::Remove, &fingerprint_of(&drop));
+        assert!(matches!(
+            h.reply(&[(PASSWORD_REF, b"old")], &saved),
+            Sent::Invalidated
+        ));
+        assert!(matches!(h.sent(), Sent::Changed));
+        assert_eq!(h.fingerprints("jack"), vec![fingerprint_of(&keep)]);
+    }
+
+    /// A wrong password ends it with §2.10's one wording, and changes nothing.
+    #[test]
+    fn a_wrong_password_adds_nothing() {
+        let mut h = Harness::with("jack", Some(b"old"));
+        h.enroll("jack", EnrollAction::Add, &key_line(1, ""));
+        assert!(matches!(
+            h.reply(&[(PASSWORD_REF, b"guess")], &saved),
+            Sent::Refused(Denial::AuthenticationFailed)
+        ));
+        assert_eq!(h.last_reason(), "Authentication failed.");
+        assert!(h.fingerprints("jack").is_empty());
+        assert!(h.pending.is_empty());
+    }
+
+    /// An account with no password cannot prove itself, and is told who can
+    /// change its keys — whether it signs in with a key alone, with nothing,
+    /// or has a policy naming a password it does not have.
+    #[test]
+    fn an_account_with_no_password_to_prove_is_sent_to_an_administrator() {
+        use libauthd::credential::Policy;
+
+        let mut key_only = Harness::with("erin", Some(b"pw"));
+        key_only.store.add_key("erin", &key_line(3, ""), "").unwrap();
+        key_only
+            .store
+            .set_credential_policy("erin", Policy::SshPublicKey)
+            .unwrap();
+
+        let none = Harness::with("kiosk", None);
+
+        let mut policy_without_one = Harness::with("bob", None);
+        policy_without_one
+            .store
+            .set_credential_policy("bob", Policy::Password)
+            .unwrap();
+
+        for (mut h, name) in [(key_only, "erin"), (none, "kiosk"), (policy_without_one, "bob")] {
+            assert!(
+                matches!(
+                    h.enroll(name, EnrollAction::Add, &key_line(4, "")),
+                    Sent::Refused(Denial::AccountRestricted)
+                ),
+                "{name}"
+            );
+            assert_eq!(h.last_reason(), NO_PASSWORD_TO_PROVE);
+            assert!(h.pending.is_empty(), "nothing asked of {name}");
+        }
+    }
+
+    /// The material is checked by `KeyAdd`'s own rules before the password is
+    /// asked for: an unreadable key, a duplicate, an unsupported algorithm.
+    #[test]
+    fn a_key_the_store_would_refuse_is_refused_before_the_proof() {
+        let mut h = Harness::with("jack", Some(b"old"));
+        let line = key_line(1, "");
+        h.store.add_key("jack", &line, "").unwrap();
+        let dsa = "ssh-dss AAAAB3NzaC1kc3MAAACBAP1/U4EddRIpUt9KnC7s5Of2EbdSPO9EAMMeP4C2USZpRV1AIlH7WT2NWPq/xfW6MPbLm1Vs14E7gB00b/JmYLdrmVClpJ+f6AR7ECLCT7up1/63xhv4O1fnxqimFQ8E+4P208UewwI1VBNaFpEy9nXzrith1yrv8iIDGZ3RSAHHAAAAFQCXYFCPFSMLzLKSuYKi64QL8Fgc9QAAAIEA9+GghdabPd7LvKtcNrhXuXmUr7v6OuqC+VdMCz0HgmdRWVeOutRZT+ZxBxCBgLRJFnEj6EwoFhO3zwkyjMim4TwWeotUfI0o4KOuHiuzpnWRbqN/C/ohNWLx+2J6ASQ7zKTxvqhRkImog9/hWuWfBpKLZl6Ae1UlZAFMO/7PSSoAAACAJn6Cwvaf9ITsyPr3jT8aSgzfXMOmw7j8rHtJJ8ZX1Je8hL6v6M5Nk4WkV6U2MvWvnI5qtnMLmPfpgwlbF6dHgXjHVeRdDBCcPRe7STR42c4/dpKPDKEdc2ECyO0RRb0dcvkJ1x1WSQMEZtCXFHf6vb7QMFmAyfr/sLYJSXcvFR0= dsa";
+        for (material, words) in [
+            ("not a key", "not an SSH public key"),
+            (line.as_str(), "already"),
+            (dsa, "not an SSH public key"),
+        ] {
+            assert!(matches!(
+                h.enroll("jack", EnrollAction::Add, material),
+                Sent::Refused(Denial::CredentialRejected)
+            ));
+            assert!(h.last_reason().contains(words), "{}", h.last_reason());
+            assert!(h.pending.is_empty());
+        }
+        assert!(matches!(
+            h.enroll("jack", EnrollAction::Remove, "SHA256:nothing"),
+            Sent::Refused(Denial::CredentialRejected)
+        ));
+        assert_eq!(h.store.keys("jack").unwrap().len(), 1);
+    }
+
+    /// The checks run again when the change is applied: a key an
+    /// administrator added between the rounds is refused then, not added twice.
+    #[test]
+    fn the_store_is_checked_again_after_the_proof() {
+        let mut h = Harness::with("jack", Some(b"old"));
+        let line = key_line(1, "");
+        h.enroll("jack", EnrollAction::Add, &line);
+        h.store.add_key("jack", &line, "").unwrap();
+        assert!(matches!(
+            h.reply(&[(PASSWORD_REF, b"old")], &saved),
+            Sent::Refused(Denial::CredentialRejected)
+        ));
+        assert_eq!(h.store.keys("jack").unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_key_change_that_cannot_be_saved_changes_nothing_and_invalidates_nothing() {
+        let mut h = Harness::with("jack", Some(b"old"));
+        h.enroll("jack", EnrollAction::Add, &key_line(1, ""));
+        assert!(matches!(
+            h.reply(&[(PASSWORD_REF, b"old")], &unsaveable),
+            Sent::Refused(Denial::Internal)
+        ));
+        assert!(h.fingerprints("jack").is_empty());
+    }
+
+    /// Acted on by RID: renamed between the rounds, the key still goes to the
+    /// account that proved itself.
+    #[test]
+    fn a_rename_between_the_rounds_does_not_redirect_the_key() {
+        let mut h = Harness::with("jack", Some(b"old"));
+        h.enroll("jack", EnrollAction::Add, &key_line(1, ""));
+        h.store.rename("jack", "jacques").unwrap();
+        h.reply(&[(PASSWORD_REF, b"old")], &saved);
+        assert!(matches!(h.sent(), Sent::Changed));
+        assert_eq!(h.fingerprints("jacques").len(), 1);
     }
 }
 
