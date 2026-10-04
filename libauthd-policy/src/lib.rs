@@ -121,6 +121,21 @@ pub const LOGON_TYPES_VALUE: &str = "LogonTypes";
 /// something.
 pub const LOGON_SOCKET_SD_VALUE: &str = "LogonSocketDescriptor";
 
+/// Who may end a logon session that is not their own (PGSS §2.22), as SDDL.
+///
+/// On the parent key beside [`LOGON_SOCKET_SD_VALUE`], for the same reason:
+/// signing somebody out is machine-wide policy about logons, not a property of
+/// any one principal's record. The descriptor is access-checked for
+/// [`SESSION_END`]; ending one's own session needs no grant here.
+pub const SESSION_END_SD_VALUE: &str = "SessionEndSecurity";
+
+/// The one right [`SESSION_END_SD_VALUE`]'s descriptor is checked for.
+pub const SESSION_END: u32 = 0x1;
+
+/// The descriptor that applies while [`SESSION_END_SD_VALUE`] is absent:
+/// SYSTEM and Administrators may end anybody's session.
+pub const DEFAULT_SESSION_END_SDDL: &str = "O:SYG:SYD:(A;;0x1;;;SY)(A;;0x1;;;BA)";
+
 /// Privileges no principal may hold, whatever any record says.
 ///
 /// On the parent key rather than in a record, so it cannot collide with a
@@ -577,6 +592,56 @@ pub fn logon_socket_descriptor() -> Result<Option<String>, String> {
     match sz(&value.ty, &value.data) {
         Some(text) => Ok(Some(text.to_string())),
         None => Err(format!("{KEY}\\{LOGON_SOCKET_SD_VALUE} is not a REG_SZ; using the built-in descriptor")),
+    }
+}
+
+/// Who may end another principal's logon session, as SDDL: the configured
+/// [`SESSION_END_SD_VALUE`], or [`DEFAULT_SESSION_END_SDDL`] where there is
+/// none — or why the configured value can't be used.
+///
+/// Read on every request rather than once, since nothing is bound to it: a
+/// change applies to the next request.
+///
+/// **A value that is there but unusable is not absent**, and the caller must
+/// grant nothing on an `Err` rather than fall back to the default. It is the
+/// rule this key already keeps for privileges: a site that wrote a descriptor
+/// meant to narrow who may sign people out, and quietly widening it back to
+/// the default because of a typo is the failure nobody would notice. Whether
+/// the text parses as SDDL is the caller's to establish — this returns the
+/// text — so the same rule applies to that.
+pub fn session_end_descriptor() -> Result<String, String> {
+    let absent = |error: &peios::Error| error.kind() == std::io::ErrorKind::NotFound;
+    let unreadable = |error: peios::Error| {
+        format!(
+            "{KEY}\\{SESSION_END_SD_VALUE} cannot be read ({error}); nobody may end another \
+             principal's session until it can"
+        )
+    };
+    let key = match Key::open(None, KEY, KeyAccess::QUERY_VALUE, OpenFlags::empty()) {
+        Ok(key) => key,
+        Err(error) if absent(&error) => return Ok(DEFAULT_SESSION_END_SDDL.to_string()),
+        Err(error) => return Err(unreadable(error)),
+    };
+    match key.query_value(SESSION_END_SD_VALUE.as_bytes(), None) {
+        Ok(value) => session_end_descriptor_of(&value.ty, &value.data),
+        Err(error) if absent(&error) => Ok(DEFAULT_SESSION_END_SDDL.to_string()),
+        Err(error) => Err(unreadable(error)),
+    }
+}
+
+/// [`session_end_descriptor`]'s judgement of a value that is present.
+fn session_end_descriptor_of(ty: &ValueType, data: &[u8]) -> Result<String, String> {
+    match sz(ty, data) {
+        Some(text) if !text.is_empty() => Ok(text.to_string()),
+        Some(_) => Err(format!(
+            "{KEY}\\{SESSION_END_SD_VALUE} is empty; nobody may end another principal's session \
+             until it is corrected or removed"
+        )),
+        None => Err(format!(
+            "{KEY}\\{SESSION_END_SD_VALUE} is not a REG_SZ (type {:#x}); nobody may end another \
+             principal's session until it is corrected or removed",
+            ty.0
+        )),
     }
 }
 
@@ -1269,5 +1334,35 @@ mod tests {
             "permits() substitutes the default; if this stops holding, the comment in may_request is stale"
         );
         assert!(types.bits() & (1 << LogonType::Interactive as u32) == 0);
+    }
+
+    /// The built-in descriptor is the one in force on a machine nobody has
+    /// configured, so it has to parse, and has to say what its documentation
+    /// says: SYSTEM and Administrators, and the one right.
+    #[test]
+    fn the_default_session_end_descriptor_parses() {
+        assert!(sddl::parse(DEFAULT_SESSION_END_SDDL).is_ok());
+        assert_eq!(SESSION_END, 0x1);
+        assert!(DEFAULT_SESSION_END_SDDL.contains("(A;;0x1;;;SY)"));
+        assert!(DEFAULT_SESSION_END_SDDL.contains("(A;;0x1;;;BA)"));
+    }
+
+    #[test]
+    fn a_configured_session_end_descriptor_is_read_as_written() {
+        let configured = encode_sz("O:SYG:SYD:(A;;0x1;;;SY)");
+        assert_eq!(
+            session_end_descriptor_of(&ValueType::SZ, &configured),
+            Ok("O:SYG:SYD:(A;;0x1;;;SY)".to_string())
+        );
+    }
+
+    /// Present but unusable is not absent: it must not quietly become the
+    /// default, which may grant more than the site wrote.
+    #[test]
+    fn an_unusable_session_end_descriptor_is_an_error_not_the_default() {
+        let wrong_type = session_end_descriptor_of(&ValueType::MULTI_SZ, &encode_multi_sz(["O:SYG:SYD:"]));
+        assert!(wrong_type.as_ref().is_err_and(|why| why.contains("not a REG_SZ")), "{wrong_type:?}");
+        let empty = session_end_descriptor_of(&ValueType::SZ, &encode_sz(""));
+        assert!(empty.as_ref().is_err_and(|why| why.contains("empty")), "{empty:?}");
     }
 }
