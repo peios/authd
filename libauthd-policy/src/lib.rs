@@ -325,6 +325,7 @@ impl Policy {
             .ok()
             .and_then(|value| privilege_list(&value.ty, &value.data, KEY, DENIED_PRIVILEGES_VALUE, &mut problems))
             .unwrap_or_else(Privileges::empty);
+        problems.extend(duplicates(&records));
         Policy { configured: true, records, denied, problems }
     }
 
@@ -394,6 +395,29 @@ impl Policy {
     pub fn originator_logon_types(&self, peer: &SidRef) -> Option<LogonTypes> {
         self.record(peer).and_then(|record| record.logon_types)
     }
+}
+
+/// Records naming a principal another record names already, said.
+///
+/// `Administrators` and `S-1-5-32-544` are two keys for one principal, and
+/// both apply: their privileges union like any two records'. But whoever
+/// reads the key to see what a principal gets finds one and stops looking,
+/// and for the single values — integrity, owner, default DACL — the one
+/// enumerated first wins, which is no order anyone chose.
+fn duplicates(records: &[Record]) -> Vec<String> {
+    records
+        .iter()
+        .enumerate()
+        .filter_map(|(at, record)| {
+            let first = records[..at].iter().find(|earlier| earlier.sid == record.sid)?;
+            Some(format!(
+                "policy records {KEY}\\{} and {KEY}\\{} are for the same principal ({}); both apply, so what it \
+                 gets is in two places, and for integrity, owner and default DACL the one read first wins. \
+                 Merge them into one.",
+                first.name, record.name, record.sid
+            ))
+        })
+        .collect()
 }
 
 /// Which principal owns the objects this token creates.
@@ -972,6 +996,20 @@ mod tests {
         assert_eq!(resolve("Administrators").as_ref().map(|s| s.to_string()), Some("S-1-5-32-544".to_string()));
         assert_eq!(resolve("S-1-5-32-544").as_ref().map(|s| s.to_string()), Some("S-1-5-32-544".to_string()));
         assert_eq!(resolve("S-1-5-21-1-2-3-1000").as_ref().map(|s| s.to_string()), Some("S-1-5-21-1-2-3-1000".to_string()));
+    }
+
+    /// Two keys for one principal are said once, naming both.
+    #[test]
+    fn two_records_for_one_principal_are_said() {
+        let records = [
+            record("Administrators", Some(Privileges::BACKUP), None),
+            record("Everyone", None, None),
+            record("S-1-5-32-544", Some(Privileges::RESTORE), None),
+        ];
+        let said = duplicates(&records);
+        assert_eq!(said.len(), 1, "{said:?}");
+        assert!(said[0].contains("Policy\\Administrators and ") && said[0].contains("Policy\\S-1-5-32-544"), "{said:?}");
+        assert!(duplicates(&records[..2]).is_empty());
     }
 
     #[test]
