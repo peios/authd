@@ -1,4 +1,4 @@
-.TH LPS 1 "September 2026" "authd" "User Commands"
+.TH LPS 1 "October 2026" "authd" "User Commands"
 .SH NAME
 lps \- administer the Peios local principal store
 .SH SYNOPSIS
@@ -32,18 +32,41 @@ Create a principal.  Options are
 .BR \-\-display-name ,
 .BR \-\-disabled ,
 .BR \-\-no-password ,
+.BR \-\-service ,
 and
 .BR \-\-no-prompt .
+The principal is created whole, in one request, or not at all.
+.B \-\-service
+makes a principal that may sign on only as a service, started by the service
+manager without a credential.
 .TP
 .BI remove " name"
 Delete a principal.  RIDs are never reused; disabling an account is usually
 safer because descriptors may continue to name its SID.
+.TP
+.BI rename " name new-name"
+Rename a principal.  Its SID, groups and home directory stay; it signs in by
+the new name.  A name held by another principal or a local group is refused.
 .TP
 .BI enable " name"
 Permit a principal to log on.
 .TP
 .BI disable " name"
 Refuse logon while retaining the principal and SID.
+.TP
+.BI logon-types " name type ..."
+Set the kinds of sign-on the principal may be used for:
+.BR interactive ,
+.BR remote-interactive ,
+.BR network ,
+.BR network-cleartext ,
+.BR batch ,
+.BR new-credentials ,
+.BR service ,
+or
+.B default
+for the machine's default, which is every kind a person uses and never
+.BR service .
 .TP
 .BI password " name"
 Set a principal's password, as an administrator.  A principal changes their
@@ -52,7 +75,8 @@ own with
 Setting material does not change credential policy.
 .TP
 .BI key\ list " name"
-Show credential policy and enrolled key IDs, SHA256 fingerprints, labels and creation times.
+Show the credential policy, then each enrolled key's ID, SHA256 fingerprint,
+the day it was added (UTC) and its label.
 .TP
 .BI key\ add " name public-key-file [label]"
 Enroll an Ed25519 or RSA (3072 to 8192 bits) public key. Duplicate keys, key
@@ -76,13 +100,20 @@ or
 .BR \-\-primary-group .
 .TP
 .B group list
-List local groups.
+List local groups, with their descriptions where any has one.
 .TP
-.BI group\ create " name"
-Create a local group.
+.BI group\ create " name [description]"
+Create a local group, and say what it is for.  Anyone may read a group's
+description.
+.TP
+.BI group\ rename " name new-name"
+Rename a local group.  Its SID and members stay.
+.TP
+.BI group\ describe " name description"
+Set a local group's description; an empty one clears it.
 .TP
 .BI group\ delete " name"
-Delete an unused local group.
+Delete a local group nobody is in and nobody has as their primary group.
 .TP
 .BI group\ add " name group"
 Add a principal to a group.
@@ -100,6 +131,19 @@ Remove a claim.
 .B \-\-no-password
 creates a principal that authenticates with no credential.  It is intended for
 explicit disposable-image bootstrap policy, not normal production accounts.
+.PP
+The machine always keeps an enabled administrator who can sign in.
+.BR remove ,
+.BR disable ,
+.B group remove
+from Administrators,
+.B logon-types
+that allow none of interactive, remote-interactive or network sign-on,
+.B policy
+that leaves nothing to sign in with, and
+.B key remove
+of the only key of one who signs in only by key, are all refused for the last
+enabled administrator.
 .SH SEE ALSO
 .BR login (1),
 .BR authd (8),
