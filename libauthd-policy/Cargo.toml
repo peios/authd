@@ -1,6 +1,6 @@
 [package]
 name = "libauthd-policy"
-version = "0.0.22"
+version = "0.0.23"
 edition = "2024"
 license = "MIT"
 description = "What this machine grants a principal: the local policy authd mints from, read the one way for authd and for the programs that show and edit it."
