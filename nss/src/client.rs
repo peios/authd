@@ -27,13 +27,19 @@
 //! An authority that answers `Unavailable` is different in kind and maps to
 //! `TryAgain`, never `NotFound`. A source that could have answered did not, and
 //! recording that as "no such user" would let an outage be remembered as a fact.
+//!
+//! # The client is libauthd-client's
+//!
+//! Speaking the socket — connecting, the question, the answer, matching one
+//! to the other — is libauthd-client's [`Session`], which every program
+//! asking authd shares. What is here is the mapping above: its [`Failure`]
+//! said in the terms an NSS entry point answers in.
 
 use std::io;
-use std::os::unix::net::UnixStream;
 use std::time::Duration;
 
-use libauthd::ident::{self, Fields, Kind, Outcome, Record};
-use libauthd::transport::{recv_message, send_message};
+use libauthd::ident::{self, Fields, Kind, Record};
+use libauthd_client::ident::{Failure, Ident, Session};
 
 /// How long the authority has to answer before the caller is told to try again.
 ///
@@ -44,10 +50,7 @@ use libauthd::transport::{recv_message, send_message};
 const TIMEOUT: Duration = Duration::from_secs(10);
 
 /// A connection to `/run/ident.sock`.
-pub struct Client {
-    stream: UnixStream,
-    tag: u32,
-}
+pub struct Client(Session);
 
 /// What one page of an enumeration produced.
 ///
@@ -73,57 +76,25 @@ pub enum Found {
     Unavailable,
 }
 
+/// Whether a failure is worth the caller asking again: a timeout, or a
+/// source that could have answered and did not. Everything else — no
+/// authority, an answer that could not be read or answered another question,
+/// a refusal — is unavailable.
+fn transient(failure: &Failure) -> bool {
+    failure.transient()
+}
+
 impl Client {
     pub fn open() -> io::Result<Self> {
-        let stream = UnixStream::connect(libauthd::IDENT_SOCKET_PATH)?;
-        stream.set_read_timeout(Some(TIMEOUT))?;
-        stream.set_write_timeout(Some(TIMEOUT))?;
-        Ok(Self { stream, tag: 1 })
-    }
-
-    fn next_tag(&mut self) -> u32 {
-        let tag = self.tag;
-        self.tag = self.tag.wrapping_add(1).max(1);
-        tag
+        Ident::new().with_timeout(TIMEOUT).session().map(Client).map_err(io::Error::from)
     }
 
     pub fn lookup(&mut self, key: ident::Key, kind: Kind, fields: Fields) -> Found {
-        let tag = self.next_tag();
-        let Ok(request) = ident::encode_lookup(&ident::Lookup {
-            tag,
-            key,
-            kind,
-            fields,
-        }) else {
-            return Found::Unavailable;
-        };
-        if send_message(&self.stream, &request).is_err() {
-            return Found::Unavailable;
-        }
-
-        let Ok(received) = recv_message(&libauthd::wire::FRAMING, &self.stream) else {
-            // A timeout lands here too, and `TryAgain` is the right reading:
-            // the authority exists, it just did not answer in time.
-            return Found::TryAgain;
-        };
-        let Ok(reply) = ident::decode_lookup_reply(received.expose()) else {
-            return Found::Unavailable;
-        };
-        // Replies may legitimately arrive out of order, but this module never
-        // has more than one request outstanding — so a mismatched tag means the
-        // stream is not what it should be.
-        if reply.tag != tag {
-            return Found::Unavailable;
-        }
-
-        match reply.outcome {
-            Outcome::Found => match reply.record {
-                Some(record) => Found::Record(Box::new(record)),
-                None => Found::Unavailable,
-            },
-            Outcome::NotFound => Found::NotFound,
-            Outcome::Unavailable => Found::TryAgain,
-            Outcome::Refused | Outcome::Malformed => Found::Unavailable,
+        match self.0.lookup(key, kind, fields) {
+            Ok(Some(record)) => Found::Record(Box::new(record)),
+            Ok(None) => Found::NotFound,
+            Err(failure) if transient(&failure) => Found::TryAgain,
+            Err(_) => Found::Unavailable,
         }
     }
 
@@ -146,37 +117,39 @@ impl Client {
         fields: Fields,
         cursor: &[u8],
     ) -> Paged {
-        let tag = self.next_tag();
-        let Ok(request) = ident::encode_enumerate(&ident::Enumerate {
-            tag,
-            kind,
-            fields,
-            of: None,
-            cursor: cursor.to_vec(),
-        }) else {
-            return Paged::Unavailable;
-        };
-        if send_message(&self.stream, &request).is_err() {
-            return Paged::Unavailable;
+        // A NotFound has no meaning for a walk, and the session reports it as
+        // a refusal like the rest: the one thing that must never happen is a
+        // failure reading as the end.
+        match self.0.page(kind, fields, None, cursor) {
+            Ok(reply) => Paged::Page(reply),
+            Err(failure) if transient(&failure) => Paged::TryAgain,
+            Err(_) => Paged::Unavailable,
         }
+    }
+}
 
-        let Ok(received) = recv_message(&libauthd::wire::FRAMING, &self.stream) else {
-            // A timeout lands here, and as on the lookup path it means the
-            // authority exists and did not answer in time.
-            return Paged::TryAgain;
-        };
-        let Ok(reply) = ident::decode_enumerate_reply(received.expose()) else {
-            return Paged::Unavailable;
-        };
-        if reply.tag != tag {
-            return Paged::Unavailable;
-        }
-        match reply.outcome {
-            Outcome::Found => Paged::Page(reply),
-            Outcome::Unavailable => Paged::TryAgain,
-            // NotFound has no meaning for a walk, so it joins the rest: the
-            // one thing that must never happen is a failure reading as the end.
-            Outcome::NotFound | Outcome::Refused | Outcome::Malformed => Paged::Unavailable,
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use libauthd::ident::Outcome;
+
+    /// The mapping this module exists for: a timeout or a source that did
+    /// not answer is worth trying again; nothing else is, and none of it is
+    /// ever "no such principal".
+    #[test]
+    fn only_a_silence_or_an_unanswering_source_is_worth_trying_again() {
+        let error = || io::Error::from(io::ErrorKind::TimedOut);
+        assert!(transient(&Failure::Unanswered(error())));
+        assert!(transient(&Failure::Declined(Outcome::Unavailable)));
+        for failure in [
+            Failure::Unreachable(error()),
+            Failure::Unsent(error()),
+            Failure::Unreadable("another question".into()),
+            Failure::Declined(Outcome::Refused),
+            Failure::Declined(Outcome::Malformed),
+            Failure::Declined(Outcome::NotFound),
+        ] {
+            assert!(!transient(&failure), "{failure:?}");
         }
     }
 }

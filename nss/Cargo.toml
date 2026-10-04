@@ -13,11 +13,14 @@ publish = false
 name = "nss_peios"
 crate-type = ["cdylib"]
 
-# libauthd and libc, and nothing else. This object is loaded into *every*
-# process on the system, including setuid ones and ones running at Untrusted
-# integrity, so its dependency list is the surface every one of them inherits.
-# Note what is absent: libpeios. The shim never handles a SID as anything but
-# opaque bytes, and never needs to.
+# libauthd, its client and libc, and nothing else. This object is loaded into
+# *every* process on the system, including setuid ones and ones running at
+# Untrusted integrity, so its dependency list is the surface every one of them
+# inherits. libauthd-client adds nothing to it: it is the identity socket's
+# client every program shares, std and libauthd alone. Note what is absent:
+# libpeios. The shim never handles a SID as anything but opaque bytes, and
+# never needs to.
 [dependencies]
 libauthd = { path = "../libauthd" }
+libauthd-client = { path = "../libauthd-client" }
 libc = "0.2"
