@@ -1,6 +1,6 @@
 [package]
 name = "libauthd-client"
-version = "0.0.22"
+version = "0.0.23"
 edition = "2024"
 license = "MIT"
 description = "Clients of lpsd's admin socket and authd's identity and logon sockets, for programs that administer or look up principals, or end sessions."
