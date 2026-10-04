@@ -30,6 +30,8 @@ struct Entry {
     authority: u64,
     sub_authorities: &'static [u32],
     unix_id: Option<u32>,
+    /// What it is, for a person: the `DESCRIPTION` field (PGSS §2.16).
+    description: &'static str,
 }
 
 /// Every well-known principal authd knows.
@@ -39,34 +41,124 @@ struct Entry {
 /// qualified spelling is unrepresentable as a policy record's key name.
 const WELL_KNOWN: &[Entry] = &[
     // SYSTEM is root. Fixed by peinit, not chosen here.
-    Entry { name: "SYSTEM", authority: 5, sub_authorities: &[18], unix_id: Some(0) },
+    Entry {
+        name: "SYSTEM",
+        authority: 5,
+        sub_authorities: &[18],
+        unix_id: Some(0),
+        description: "The machine itself: the operating system and the services that run as it.",
+    },
     // Well-known groups, from a block clear of both SYSTEM and the low numbers
     // Linux distributions traditionally hand to system daemons.
-    Entry { name: "Everyone", authority: 1, sub_authorities: &[0], unix_id: Some(100) },
-    Entry { name: "Authenticated Users", authority: 5, sub_authorities: &[11], unix_id: Some(101) },
-    Entry { name: "Administrators", authority: 5, sub_authorities: &[32, 544], unix_id: Some(102) },
-    Entry { name: "Users", authority: 5, sub_authorities: &[32, 545], unix_id: Some(103) },
-    Entry { name: "Guests", authority: 5, sub_authorities: &[32, 546], unix_id: Some(104) },
-    Entry { name: "Local Service", authority: 5, sub_authorities: &[19], unix_id: Some(105) },
-    Entry { name: "Network Service", authority: 5, sub_authorities: &[20], unix_id: Some(106) },
+    Entry {
+        name: "Everyone",
+        authority: 1,
+        sub_authorities: &[0],
+        unix_id: Some(100),
+        description: "Everyone and everything, signed in or not.",
+    },
+    Entry {
+        name: "Authenticated Users",
+        authority: 5,
+        sub_authorities: &[11],
+        unix_id: Some(101),
+        description: "Everyone who has signed in.",
+    },
+    Entry {
+        name: "Administrators",
+        authority: 5,
+        sub_authorities: &[32, 544],
+        unix_id: Some(102),
+        description: "May change anything on this machine, its users and groups included.",
+    },
+    Entry {
+        name: "Users",
+        authority: 5,
+        sub_authorities: &[32, 545],
+        unix_id: Some(103),
+        description: "People who use this machine, without changing how it is set up.",
+    },
+    Entry {
+        name: "Guests",
+        authority: 5,
+        sub_authorities: &[32, 546],
+        unix_id: Some(104),
+        description: "People given the least this machine allows.",
+    },
+    Entry {
+        name: "Local Service",
+        authority: 5,
+        sub_authorities: &[19],
+        unix_id: Some(105),
+        description: "Services that need little, and nothing beyond this machine.",
+    },
+    Entry {
+        name: "Network Service",
+        authority: 5,
+        sub_authorities: &[20],
+        unix_id: Some(106),
+        description: "Services that need little here, and reach other machines as this one.",
+    },
     // Stapled onto every token by `derive::token_groups` alongside Everyone,
     // and numbered for the same reason: it is a membership an ACL can be
     // written against, so it needs to survive the projection and be nameable
     // in policy. Unlike the logon-type SIDs below it is not a property of the
     // session -- every token minted on this machine carries it.
-    Entry { name: "Local", authority: 2, sub_authorities: &[0], unix_id: Some(107) },
+    Entry {
+        name: "Local",
+        authority: 2,
+        sub_authorities: &[0],
+        unix_id: Some(107),
+        description: "Everyone signed in on this machine.",
+    },
     // Nameable in policy, deliberately unnumbered — see the module docs. These
     // are what make "network logons cap at Low" expressible without any
     // mechanism beyond a policy record.
-    Entry { name: "Interactive", authority: 5, sub_authorities: &[4], unix_id: None },
-    Entry { name: "Network", authority: 5, sub_authorities: &[2], unix_id: None },
-    Entry { name: "Batch", authority: 5, sub_authorities: &[3], unix_id: None },
-    Entry { name: "Service", authority: 5, sub_authorities: &[6], unix_id: None },
+    Entry {
+        name: "Interactive",
+        authority: 5,
+        sub_authorities: &[4],
+        unix_id: None,
+        description: "Everyone signed in at this machine, or on a remote desktop.",
+    },
+    Entry {
+        name: "Network",
+        authority: 5,
+        sub_authorities: &[2],
+        unix_id: None,
+        description: "Everyone signed in over the network.",
+    },
+    Entry {
+        name: "Batch",
+        authority: 5,
+        sub_authorities: &[3],
+        unix_id: None,
+        description: "Everyone signed in to run scheduled jobs.",
+    },
+    Entry {
+        name: "Service",
+        authority: 5,
+        sub_authorities: &[6],
+        unix_id: None,
+        description: "Everyone signed in to run a service.",
+    },
     // Carried *alongside* Interactive rather than instead of it, so a record
     // written before remoting existed still applies to a remote desktop. Naming
     // it is what lets a newer record single one out.
-    Entry { name: "Remote Interactive", authority: 5, sub_authorities: &[14], unix_id: None },
-    Entry { name: "Anonymous", authority: 5, sub_authorities: &[7], unix_id: None },
+    Entry {
+        name: "Remote Interactive",
+        authority: 5,
+        sub_authorities: &[14],
+        unix_id: None,
+        description: "Everyone signed in on a remote desktop.",
+    },
+    Entry {
+        name: "Anonymous",
+        authority: 5,
+        sub_authorities: &[7],
+        unix_id: None,
+        description: "Anyone who reached this machine without signing in.",
+    },
 ];
 
 impl Entry {
@@ -127,6 +219,14 @@ pub fn name_of(sid: &SidRef) -> Option<&'static str> {
         .iter()
         .find(|entry| entry.is(sid))
         .map(|entry| entry.name)
+}
+
+/// What a well-known SID is, in a person's words.
+pub fn description_of(sid: &SidRef) -> Option<&'static str> {
+    WELL_KNOWN
+        .iter()
+        .find(|entry| entry.is(sid))
+        .map(|entry| entry.description)
 }
 
 /// Which well-known principal carries a POSIX identifier.
@@ -248,6 +348,16 @@ mod tests {
                 Some(built.to_string())
             );
         }
+    }
+
+    #[test]
+    fn every_entry_says_what_it_is() {
+        for entry in WELL_KNOWN {
+            let built = entry.sid().expect("a buildable SID");
+            let said = description_of(built.as_ref()).unwrap_or_default();
+            assert!(!said.is_empty() && said.len() <= libauthd::wire::MAX_DESCRIPTION_BYTES, "{}", entry.name);
+        }
+        assert_eq!(description_of(sid("S-1-5-21-1-2-3-1000").as_ref()), None);
     }
 
     /// Two entries sharing a SID would make `name_of` arbitrary; two sharing a

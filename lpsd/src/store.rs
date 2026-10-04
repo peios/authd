@@ -21,8 +21,11 @@
 //! SIDs, orphaning every security descriptor that named them. Refusing to start
 //! is loud, reversible, and leaves the evidence intact.
 //!
-//! This development release replaces the layout in place. Older layouts are
-//! refused; development stores must be explicitly reprovisioned.
+//! Format 5 is read and written. Format 4, which held no group descriptions,
+//! is still read, as format 5 with every description empty, and is rewritten
+//! as 5 at the next change. Anything older is refused; such a store must be
+//! reprovisioned. A store written as 5 is refused by an lpsd that knows only
+//! 4, loudly, rather than read by guesswork.
 //!
 //! # The domain is the store's, and it is generated here
 //!
@@ -135,6 +138,7 @@ const MAX_NAME_BYTES: usize = 256;
 const MAX_GROUPS: usize = 128;
 const MAX_PATH_BYTES: usize = 4096;
 const MAX_DISPLAY_NAME_BYTES: usize = 256;
+const MAX_DESCRIPTION_BYTES: usize = libauthd::wire::MAX_DESCRIPTION_BYTES;
 
 /// Characters a principal or group name may not contain.
 ///
@@ -348,6 +352,8 @@ struct Group {
     rid: u32,
     unix_id: u32,
     name: String,
+    /// What the group is for, for a person. Empty when nobody said.
+    description: String,
 }
 
 impl Group {
@@ -392,6 +398,7 @@ pub struct GroupSummary {
     pub unix_id: u32,
     pub sid: Sid,
     pub members: usize,
+    pub description: String,
 }
 
 /// What a lookup key resolved to.
@@ -420,6 +427,8 @@ pub struct GroupRecord {
     pub rid: Option<u32>,
     /// `None` for a well-known group, which lpsd does not number.
     pub unix_id: Option<u32>,
+    /// Empty when nobody said.
+    pub description: String,
 }
 
 /// A principal in a group's membership list.
@@ -712,6 +721,7 @@ impl Store {
                     .filter(|p| p.groups.iter().any(|g| *g == sid))
                     .count(),
                 sid,
+                description: group.description.clone(),
             });
         }
         Ok(out)
@@ -811,6 +821,7 @@ impl Store {
             name: group.name.clone(),
             rid: Some(group.rid),
             unix_id: Some(group.unix_id),
+            description: group.description.clone(),
         })
     }
 
@@ -925,7 +936,8 @@ impl Store {
     }
 
     /// Refuse `name` if a principal or a local group already holds it, other
-    /// than the principal with RID `except`.
+    /// than the one with RID `except`: principals and groups share one RID
+    /// counter, so it names at most one of either.
     ///
     /// One namespace for both, as PSPU §10.5 has it. A name lookup tries
     /// groups first, so a principal sharing a group's name could be found by
@@ -941,7 +953,11 @@ impl Store {
                 principal.name
             )));
         }
-        if let Some(group) = self.groups.iter().find(|g| g.matches(name)) {
+        if let Some(group) = self
+            .groups
+            .iter()
+            .find(|g| g.matches(name) && Some(g.rid) != except)
+        {
             return Err(StoreError::Exists(format!(
                 "there is already a group named {}",
                 group.name
@@ -1297,8 +1313,9 @@ impl Store {
     // -----------------------------------------------------------------------
 
     /// Create a local group, returning the RID allocated to it.
-    pub fn create_group(&mut self, name: &str) -> Result<u32, StoreError> {
+    pub fn create_group(&mut self, name: &str, description: &str) -> Result<u32, StoreError> {
         let name = check_name(name, "group")?;
+        let description = check_description(description)?;
         self.refuse_if_taken(&name, None)?;
         if self.groups.len() >= MAX_GROUP_OBJECTS {
             return Err(StoreError::Invalid(format!(
@@ -1311,8 +1328,40 @@ impl Store {
             rid,
             unix_id: rid,
             name,
+            description,
         });
         Ok(rid)
+    }
+
+    fn group_position(&self, name: &str) -> Result<usize, StoreError> {
+        self.groups
+            .iter()
+            .position(|g| g.matches(name))
+            .ok_or_else(|| StoreError::NoSuchGroup(name.to_string()))
+    }
+
+    /// Change what a local group is called. Returns whether anything changed.
+    ///
+    /// Its SID, RID and Unix ID stay, and so does every membership, which
+    /// names it by SID. As for a principal, a change of case alone is a
+    /// rename.
+    pub fn rename_group(&mut self, name: &str, new_name: &str) -> Result<bool, StoreError> {
+        let at = self.group_position(name)?;
+        let new_name = check_name(new_name, "group")?;
+        if self.groups[at].name == new_name {
+            return Ok(false);
+        }
+        self.refuse_if_taken(&new_name, Some(self.groups[at].rid))?;
+        self.groups[at].name = new_name;
+        Ok(true)
+    }
+
+    /// Set a local group's description; empty clears it. Returns whether
+    /// anything changed.
+    pub fn describe_group(&mut self, name: &str, description: &str) -> Result<bool, StoreError> {
+        let description = check_description(description)?;
+        let at = self.group_position(name)?;
+        Ok(core::mem::replace(&mut self.groups[at].description, description) != self.groups[at].description)
     }
 
     /// Delete a local group.
@@ -1690,6 +1739,8 @@ impl Store {
             w.u32(group.rid);
             w.u32(group.unix_id);
             w.str(&group.name);
+            // Format 5.
+            w.str(&group.description);
         }
 
         w.u32(self.principals.len() as u32);
@@ -1755,7 +1806,7 @@ impl Store {
     }
 
     fn decode(version: u16, body: &[u8]) -> Result<Self, StoreError> {
-        if version != codec::VERSION {
+        if !(codec::OLDEST_READABLE_VERSION..=codec::VERSION).contains(&version) {
             return Err(StoreError::Corrupt(CodecError::UnsupportedVersion(version)));
         }
         let mut r = Reader::new(body);
@@ -1784,10 +1835,17 @@ impl Store {
                 // an audit line and authd's log. Failing the load says so at
                 // start-up rather than at the first `getent`.
                 check_name(name, "group")?;
+                // Format 4 had no descriptions: such a group has none yet.
+                let description = if version >= 5 {
+                    check_description(r.str()?)?
+                } else {
+                    String::new()
+                };
                 groups.push(Group {
                     rid,
                     unix_id: stored,
                     name: name.to_string(),
+                    description,
                 });
             }
             groups
@@ -2126,6 +2184,23 @@ fn check_display_name(display: &str) -> Result<String, StoreError> {
         ));
     }
     Ok(display.to_string())
+}
+
+/// A group's description: trimmed, within bounds, and with no control
+/// characters, since it is shown wherever the group is. Empty is none.
+fn check_description(description: &str) -> Result<String, StoreError> {
+    let description = description.trim();
+    if description.len() > MAX_DESCRIPTION_BYTES {
+        return Err(StoreError::Invalid(format!(
+            "a description may not exceed {MAX_DESCRIPTION_BYTES} bytes"
+        )));
+    }
+    if description.chars().any(char::is_control) {
+        return Err(StoreError::Invalid(
+            "a description is one line, with no control characters".into(),
+        ));
+    }
+    Ok(description.to_string())
 }
 
 // ---------------------------------------------------------------------------
@@ -2525,7 +2600,7 @@ mod tests {
     fn a_rename_is_refused_a_name_already_held() {
         let mut store = seeded();
         store.add(new("dana", vec![]), None).unwrap();
-        store.create_group("developers").unwrap();
+        store.create_group("developers", "").unwrap();
 
         assert!(matches!(store.rename("dana", "JACK"), Err(StoreError::Exists(_))));
         assert!(matches!(store.rename("dana", "Developers"), Err(StoreError::Exists(_))));
@@ -2541,18 +2616,18 @@ mod tests {
     #[test]
     fn a_principal_and_a_group_may_not_share_a_name() {
         let mut store = seeded();
-        store.create_group("developers").unwrap();
+        store.create_group("developers", "").unwrap();
 
         assert!(matches!(
             store.add(new("DEVELOPERS", vec![]), None),
             Err(StoreError::Exists(_))
         ));
-        assert!(matches!(store.create_group("Jack"), Err(StoreError::Exists(_))));
+        assert!(matches!(store.create_group("Jack", ""), Err(StoreError::Exists(_))));
         assert!(matches!(
             store.add(new("jack", vec![]), None),
             Err(StoreError::Exists(_))
         ));
-        assert!(matches!(store.create_group("developers"), Err(StoreError::Exists(_))));
+        assert!(matches!(store.create_group("developers", ""), Err(StoreError::Exists(_))));
     }
 
     #[test]
@@ -2865,7 +2940,7 @@ mod tests {
         // number issued to a principal must never be issued to a group.
         let mut store = Store::provision().expect("must provision");
         store.add(new("a", vec![]), Some(b"pw")).unwrap();
-        store.create_group("developers").unwrap();
+        store.create_group("developers", "").unwrap();
         store.add(new("b", vec![]), Some(b"pw")).unwrap();
 
         let a = store.record("a").unwrap().unix_id;
@@ -2882,7 +2957,7 @@ mod tests {
     fn principals_and_groups_share_one_rid_counter() {
         let mut store = Store::provision().expect("must provision");
         let a = store.add(new("a", vec![]), Some(b"pw")).unwrap();
-        let group = store.create_group("developers").unwrap();
+        let group = store.create_group("developers", "").unwrap();
         let b = store.add(new("b", vec![]), Some(b"pw")).unwrap();
         assert_eq!((a, group, b), (1000, 1001, 1002));
     }
@@ -2907,7 +2982,7 @@ mod tests {
     #[test]
     fn a_local_group_gets_a_sid_in_the_domain() {
         let mut store = Store::provision().expect("must provision");
-        let rid = store.create_group("developers").unwrap();
+        let rid = store.create_group("developers", "").unwrap();
         let domain = store.domain_sid().unwrap().to_string();
         let sid = store.resolve_group("developers").unwrap();
         assert_eq!(sid.to_string(), format!("{domain}-{rid}"));
@@ -2916,7 +2991,7 @@ mod tests {
     #[test]
     fn a_group_resolves_by_well_known_name_local_name_or_sid() {
         let mut store = Store::provision().expect("must provision");
-        store.create_group("developers").unwrap();
+        store.create_group("developers", "").unwrap();
 
         assert_eq!(
             store.resolve_group("Administrators").unwrap(),
@@ -2956,11 +3031,11 @@ mod tests {
         // be unreachable — created, and impossible to add anyone to.
         let mut store = Store::provision().expect("must provision");
         assert!(matches!(
-            store.create_group("Administrators"),
+            store.create_group("Administrators", ""),
             Err(StoreError::Invalid(_))
         ));
         assert!(matches!(
-            store.create_group("administrators"),
+            store.create_group("administrators", ""),
             Err(StoreError::Invalid(_))
         ));
     }
@@ -2997,7 +3072,7 @@ mod tests {
                 "{name} must not be creatable as a principal"
             );
             assert!(
-                matches!(store.create_group(name), Err(StoreError::Invalid(_))),
+                matches!(store.create_group(name, ""), Err(StoreError::Invalid(_))),
                 "{name} must not be creatable as a group"
             );
         }
@@ -3046,7 +3121,7 @@ mod tests {
     fn an_interior_space_is_allowed_in_a_name() {
         let mut store = Store::provision().expect("must provision");
         store
-            .create_group("Backup Operators")
+            .create_group("Backup Operators", "")
             .expect("an ordinary group name must still be creatable");
     }
 
@@ -3065,9 +3140,9 @@ mod tests {
     #[test]
     fn duplicate_group_names_are_refused() {
         let mut store = Store::provision().expect("must provision");
-        store.create_group("developers").unwrap();
+        store.create_group("developers", "").unwrap();
         assert!(matches!(
-            store.create_group("DEVELOPERS"),
+            store.create_group("DEVELOPERS", ""),
             Err(StoreError::Exists(_))
         ));
     }
@@ -3077,7 +3152,7 @@ mod tests {
         // The reason group objects exist: authd cannot project a supplementary
         // GID from a bare SID.
         let mut store = Store::provision().expect("must provision");
-        store.create_group("developers").unwrap();
+        store.create_group("developers", "").unwrap();
         let developers = store.resolve_group("developers").unwrap();
         store
             .add(
@@ -3123,7 +3198,7 @@ mod tests {
     #[test]
     fn a_group_with_members_cannot_be_deleted() {
         let mut store = Store::provision().expect("must provision");
-        store.create_group("developers").unwrap();
+        store.create_group("developers", "").unwrap();
         let developers = store.resolve_group("developers").unwrap();
         store
             .add(new("jack", vec![developers]), Some(b"pw"))
@@ -3143,7 +3218,7 @@ mod tests {
     #[test]
     fn a_group_that_is_somebodys_primary_cannot_be_deleted() {
         let mut store = Store::provision().expect("must provision");
-        store.create_group("developers").unwrap();
+        store.create_group("developers", "").unwrap();
         let developers = store.resolve_group("developers").unwrap();
         store.add(new("jack", vec![]), Some(b"pw")).unwrap();
         store.set_primary_group("jack", developers).unwrap();
@@ -3169,7 +3244,7 @@ mod tests {
     #[test]
     fn group_summaries_count_members() {
         let mut store = Store::provision().expect("must provision");
-        store.create_group("developers").unwrap();
+        store.create_group("developers", "").unwrap();
         let developers = store.resolve_group("developers").unwrap();
         store
             .add(new("a", vec![developers.clone()]), Some(b"pw"))
@@ -3249,7 +3324,7 @@ mod tests {
         // make the order of two administrative commands matter.
         let mut store = seeded();
         let developers = {
-            store.create_group("developers").unwrap();
+            store.create_group("developers", "").unwrap();
             store.resolve_group("developers").unwrap()
         };
         assert!(store.set_primary_group("jack", developers.clone()).unwrap());
@@ -3362,7 +3437,7 @@ mod tests {
     fn everything_a_principal_carries_survives_a_round_trip() {
         let fs = FaultyFs::new();
         let mut store = Store::provision().expect("must provision");
-        store.create_group("developers").unwrap();
+        store.create_group("developers", "").unwrap();
         let developers = store.resolve_group("developers").unwrap();
         store
             .add(
@@ -3651,7 +3726,7 @@ mod tests {
     #[test]
     fn a_stored_group_name_that_breaks_the_rules_is_refused_on_load() {
         let mut store = seeded();
-        store.create_group("developers").expect("must create");
+        store.create_group("developers", "").expect("must create");
         let last = store.groups.len() - 1;
         store.groups[last].name = "dev@corp".to_string();
         let body = store.encode();
@@ -3713,7 +3788,7 @@ mod tests {
         assert_eq!(record.rid, rid);
         assert_eq!(record.unix_id, rid);
 
-        let group_rid = store.create_group("developers").unwrap();
+        let group_rid = store.create_group("developers", "").unwrap();
         let group = &store.group_summaries().unwrap()[0];
         assert_eq!(group.rid, group_rid);
         assert_eq!(group.unix_id, group_rid);
@@ -3752,7 +3827,7 @@ mod tests {
     fn two_objects_sharing_a_unix_id_are_refused() {
         let mut store = Store::provision().expect("must provision");
         store.add(new("jack", vec![]), Some(b"pw")).unwrap();
-        store.create_group("developers").unwrap();
+        store.create_group("developers", "").unwrap();
         store.groups[0].unix_id = store.principals[0].unix_id;
         let body = store.encode();
         assert!(
@@ -3768,7 +3843,7 @@ mod tests {
     fn two_objects_sharing_a_rid_are_refused() {
         let mut store = Store::provision().expect("must provision");
         store.add(new("jack", vec![]), Some(b"pw")).unwrap();
-        store.create_group("developers").unwrap();
+        store.create_group("developers", "").unwrap();
         store.groups[0].rid = store.principals[0].rid;
         let body = store.encode();
         assert!(matches!(
@@ -3853,10 +3928,85 @@ mod tests {
     #[test]
     fn incompatible_store_versions_are_refused_without_rewriting() {
         let store = seeded();
-        for version in [1, 2, 3, 5] {
+        for version in [1, 2, 3, 6] {
             assert!(matches!(Store::decode(version, &store.encode()),
                 Err(StoreError::Corrupt(CodecError::UnsupportedVersion(v))) if v == version));
         }
+    }
+
+    /// The body format 4 wrote: format 5's, without the group descriptions.
+    /// Built by taking each empty description out of a format 5 body, so the
+    /// test follows the layout rather than restating it.
+    fn format_4_body(store: &Store) -> Vec<u8> {
+        assert!(store.groups.iter().all(|g| g.description.is_empty()));
+        let body = store.encode();
+        let mut out = body[..20].to_vec();
+        let mut at = 20;
+        for group in &store.groups {
+            // rid, unix_id, then the name's length and bytes.
+            let record = 4 + 4 + 4 + group.name.len();
+            out.extend_from_slice(&body[at..at + record]);
+            assert_eq!(&body[at + record..at + record + 4], &[0, 0, 0, 0], "an empty description");
+            at += record + 4;
+        }
+        out.extend_from_slice(&body[at..]);
+        out
+    }
+
+    /// Format 4 had no group descriptions. Its store loads with each one
+    /// empty, and is written as format 5 from then on.
+    #[test]
+    fn a_format_4_store_loads_and_is_written_as_format_5() {
+        let mut store = seeded();
+        store.create_group("developers", "").unwrap();
+        store
+            .add_membership("jack", store.resolve_group("developers").unwrap())
+            .unwrap();
+        let old = format_4_body(&store);
+
+        let loaded = Store::decode(4, &old).expect("a format 4 store must load");
+        assert_eq!(loaded.group_summaries().unwrap()[0].description, "");
+        assert_eq!(loaded.group_summaries().unwrap()[0].members, 1);
+        assert_eq!(loaded.encode(), store.encode(), "written again, it is format 5");
+        assert!(Store::decode(4, &store.encode()).is_err(), "a format 5 body is not format 4's");
+    }
+
+    #[test]
+    fn a_group_s_description_is_kept_checked_and_cleared() {
+        let mut store = seeded();
+        store.create_group("developers", "  Builds the software  ").unwrap();
+        let body = store.encode();
+        let back = Store::decode(codec::VERSION, &body).unwrap();
+        assert_eq!(back.group_summaries().unwrap()[0].description, "Builds the software");
+
+        assert!(!store.describe_group("developers", "Builds the software").unwrap());
+        assert!(store.describe_group("DEVELOPERS", "").unwrap());
+        assert_eq!(store.group_summaries().unwrap()[0].description, "");
+        assert!(matches!(store.describe_group("developers", "two\nlines"), Err(StoreError::Invalid(_))));
+        let long = "x".repeat(MAX_DESCRIPTION_BYTES + 1);
+        assert!(matches!(store.create_group("ops", &long), Err(StoreError::Invalid(_))));
+        assert!(matches!(store.describe_group("nonesuch", ""), Err(StoreError::NoSuchGroup(_))));
+    }
+
+    #[test]
+    fn a_renamed_group_keeps_its_sid_and_its_members() {
+        let mut store = seeded();
+        store.create_group("developers", "").unwrap();
+        let sid = store.resolve_group("developers").unwrap();
+        store.add_membership("jack", sid).unwrap();
+        store.add(new("dana", vec![]), None).unwrap();
+
+        assert!(store.rename_group("developers", "engineers").unwrap());
+        assert_eq!(store.resolve_group("engineers").unwrap(), sid);
+        assert!(store.record("jack").unwrap().groups.iter().any(|g| g.name.as_deref() == Some("engineers")));
+        assert!(matches!(store.resolve_group("developers"), Err(StoreError::NoSuchGroup(_))));
+
+        // Its own name in another case is a rename; anyone else's is not.
+        assert!(!store.rename_group("engineers", "engineers").unwrap());
+        assert!(store.rename_group("engineers", "Engineers").unwrap());
+        assert!(matches!(store.rename_group("Engineers", "DANA"), Err(StoreError::Exists(_))));
+        assert!(matches!(store.rename_group("Engineers", "Users"), Err(StoreError::Invalid(_))));
+        assert!(matches!(store.rename_group("nonesuch", "x"), Err(StoreError::NoSuchGroup(_))));
     }
 
     #[test]

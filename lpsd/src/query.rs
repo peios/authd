@@ -186,13 +186,16 @@ fn principal_entry(store: &Store, record: &Record, fields: Fields) -> psi::Query
         // would make two components' defaults able to disagree.
         values.push(Value::LogonTypes(record.permitted_logon_types));
     }
-    // A principal is not a group, so its membership list is not absent for a
-    // reason worth explaining — it is a question that does not apply.
-    if fields.contains(Fields::MEMBERS) {
-        withheld.push(Withheld {
-            field: Fields::MEMBERS,
-            reason: WithheldReason::Absent,
-        });
+    // A principal is not a group, so its membership list and its description
+    // are not absent for a reason worth explaining — they are questions that
+    // do not apply.
+    for field in [Fields::MEMBERS, Fields::DESCRIPTION] {
+        if fields.contains(field) {
+            withheld.push(Withheld {
+                field,
+                reason: WithheldReason::Absent,
+            });
+        }
     }
 
     let _ = store;
@@ -248,6 +251,7 @@ fn group_entry(store: &Store, record: &GroupRecord, fields: Fields) -> psi::Quer
         Fields::GROUPS,
         Fields::CLAIMS,
         Fields::ENABLED,
+        Fields::LOGON_TYPES,
     ] {
         if fields.contains(field) {
             withheld.push(Withheld {
@@ -255,6 +259,11 @@ fn group_entry(store: &Store, record: &GroupRecord, fields: Fields) -> psi::Quer
                 reason: WithheldReason::Absent,
             });
         }
+    }
+    // Last, as the highest bit. Empty where nobody gave one, which is still
+    // an answer: the group has no description.
+    if fields.contains(Fields::DESCRIPTION) {
+        values.push(Value::Description(record.description.clone()));
     }
 
     psi::QueryEntry {
@@ -547,7 +556,7 @@ mod tests {
                 Some(b"password"),
             )
             .expect("must add");
-        store.create_group("developers").expect("must create");
+        store.create_group("developers", "").expect("must create");
         store
     }
 
@@ -565,6 +574,21 @@ mod tests {
             .into_iter()
             .next()
             .expect("one key, one result")
+    }
+
+    /// A group answers its description, empty or not, after its other values;
+    /// a principal has none.
+    #[test]
+    fn a_group_is_described_and_a_principal_is_not() {
+        let mut store = seeded();
+        store.describe_group("developers", "Builds the software").unwrap();
+        let group = ask(&store, psi::Key::Name("developers".into()), Kind::Group, Fields::UNIX_ID | Fields::DESCRIPTION);
+        assert_eq!(group.values.last(), Some(&Value::Description("Builds the software".into())));
+        assert_eq!(group.values.len(), 2);
+
+        let jack = ask(&store, psi::Key::Name("jack".into()), Kind::Principal, Fields::DESCRIPTION);
+        assert!(jack.values.is_empty());
+        assert_eq!(jack.withheld, vec![Withheld { field: Fields::DESCRIPTION, reason: WithheldReason::Absent }]);
     }
 
     #[test]
@@ -960,7 +984,7 @@ mod tests {
         let mut expected: Vec<String> = Vec::new();
         for i in 0..(PAGE_ENTRIES + 6) {
             let name = format!("grp{i:03}");
-            store.create_group(&name).expect("must create");
+            store.create_group(&name, "").expect("must create");
             expected.push(name);
         }
         // Skew *every* group's unix_id far above its RID, rather than guessing

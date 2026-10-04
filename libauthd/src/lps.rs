@@ -94,6 +94,8 @@ pub const MSG_KEY_REMOVE: u16 = 0x0013;
 pub const MSG_CREDENTIAL_POLICY: u16 = 0x0014;
 pub const MSG_RENAME: u16 = 0x0015;
 pub const MSG_SET_LOGON_TYPES: u16 = 0x0016;
+pub const MSG_GROUP_RENAME: u16 = 0x0017;
+pub const MSG_GROUP_DESCRIBE: u16 = 0x0018;
 pub const MSG_KEYS: u16 = 0x8008;
 // lpsd -> client. The high bit marks a message sent by the authority, as in
 // PGSS Logon and PSI — here lpsd is the authority for its own store.
@@ -141,7 +143,9 @@ pub fn reply_to(request: u16) -> Option<u16> {
         | MSG_SET_CLAIM
         | MSG_REMOVE_CLAIM
         | MSG_RENAME
-        | MSG_SET_LOGON_TYPES => MSG_DONE,
+        | MSG_SET_LOGON_TYPES
+        | MSG_GROUP_RENAME
+        | MSG_GROUP_DESCRIBE => MSG_DONE,
         _ => return None,
     })
 }
@@ -171,6 +175,8 @@ pub const REQUEST_TYPES: &[u16] = &[
     MSG_REMOVE_CLAIM,
     MSG_RENAME,
     MSG_SET_LOGON_TYPES,
+    MSG_GROUP_RENAME,
+    MSG_GROUP_DESCRIBE,
 ];
 
 /// Matches the store's own ceiling on a principal name. A protocol that could
@@ -292,7 +298,27 @@ pub struct GroupSummary {
     pub unix_id: u32,
     pub sid: Vec<u8>,
     pub members: u32,
+    /// Empty where it has none, or the daemon did not say.
+    pub description: String,
 }
+
+/// Create a local group.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct NewGroup {
+    pub name: String,
+    /// Empty for none.
+    pub description: String,
+}
+
+/// Set a local group's description; empty clears it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Describe {
+    pub name: String,
+    pub description: String,
+}
+
+/// The most a group's description may hold.
+pub const MAX_DESCRIPTION_BYTES: usize = crate::wire::MAX_DESCRIPTION_BYTES;
 
 /// One principal in full, as [`MSG_SHOW`] reports it.
 ///
@@ -892,6 +918,7 @@ pub fn encode_groups(groups: &[GroupSummary]) -> Result<Vec<u8>, WireError> {
         w.u32(group.unix_id);
         w.bytes(&group.sid, frame::MAX_SID_BYTES)?;
         w.u32(group.members);
+        w.string(&group.description, MAX_DESCRIPTION_BYTES)?;
         w.close(entry);
     }
     w.close(body);
@@ -907,6 +934,11 @@ pub fn decode_groups(buf: &[u8]) -> Result<Vec<GroupSummary>, WireError> {
             unix_id: entry.u32()?,
             sid: entry.bytes(frame::MAX_SID_BYTES)?.to_vec(),
             members: entry.u32()?,
+            description: if entry.at_end() {
+                String::new()
+            } else {
+                entry.string(MAX_DESCRIPTION_BYTES)?.to_owned()
+            },
         })
     })
 }
@@ -923,12 +955,59 @@ pub fn decode_group_list(buf: &[u8]) -> Result<(), WireError> {
     Ok(())
 }
 
-pub fn encode_group_create(named: &Named) -> Result<Vec<u8>, WireError> {
-    encode_named(MSG_GROUP_CREATE, named)
+pub fn encode_group_create(group: &NewGroup) -> Result<Vec<u8>, WireError> {
+    let mut w = begin(MSG_GROUP_CREATE);
+    let body = w.open();
+    w.string(&group.name, MAX_NAME_BYTES)?;
+    w.string(&group.description, MAX_DESCRIPTION_BYTES)?;
+    w.close(body);
+    w.finish()
 }
 
-pub fn decode_group_create(buf: &[u8]) -> Result<Named, WireError> {
-    decode_named(buf, MSG_GROUP_CREATE)
+pub fn decode_group_create(buf: &[u8]) -> Result<NewGroup, WireError> {
+    let mut b = open_body(buf, MSG_GROUP_CREATE)?;
+    let name = b.string(MAX_NAME_BYTES)?.to_owned();
+    // Absent from a client predating it: no description.
+    let description = if b.at_end() {
+        String::new()
+    } else {
+        b.string(MAX_DESCRIPTION_BYTES)?.to_owned()
+    };
+    Ok(NewGroup { name, description })
+}
+
+pub fn encode_group_rename(rename: &Rename) -> Result<Vec<u8>, WireError> {
+    let mut w = begin(MSG_GROUP_RENAME);
+    let body = w.open();
+    w.string(&rename.name, MAX_NAME_BYTES)?;
+    w.string(&rename.new_name, MAX_NAME_BYTES)?;
+    w.close(body);
+    w.finish()
+}
+
+pub fn decode_group_rename(buf: &[u8]) -> Result<Rename, WireError> {
+    let mut b = open_body(buf, MSG_GROUP_RENAME)?;
+    Ok(Rename {
+        name: b.string(MAX_NAME_BYTES)?.to_owned(),
+        new_name: b.string(MAX_NAME_BYTES)?.to_owned(),
+    })
+}
+
+pub fn encode_group_describe(describe: &Describe) -> Result<Vec<u8>, WireError> {
+    let mut w = begin(MSG_GROUP_DESCRIBE);
+    let body = w.open();
+    w.string(&describe.name, MAX_NAME_BYTES)?;
+    w.string(&describe.description, MAX_DESCRIPTION_BYTES)?;
+    w.close(body);
+    w.finish()
+}
+
+pub fn decode_group_describe(buf: &[u8]) -> Result<Describe, WireError> {
+    let mut b = open_body(buf, MSG_GROUP_DESCRIBE)?;
+    Ok(Describe {
+        name: b.string(MAX_NAME_BYTES)?.to_owned(),
+        description: b.string(MAX_DESCRIPTION_BYTES)?.to_owned(),
+    })
 }
 
 pub fn encode_group_delete(named: &Named) -> Result<Vec<u8>, WireError> {
@@ -1467,21 +1546,37 @@ mod tests {
             unix_id: 1_000_002,
             sid: sid(),
             members: 3,
+            description: "Builds the software".into(),
         }];
         let bytes = encode_groups(&groups).unwrap();
         assert_eq!(decode_groups(&bytes).unwrap(), groups);
 
         decode_group_list(&encode_group_list().unwrap()).unwrap();
+        let group = NewGroup {
+            name: "developers".into(),
+            description: "Builds the software".into(),
+        };
         assert_eq!(
-            decode_group_create(
-                &encode_group_create(&Named {
-                    name: "developers".into()
-                })
-                .unwrap()
-            )
-            .unwrap()
-            .name,
-            "developers"
+            decode_group_create(&encode_group_create(&group).unwrap()).unwrap(),
+            group
+        );
+        let rename = Rename {
+            name: "developers".into(),
+            new_name: "engineers".into(),
+        };
+        assert_eq!(
+            decode_group_rename(&encode_group_rename(&rename).unwrap()).unwrap(),
+            rename
+        );
+        // A rename of a group is not a rename of a principal.
+        assert!(decode_rename(&encode_group_rename(&rename).unwrap()).is_err());
+        let describe = Describe {
+            name: "developers".into(),
+            description: String::new(),
+        };
+        assert_eq!(
+            decode_group_describe(&encode_group_describe(&describe).unwrap()).unwrap(),
+            describe
         );
         assert_eq!(
             decode_group_delete(
@@ -1494,6 +1589,33 @@ mod tests {
             .name,
             "developers"
         );
+    }
+
+    /// A client and a daemon from before descriptions: a create with only a
+    /// name, and a listing entry with no description, both still decode.
+    #[test]
+    fn group_messages_from_before_descriptions_decode() {
+        let old = encode_named(
+            MSG_GROUP_CREATE,
+            &Named {
+                name: "developers".into(),
+            },
+        )
+        .unwrap();
+        assert_eq!(decode_group_create(&old).unwrap().description, "");
+
+        let mut w = begin(MSG_GROUPS);
+        let body = w.open();
+        w.count(1, MAX_GROUP_OBJECTS).unwrap();
+        let entry = w.open();
+        w.string("developers", MAX_NAME_BYTES).unwrap();
+        w.u32(1001);
+        w.u32(1001);
+        w.bytes(&sid(), frame::MAX_SID_BYTES).unwrap();
+        w.u32(0);
+        w.close(entry);
+        w.close(body);
+        assert_eq!(decode_groups(&w.finish().unwrap()).unwrap()[0].description, "");
     }
 
     /// Clearing a display name and leaving it alone are different operations,
@@ -1751,11 +1873,23 @@ mod tests {
                 unix_id: 1_000_002,
                 sid: sid(),
                 members: 1,
+                description: "Builds the software".into(),
             }])
             .unwrap(),
             encode_group_list().unwrap(),
-            encode_group_create(&Named {
+            encode_group_create(&NewGroup {
                 name: "developers".into(),
+                description: "Builds the software".into(),
+            })
+            .unwrap(),
+            encode_group_rename(&Rename {
+                name: "developers".into(),
+                new_name: "engineers".into(),
+            })
+            .unwrap(),
+            encode_group_describe(&Describe {
+                name: "developers".into(),
+                description: "Builds the software".into(),
             })
             .unwrap(),
             encode_group_delete(&Named {
@@ -1820,6 +1954,10 @@ mod tests {
                 let _ = decode_add(partial);
                 let _ = decode_rename(partial);
                 let _ = decode_set_logon_types(partial);
+                let _ = decode_groups(partial);
+                let _ = decode_group_create(partial);
+                let _ = decode_group_rename(partial);
+                let _ = decode_group_describe(partial);
             }
         }
     }

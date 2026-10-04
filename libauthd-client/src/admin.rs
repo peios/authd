@@ -207,9 +207,20 @@ impl Admin {
         self.ask(lps::encode_group_list(), lps::decode_groups)
     }
 
-    /// Creates a local group, and answers its RID.
-    pub fn group_create(&self, name: &str) -> Result<u32, Refusal> {
-        self.ask(lps::encode_group_create(&named(name)), lps::decode_created)
+    /// Creates a local group, and answers its RID. An empty description is
+    /// none.
+    pub fn group_create(&self, name: &str, description: &str) -> Result<u32, Refusal> {
+        self.ask(lps::encode_group_create(&lps::NewGroup { name: name.into(), description: description.into() }), lps::decode_created)
+    }
+
+    /// Renames a local group. Its SID, and so every membership, stays.
+    pub fn group_rename(&self, name: &str, new_name: &str) -> Result<(), Refusal> {
+        self.done(lps::encode_group_rename(&lps::Rename { name: name.into(), new_name: new_name.into() }))
+    }
+
+    /// Sets a local group's description; empty clears it.
+    pub fn group_describe(&self, name: &str, description: &str) -> Result<(), Refusal> {
+        self.done(lps::encode_group_describe(&lps::Describe { name: name.into(), description: description.into() }))
     }
 
     pub fn group_delete(&self, name: &str) -> Result<(), Refusal> {

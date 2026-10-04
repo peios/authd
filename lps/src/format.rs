@@ -97,18 +97,22 @@ pub fn groups(groups: &[GroupSummary]) -> String {
         .unwrap_or(0)
         .max("NAME".len());
 
-    let mut out = format!(
-        "{:<width$}  {:>6}  {:>8}  {:>7}  {}\n",
-        "NAME", "RID", "GID", "MEMBERS", "SID"
-    );
+    // The description goes last, where a long one can run on.
+    let sid_width = groups.iter().map(|group| sid(&group.sid).len()).max().unwrap_or(0);
+    let described = groups.iter().any(|group| !group.description.is_empty());
+    let line = |name: &str, rid: &str, gid: &str, members: &str, at: &str, description: &str| {
+        let line = format!("{name:<width$}  {rid:>6}  {gid:>8}  {members:>7}  {at:<sid_width$}  {description}");
+        format!("{}\n", if described { line.as_str() } else { line.trim_end() })
+    };
+    let mut out = line("NAME", "RID", "GID", "MEMBERS", "SID", if described { "DESCRIPTION" } else { "" });
     for group in groups {
-        out.push_str(&format!(
-            "{:<width$}  {:>6}  {:>8}  {:>7}  {}\n",
-            group.name,
-            group.rid,
-            unix_id(group.unix_id),
-            group.members,
-            sid(&group.sid),
+        out.push_str(&line(
+            &group.name,
+            &group.rid.to_string(),
+            &unix_id(group.unix_id),
+            &group.members.to_string(),
+            &sid(&group.sid),
+            &group.description,
         ));
     }
     out
@@ -380,6 +384,26 @@ mod tests {
         assert!(rendered.contains("/home/jack"), "{rendered}");
         assert!(rendered.contains("/bin/sh"), "{rendered}");
         assert!(rendered.contains("Jack Palfrey"), "{rendered}");
+    }
+
+    #[test]
+    fn a_group_s_description_is_its_last_column_when_any_has_one() {
+        let developers = GroupSummary {
+            name: "developers".into(),
+            rid: 1001,
+            unix_id: 1_001_001,
+            sid: jack(),
+            members: 2,
+            description: String::new(),
+        };
+        let plain = groups(std::slice::from_ref(&developers));
+        assert!(!plain.contains("DESCRIPTION"), "{plain}");
+        assert!(plain.lines().all(|line| line == line.trim_end()), "{plain:?}");
+
+        let described = groups(&[developers, GroupSummary { name: "ops".into(), description: "Keeps it running".into(), ..GroupSummary::default() }]);
+        let lines: Vec<&str> = described.lines().collect();
+        assert!(lines[0].ends_with("DESCRIPTION"), "{described}");
+        assert!(lines[2].ends_with("Keeps it running"), "{described}");
     }
 
     #[test]

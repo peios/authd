@@ -374,6 +374,8 @@ fn describe(msg_type: u16) -> &'static str {
         lps::MSG_CREDENTIAL_POLICY => "credential-policy",
         lps::MSG_RENAME => "rename",
         lps::MSG_SET_LOGON_TYPES => "set-logon-types",
+        lps::MSG_GROUP_RENAME => "group-rename",
+        lps::MSG_GROUP_DESCRIBE => "group-describe",
         _ => "an unknown request",
     }
 }
@@ -570,15 +572,28 @@ fn dispatch(
                     unix_id: effective(group.unix_id),
                     sid: group.sid.as_ref().as_bytes().to_vec(),
                     members: group.members as u32,
+                    description: group.description,
                 })
                 .collect::<Vec<_>>();
             Ok((Changed::No, encoded(lps::encode_groups(&groups))?))
         }
 
         lps::MSG_GROUP_CREATE => {
-            let named = request(lps::decode_group_create(buf))?;
-            let rid = store.create_group(&named.name)?;
+            let group = request(lps::decode_group_create(buf))?;
+            let rid = store.create_group(&group.name, &group.description)?;
             Ok((Changed::Yes, encoded(lps::encode_created(rid))?))
+        }
+
+        lps::MSG_GROUP_RENAME => {
+            let rename = request(lps::decode_group_rename(buf))?;
+            let changed = store.rename_group(&rename.name, &rename.new_name)?;
+            Ok((changed_flag(changed), encoded(lps::encode_done())?))
+        }
+
+        lps::MSG_GROUP_DESCRIBE => {
+            let describe = request(lps::decode_group_describe(buf))?;
+            let changed = store.describe_group(&describe.name, &describe.description)?;
+            Ok((changed_flag(changed), encoded(lps::encode_done())?))
         }
 
         lps::MSG_GROUP_DELETE => {
@@ -709,7 +724,7 @@ mod tests {
     #[test]
     fn an_add_carries_the_whole_profile() {
         let mut store = Store::provision().unwrap();
-        store.create_group("developers").unwrap();
+        store.create_group("developers", "").unwrap();
         add(
             &mut store,
             &lps::Add {
