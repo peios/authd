@@ -53,11 +53,12 @@ use std::time::{Duration, Instant};
 
 use libauthd::transport::{recv_message, send_message, send_message_with_fd};
 use libauthd::wire::{
-    self, AccessDenied, AccessGranted, CredentialChangeStart, CredentialRequest,
-    CredentialResponse, CredentialType, Denial, LogonStart, LogonType, MSG_CREDENTIAL_CHANGE_START,
-    MSG_CREDENTIAL_RESPONSE, MSG_LOGON_START, MSG_SERVICE_ATTEST, MSG_SESSION_END,
-    MSG_SESSION_END_QUERY, ServiceAttest, SessionEnd, SessionEndQuery,
-    decode_credential_change_start, decode_credential_response, decode_header, decode_logon_start,
+    self, AccessDenied, AccessGranted, CredentialChangeStart, CredentialEnrollStart,
+    CredentialRequest, CredentialResponse, CredentialType, Denial, LogonStart, LogonType,
+    MSG_CREDENTIAL_CHANGE_START, MSG_CREDENTIAL_ENROLL_START, MSG_CREDENTIAL_RESPONSE,
+    MSG_LOGON_START, MSG_SERVICE_ATTEST, MSG_SESSION_END, MSG_SESSION_END_QUERY, ServiceAttest,
+    SessionEnd, SessionEndQuery, decode_credential_change_start, decode_credential_enroll_start,
+    decode_credential_response, decode_header, decode_logon_start,
     decode_service_attest, decode_session_end, decode_session_end_query, encode_access_denied,
     encode_access_granted, encode_credential_request,
 };
@@ -165,6 +166,11 @@ pub(crate) enum Purpose {
     /// A change of the caller's own credential (PGSS §2.20), which ends in
     /// [`Ended::Changed`] and nothing else.
     Change,
+    /// Adding a credential of the caller's own, or removing one (PGSS §2.23).
+    /// Ends as a change does — and is the one purpose a source may refuse
+    /// with `CredentialRejected`, since only an enrolment offers material in
+    /// its opening for a source to reject.
+    Enroll,
 }
 
 impl Purpose {
@@ -172,8 +178,15 @@ impl Purpose {
     fn noun(self) -> &'static str {
         match self {
             Self::Logon => "logon",
-            Self::Change => "change",
+            // To the principal, adding or removing a key is changing what
+            // they sign in with, and the words say so.
+            Self::Change | Self::Enroll => "change",
         }
+    }
+
+    /// Whether this conversation may end in [`Ended::Changed`].
+    fn changes(self) -> bool {
+        matches!(self, Self::Change | Self::Enroll)
     }
 }
 
@@ -182,7 +195,8 @@ impl Purpose {
 pub(crate) enum Ended {
     /// The source said who the principal is. Only ever for [`Purpose::Logon`].
     Asserted(libauthd::psi::Assertion),
-    /// The source changed the credential. Only ever for [`Purpose::Change`].
+    /// The source changed the credential. Only ever for [`Purpose::Change`]
+    /// and [`Purpose::Enroll`].
     Changed,
 }
 
@@ -261,6 +275,11 @@ fn run(registry: &Registry, stream: &UnixStream, deadline: Instant) -> io::Resul
         // attestation.
         Ok(Opening::Change(start)) => {
             return crate::change::serve(registry, stream, &peer, &start, deadline);
+        }
+        // Adding or removing a credential of one's own: the change's sibling
+        // (§2.23), gated and relayed the same way, on the same budget.
+        Ok(Opening::Enroll(start)) => {
+            return crate::change::serve_enroll(registry, stream, &peer, &start, deadline);
         }
         // Ending a session, or asking whether one may, is a whole request in
         // one message, and neither is a logon: who may is decided in
@@ -546,7 +565,7 @@ pub(crate) fn relay(
 
             Inbound::Changed => {
                 conversation.finished();
-                if purpose != Purpose::Change {
+                if !purpose.changes() {
                     log::error(format_args!(
                         "source {} answered a {noun} with a credential change",
                         conversation.source_name()
@@ -569,6 +588,22 @@ pub(crate) fn relay(
                 if refusal.denial == Denial::NoSuchSession {
                     log::error(format_args!(
                         "source {} refused a {noun} with NoSuchSession, which no source may send",
+                        conversation.source_name()
+                    ));
+                    return denied(
+                        stream,
+                        Denial::Internal,
+                        &format!("The authority could not complete the {noun}."),
+                    );
+                }
+                // Only an enrolment offers material a source could reject
+                // (PGSS §2.23), and only its client has been written to
+                // expect the code. Anywhere else it is the same kind of
+                // mistake as the one above.
+                if refusal.denial == Denial::CredentialRejected && purpose != Purpose::Enroll {
+                    log::error(format_args!(
+                        "source {} refused a {noun} with CredentialRejected, which answers only \
+                         an enrolment",
                         conversation.source_name()
                     ));
                     return denied(
@@ -1151,6 +1186,10 @@ enum Opening {
     /// A change of the caller's own credential, which will exchange
     /// credentials and mint nothing. See [`crate::change`].
     Change(CredentialChangeStart),
+    /// Adding a credential to the caller's own principal, or removing one,
+    /// which will prove the current credential and mint nothing. See
+    /// [`crate::change`].
+    Enroll(CredentialEnrollStart),
     /// Ending a logon session. See [`crate::end`].
     End(SessionEnd),
     /// Asking whether a logon session may be ended. See [`crate::end`].
@@ -1197,6 +1236,9 @@ fn read_opening(stream: &UnixStream) -> Result<Opening, (Denial, &'static str)> 
         MSG_CREDENTIAL_CHANGE_START => decode_credential_change_start(received.expose())
             .map(Opening::Change)
             .map_err(|_| (Denial::MalformedRequest, "Malformed CredentialChangeStart.")),
+        MSG_CREDENTIAL_ENROLL_START => decode_credential_enroll_start(received.expose())
+            .map(Opening::Enroll)
+            .map_err(|_| (Denial::MalformedRequest, "Malformed CredentialEnrollStart.")),
         MSG_SESSION_END => decode_session_end(received.expose())
             .map(Opening::End)
             .map_err(|_| (Denial::MalformedRequest, "Malformed SessionEnd.")),
@@ -1205,8 +1247,8 @@ fn read_opening(stream: &UnixStream) -> Result<Opening, (Denial, &'static str)> 
             .map_err(|_| (Denial::MalformedRequest, "Malformed SessionEndQuery.")),
         _ => Err((
             Denial::MalformedRequest,
-            "A connection must open with LogonStart, CredentialChangeStart, ServiceAttest, \
-             SessionEnd or SessionEndQuery.",
+            "A connection must open with LogonStart, CredentialChangeStart, \
+             CredentialEnrollStart, ServiceAttest, SessionEnd or SessionEndQuery.",
         )),
     }
 }
@@ -1522,6 +1564,31 @@ mod tests {
         read_opening(&server)
     }
 
+    /// An enrolment opens as itself, and a malformed one is refused as
+    /// malformed rather than read as something else.
+    #[test]
+    fn an_enrolment_opens_as_itself() {
+        let start = libauthd::wire::CredentialEnrollStart {
+            supported_credential_types: vec![CredentialType::Password],
+            action: libauthd::wire::EnrollAction::Remove,
+            credential_type: CredentialType::SshPublicKey,
+            material: "SHA256:abc".into(),
+        };
+        let bytes = wire::encode_credential_enroll_start(&start).unwrap();
+        assert!(matches!(opening_of(&bytes), Ok(Opening::Enroll(ref s)) if *s == start));
+
+        let mut truncated = bytes.clone();
+        // Drop the material's last byte, fixing up the lengths, so the string
+        // runs past its body.
+        truncated.truncate(truncated.len() - 1);
+        let total = truncated.len() as u32;
+        truncated[8..12].copy_from_slice(&total.to_le_bytes());
+        assert!(matches!(
+            opening_of(&truncated),
+            Err((Denial::MalformedRequest, "Malformed CredentialEnrollStart."))
+        ));
+    }
+
     /// Each session request opens as itself, and nothing else does.
     #[test]
     fn a_session_request_opens_as_itself() {
@@ -1577,6 +1644,9 @@ mod tests {
     fn a_purpose_describes_itself_to_the_principal() {
         assert_eq!(Purpose::Logon.noun(), "logon");
         assert_eq!(Purpose::Change.noun(), "change");
+        assert_eq!(Purpose::Enroll.noun(), "change");
+        assert!(Purpose::Change.changes() && Purpose::Enroll.changes());
+        assert!(!Purpose::Logon.changes());
     }
 
     fn sid(text: &str) -> Sid {

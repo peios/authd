@@ -2128,3 +2128,276 @@ mod key_tests {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// The self socket (PSPU §10.11)
+//
+// A principal reading their own account and setting their own display name, on
+// `/run/lpsd/self.sock`. PLPS's framing, magic and replies (`Done`, `Failed`),
+// with requests in a range of their own that neither socket accepts from the
+// other. No request here names a principal: the subject is always the
+// connected peer's token's user, which is what lets the socket admit every
+// authenticated principal.
+// ---------------------------------------------------------------------------
+
+/// Read the caller's own account. Empty body. Answered with [`MSG_SELF`].
+pub const MSG_SHOW_SELF: u16 = 0x0040;
+/// Set the caller's own display name. Answered with [`MSG_DONE`].
+pub const MSG_SET_DISPLAY_NAME: u16 = 0x0041;
+/// The caller's own account.
+pub const MSG_SELF: u16 = 0x8040;
+
+/// The largest request the self socket reads. Its requests are an empty body
+/// and a display name, so a few kilobytes is room to spare — and a ceiling
+/// this far under [`MAX_MESSAGE_BYTES`] is what keeps a socket every
+/// principal can reach from being a way to make lpsd hold megabytes.
+pub const MAX_SELF_REQUEST_BYTES: usize = 4096;
+
+/// The framing the self socket reads requests with: PLPS's, with
+/// [`MAX_SELF_REQUEST_BYTES`] as its ceiling.
+pub const SELF_REQUEST_FRAMING: Framing = Framing {
+    max_message_bytes: MAX_SELF_REQUEST_BYTES,
+    ..FRAMING
+};
+
+/// The longest key algorithm name carried.
+pub const MAX_ALGORITHM_BYTES: usize = 64;
+
+/// Every request type the self socket defines.
+pub const SELF_REQUEST_TYPES: &[u16] = &[MSG_SHOW_SELF, MSG_SET_DISPLAY_NAME];
+
+/// Which reply answers which self-socket request, on success. [`reply_to`]'s
+/// counterpart, and disjoint from it: a request of either socket is `None`
+/// to the other's table.
+pub fn self_reply_to(request: u16) -> Option<u16> {
+    Some(match request {
+        MSG_SHOW_SELF => MSG_SELF,
+        MSG_SET_DISPLAY_NAME => MSG_DONE,
+        _ => return None,
+    })
+}
+
+/// One of the caller's SSH public keys.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OwnKey {
+    /// The store daemon's record id, as `KeyList` gives it (§10.8).
+    pub id: [u8; 16],
+    /// As `ssh-keygen -l` writes one: `SHA256:` and unpadded base64. What a
+    /// removal through PGSS §2.23 names the key by.
+    pub fingerprint: String,
+    /// The key's type as OpenSSH names it, such as `ssh-ed25519`.
+    pub algorithm: String,
+    pub label: String,
+    /// Seconds since the Unix epoch.
+    pub created: u64,
+}
+
+/// The caller's own account, as [`MSG_SELF`] carries it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OwnAccount {
+    pub name: String,
+    /// Binary SID.
+    pub sid: Vec<u8>,
+    /// Empty when unset.
+    pub display_name: String,
+    pub enabled: bool,
+    pub policy: Policy,
+    /// Whether the account has a password at all. The policy may name one it
+    /// does not have, and a person adding a key must prove a password.
+    pub has_password: bool,
+    pub keys: Vec<OwnKey>,
+}
+
+/// The body of [`MSG_SET_DISPLAY_NAME`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SetDisplayName {
+    /// Empty clears it.
+    pub display_name: String,
+}
+
+pub fn encode_show_self() -> Result<Vec<u8>, WireError> {
+    encode_empty(MSG_SHOW_SELF)
+}
+
+pub fn decode_show_self(buf: &[u8]) -> Result<(), WireError> {
+    decode_empty(buf, MSG_SHOW_SELF)
+}
+
+pub fn encode_set_display_name(set: &SetDisplayName) -> Result<Vec<u8>, WireError> {
+    let mut w = begin(MSG_SET_DISPLAY_NAME);
+    let body = w.open();
+    w.string(&set.display_name, MAX_DISPLAY_NAME_BYTES)?;
+    w.close(body);
+    w.finish()
+}
+
+pub fn decode_set_display_name(buf: &[u8]) -> Result<SetDisplayName, WireError> {
+    let mut b = open_body(buf, MSG_SET_DISPLAY_NAME)?;
+    Ok(SetDisplayName {
+        display_name: b.string(MAX_DISPLAY_NAME_BYTES)?.to_owned(),
+    })
+}
+
+pub fn encode_self(account: &OwnAccount) -> Result<Vec<u8>, WireError> {
+    let mut w = begin(MSG_SELF);
+    let body = w.open();
+    w.string(&account.name, MAX_NAME_BYTES)?;
+    w.bytes(&account.sid, frame::MAX_SID_BYTES)?;
+    w.string(&account.display_name, MAX_DISPLAY_NAME_BYTES)?;
+    w.u8(u8::from(account.enabled));
+    w.u8(account.policy as u8);
+    w.u8(u8::from(account.has_password));
+    w.count(account.keys.len(), crate::credential::MAX_KEYS)?;
+    for key in &account.keys {
+        let at = w.open();
+        w.bytes(&key.id, 16)?;
+        w.string(&key.fingerprint, 128)?;
+        w.string(&key.algorithm, MAX_ALGORITHM_BYTES)?;
+        w.string(&key.label, crate::credential::MAX_LABEL)?;
+        w.u64(key.created);
+        w.close(at);
+    }
+    w.close(body);
+    w.finish()
+}
+
+pub fn decode_self(buf: &[u8]) -> Result<OwnAccount, WireError> {
+    let mut b = open_body(buf, MSG_SELF)?;
+    let name = b.string(MAX_NAME_BYTES)?.to_owned();
+    let sid = b.bytes(frame::MAX_SID_BYTES)?.to_vec();
+    let display_name = b.string(MAX_DISPLAY_NAME_BYTES)?.to_owned();
+    let enabled = b.u8()? != 0;
+    let policy = Policy::from_u8(b.u8()?).ok_or(WireError::UnknownValue)?;
+    let has_password = b.u8()? != 0;
+    let keys = b.array(crate::credential::MAX_KEYS, |k| {
+        Ok(OwnKey {
+            id: k
+                .bytes(16)?
+                .try_into()
+                .map_err(|_| WireError::UnknownValue)?,
+            fingerprint: k.string(128)?.to_owned(),
+            algorithm: k.string(MAX_ALGORITHM_BYTES)?.to_owned(),
+            label: k.string(crate::credential::MAX_LABEL)?.to_owned(),
+            created: k.u64()?,
+        })
+    })?;
+    Ok(OwnAccount {
+        name,
+        sid,
+        display_name,
+        enabled,
+        policy,
+        has_password,
+        keys,
+    })
+}
+
+#[cfg(test)]
+mod self_tests {
+    use super::*;
+
+    fn account() -> OwnAccount {
+        OwnAccount {
+            name: "alice".into(),
+            sid: vec![1, 5, 0, 0, 0, 0, 0, 5, 21, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0, 3, 0, 0, 0, 232, 3, 0, 0],
+            display_name: "Alice Liddell".into(),
+            enabled: true,
+            policy: Policy::PasswordOrKey,
+            has_password: true,
+            keys: vec![OwnKey {
+                id: [7; 16],
+                fingerprint: "SHA256:uNiVztksCsDhcc0u9e8BujQXVUpKZIDTMczCvj3tD2s".into(),
+                algorithm: "ssh-ed25519".into(),
+                label: "laptop".into(),
+                created: 1_790_000_000,
+            }],
+        }
+    }
+
+    #[test]
+    fn self_messages_round_trip() {
+        assert_eq!(decode_self(&encode_self(&account()).unwrap()).unwrap(), account());
+        decode_show_self(&encode_show_self().unwrap()).unwrap();
+        let set = SetDisplayName {
+            display_name: "Alice".into(),
+        };
+        assert_eq!(
+            decode_set_display_name(&encode_set_display_name(&set).unwrap()).unwrap(),
+            set
+        );
+    }
+
+    /// A field appended by a newer daemon — to the account, or to one of its
+    /// keys — is stepped over.
+    #[test]
+    fn fields_appended_to_self_are_skipped() {
+        let a = account();
+        let mut w = begin(MSG_SELF);
+        let body = w.open();
+        w.string(&a.name, MAX_NAME_BYTES).unwrap();
+        w.bytes(&a.sid, frame::MAX_SID_BYTES).unwrap();
+        w.string(&a.display_name, MAX_DISPLAY_NAME_BYTES).unwrap();
+        w.u8(1);
+        w.u8(a.policy as u8);
+        w.u8(1);
+        w.count(1, crate::credential::MAX_KEYS).unwrap();
+        let at = w.open();
+        let key = &a.keys[0];
+        w.bytes(&key.id, 16).unwrap();
+        w.string(&key.fingerprint, 128).unwrap();
+        w.string(&key.algorithm, MAX_ALGORITHM_BYTES).unwrap();
+        w.string(&key.label, crate::credential::MAX_LABEL).unwrap();
+        w.u64(key.created);
+        w.u32(0xdead_beef);
+        w.close(at);
+        w.string("appended", 64).unwrap();
+        w.close(body);
+        assert_eq!(decode_self(&w.finish().unwrap()).unwrap(), a);
+    }
+
+    #[test]
+    fn every_truncation_of_a_self_message_errors() {
+        for message in [
+            encode_self(&account()).unwrap(),
+            encode_set_display_name(&SetDisplayName {
+                display_name: "x".into(),
+            })
+            .unwrap(),
+        ] {
+            for cut in 0..message.len() {
+                assert!(decode_self(&message[..cut]).is_err());
+                assert!(decode_set_display_name(&message[..cut]).is_err());
+            }
+        }
+    }
+
+    /// The two sockets' request ranges are disjoint, so neither reply table
+    /// answers the other's requests.
+    #[test]
+    fn the_self_range_is_disjoint_from_the_admin_range() {
+        for request in SELF_REQUEST_TYPES {
+            assert!(!REQUEST_TYPES.contains(request));
+            assert!(reply_to(*request).is_none());
+            assert!(self_reply_to(*request).is_some());
+        }
+        for request in REQUEST_TYPES {
+            assert!(self_reply_to(*request).is_none());
+        }
+    }
+
+    /// The self socket reads requests under its own ceiling, far below the
+    /// admin socket's.
+    #[test]
+    fn a_request_over_the_self_ceiling_is_refused_from_its_header() {
+        let mut header = Vec::new();
+        header.extend_from_slice(&MAGIC);
+        header.extend_from_slice(&VERSION.to_le_bytes());
+        header.extend_from_slice(&MSG_SET_DISPLAY_NAME.to_le_bytes());
+        header.extend_from_slice(&((MAX_SELF_REQUEST_BYTES + 1) as u32).to_le_bytes());
+        assert_eq!(
+            frame::decode_header(&SELF_REQUEST_FRAMING, &header).unwrap_err(),
+            WireError::TooLong
+        );
+        assert!(frame::decode_header(&FRAMING, &header).is_ok());
+    }
+}

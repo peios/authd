@@ -95,7 +95,8 @@ pub use claim::Claim;
 pub use secret::Secret;
 pub use wire::{
     AccessDenied, AccessGranted, Answer, CredentialChangeStart, CredentialChanged,
-    CredentialRequest, CredentialResponse, CredentialType, Denial, IdentifierType, LogonStart,
+    CredentialEnrollStart, CredentialRequest, CredentialResponse, CredentialType, Denial,
+    EnrollAction, IdentifierType, LogonStart,
     LogonType, Message, MessageSeverity, Prompt, SessionEnd, SessionEndAllowed, SessionEndQuery,
     SessionEnded, WireError,
 };
@@ -136,6 +137,17 @@ pub const LPSD_RUN_DIR: &str = "/run/lpsd";
 /// from `psi.sock` in a directory listing — the very confusion the distinct
 /// magic numbers exist to catch.
 pub const LPSD_ADMIN_SOCKET_PATH: &str = "/run/lpsd/admin.sock";
+
+/// The socket a principal reads their own account on, and sets their own
+/// display name (PSPU §10.11).
+///
+/// Separate from [`LPSD_ADMIN_SOCKET_PATH`] because the two admit different
+/// callers and must stay that way: the admin socket admits administrators and
+/// every request it carries names its subject, while this one admits every
+/// authenticated principal and no request on it names anybody — the subject is
+/// always the connected peer. One socket carrying both would make the second
+/// property a check in a dispatch table rather than a fact about the socket.
+pub const LPSD_SELF_SOCKET_PATH: &str = "/run/lpsd/self.sock";
 
 pub mod credential;
 pub mod ssh;
