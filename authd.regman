@@ -108,7 +108,8 @@ Who may end somebody else's logon session — sign them out — as SDDL.
 authd ends a session on request over `/run/logon.sock` (PGSS Logon
 §2.22): it sends every process whose primary token belongs to the session
 `SIGTERM`, then `SIGKILL` after a grace, and the kernel destroys the
-session when its last token goes. Task Manager and `logonse` ask for it.
+session when its last token goes. Programs that sign people out ask
+authd to, rather than doing it themselves.
 
 The descriptor is access-checked for one right, `0x1`, with the caller's
 own token; every generic right maps to it. The default grants it to SYSTEM
