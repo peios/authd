@@ -562,6 +562,21 @@ pub(crate) fn relay(
 
             Inbound::Refuse(refusal) => {
                 conversation.finished();
+                // A code that only answers a request to end a session
+                // (PGSS §2.22), which no source is ever asked. From a source
+                // it is a mistake, and relayed it would tell the client
+                // something about a session nobody mentioned (PSPU §2.13).
+                if refusal.denial == Denial::NoSuchSession {
+                    log::error(format_args!(
+                        "source {} refused a {noun} with NoSuchSession, which no source may send",
+                        conversation.source_name()
+                    ));
+                    return denied(
+                        stream,
+                        Denial::Internal,
+                        &format!("The authority could not complete the {noun}."),
+                    );
+                }
                 log::info(format_args!(
                     "{noun} denied by {}: {:?}",
                     conversation.source_name(),

@@ -465,9 +465,9 @@ impl Live {
         }
     }
 
-    /// One process, if it holds `session`. `Err(())` where it could not be
-    /// examined; `Ok(None)` where it does not hold it, or is gone.
-    fn examine(&self, pid: i32, session: u64) -> Result<Option<Held>, ()> {
+    /// One process, if it holds `session`. `Err` says why it could not be
+    /// examined; `Ok(None)` is where it does not hold it, or is gone.
+    fn examine(&self, pid: i32, session: u64) -> Result<Option<Held>, String> {
         let gone = |error: &io::Error| error.raw_os_error() == Some(libc::ESRCH);
 
         // The pidfd first: everything after it is about this process, and the
@@ -475,7 +475,7 @@ impl Live {
         let pidfd = match pidfd_open(pid) {
             Ok(fd) => fd,
             Err(error) if gone(&error) => return Ok(None),
-            Err(_) => return Err(()),
+            Err(error) => return Err(format!("{pid}: pidfd_open: {error}")),
         };
         // A kernel thread has no token of anyone's, and is nobody's to end.
         if is_kernel_thread(pid) {
@@ -486,9 +486,11 @@ impl Live {
         let token = match Token::open_process(pidfd.as_fd(), TokenAccess::QUERY) {
             Ok(token) => token,
             Err(error) if error.raw_os_error() == Some(libc::ESRCH) => return Ok(None),
-            Err(_) => return Err(()),
+            Err(error) => return Err(format!("{pid}: opening its token: {error}")),
         };
-        let held = token.auth_id().map_err(|_| ())?;
+        let held = token
+            .auth_id()
+            .map_err(|error| format!("{pid}: reading its token: {error}"))?;
         // Dropped here, before anything else: a token held is a reference to
         // the session this is trying to end.
         drop(token);
@@ -500,6 +502,9 @@ impl Processes for Live {
     type Handle = Held;
 
     fn holding(&mut self, session: u64) -> Holders<Held> {
+        // How many unexaminable processes are named in the log, per walk.
+        const MAX_REPORTED: usize = 8;
+        let mut unexaminable = Vec::new();
         let mut holders = Holders {
             found: Vec::new(),
             unexamined: 0,
@@ -523,8 +528,24 @@ impl Processes for Live {
             match self.examine(pid, session) {
                 Ok(Some(held)) => holders.found.push(held),
                 Ok(None) => {}
-                Err(()) => holders.unexamined = holders.unexamined.saturating_add(1),
+                Err(why) => {
+                    holders.unexamined = holders.unexamined.saturating_add(1);
+                    if unexaminable.len() < MAX_REPORTED {
+                        unexaminable.push(why);
+                    }
+                }
             }
+        }
+        // Each of these is counted in `remaining` whatever session it is in,
+        // since authd cannot tell. Said, so that a `remaining` that never
+        // reaches zero can be traced to the process responsible.
+        if holders.unexamined > 0 {
+            log::warn(format_args!(
+                "ending session {session}: {} processes could not be examined and count as \
+                 remaining: {}",
+                holders.unexamined,
+                unexaminable.join("; ")
+            ));
         }
         holders
     }
