@@ -55,9 +55,11 @@ use libauthd::transport::{recv_message, send_message, send_message_with_fd};
 use libauthd::wire::{
     self, AccessDenied, AccessGranted, CredentialChangeStart, CredentialRequest,
     CredentialResponse, CredentialType, Denial, LogonStart, LogonType, MSG_CREDENTIAL_CHANGE_START,
-    MSG_CREDENTIAL_RESPONSE, MSG_LOGON_START, MSG_SERVICE_ATTEST, ServiceAttest,
+    MSG_CREDENTIAL_RESPONSE, MSG_LOGON_START, MSG_SERVICE_ATTEST, MSG_SESSION_END,
+    MSG_SESSION_END_QUERY, ServiceAttest, SessionEnd, SessionEndQuery,
     decode_credential_change_start, decode_credential_response, decode_header, decode_logon_start,
-    decode_service_attest, encode_access_denied, encode_access_granted, encode_credential_request,
+    decode_service_attest, decode_session_end, decode_session_end_query, encode_access_denied,
+    encode_access_granted, encode_credential_request,
 };
 use peios::security::{Sid, SidRef};
 
@@ -96,7 +98,7 @@ const CLIENT_TIMEOUT: Duration = Duration::from_secs(120);
 /// Sized above a well-behaved client's emergent worst case, roughly
 /// `MAX_ROUNDS × (CLIENT_TIMEOUT + SOURCE_TIMEOUT)`, so this bounds the
 /// deliberate case without cutting off a slow but honest one.
-const CONVERSATION_DEADLINE: Duration = Duration::from_secs(25 * 60);
+pub(crate) const CONVERSATION_DEADLINE: Duration = Duration::from_secs(25 * 60);
 
 /// How long authd will wait to hand bytes to the client.
 ///
@@ -259,6 +261,20 @@ fn run(registry: &Registry, stream: &UnixStream, deadline: Instant) -> io::Resul
         // attestation.
         Ok(Opening::Change(start)) => {
             return crate::change::serve(registry, stream, &peer, &start, deadline);
+        }
+        // Ending a session, or asking whether one may, is a whole request in
+        // one message, and neither is a logon: who may is decided in
+        // `crate::end` from the peer, not by the originator checks below.
+        Ok(Opening::End(end)) => {
+            return crate::end::serve(stream, &peer, end.logon_session_id, crate::end::Request::End);
+        }
+        Ok(Opening::EndQuery(query)) => {
+            return crate::end::serve(
+                stream,
+                &peer,
+                query.logon_session_id,
+                crate::end::Request::Query,
+            );
         }
         Err(denial) => return deny(stream, denial.0, denial.1),
     };
@@ -1120,6 +1136,10 @@ enum Opening {
     /// A change of the caller's own credential, which will exchange
     /// credentials and mint nothing. See [`crate::change`].
     Change(CredentialChangeStart),
+    /// Ending a logon session. See [`crate::end`].
+    End(SessionEnd),
+    /// Asking whether a logon session may be ended. See [`crate::end`].
+    EndQuery(SessionEndQuery),
 }
 
 /// Read and validate the opening message.
@@ -1162,9 +1182,16 @@ fn read_opening(stream: &UnixStream) -> Result<Opening, (Denial, &'static str)> 
         MSG_CREDENTIAL_CHANGE_START => decode_credential_change_start(received.expose())
             .map(Opening::Change)
             .map_err(|_| (Denial::MalformedRequest, "Malformed CredentialChangeStart.")),
+        MSG_SESSION_END => decode_session_end(received.expose())
+            .map(Opening::End)
+            .map_err(|_| (Denial::MalformedRequest, "Malformed SessionEnd.")),
+        MSG_SESSION_END_QUERY => decode_session_end_query(received.expose())
+            .map(Opening::EndQuery)
+            .map_err(|_| (Denial::MalformedRequest, "Malformed SessionEndQuery.")),
         _ => Err((
             Denial::MalformedRequest,
-            "A connection must open with LogonStart, CredentialChangeStart or ServiceAttest.",
+            "A connection must open with LogonStart, CredentialChangeStart, ServiceAttest, \
+             SessionEnd or SessionEndQuery.",
         )),
     }
 }
@@ -1472,6 +1499,63 @@ mod tests {
             NonOriginatorSlot::take().is_some(),
             "dropped slots must come back"
         );
+    }
+
+    fn opening_of(bytes: &[u8]) -> Result<Opening, (Denial, &'static str)> {
+        let (client, server) = UnixStream::pair().expect("socketpair");
+        libauthd::transport::send_message(&client, bytes).expect("sends");
+        read_opening(&server)
+    }
+
+    /// Each session request opens as itself, and nothing else does.
+    #[test]
+    fn a_session_request_opens_as_itself() {
+        let end = wire::encode_session_end(&SessionEnd {
+            logon_session_id: 1042,
+        })
+        .unwrap();
+        assert!(matches!(
+            opening_of(&end),
+            Ok(Opening::End(SessionEnd {
+                logon_session_id: 1042
+            }))
+        ));
+        let query = wire::encode_session_end_query(&SessionEndQuery {
+            logon_session_id: 1042,
+        })
+        .unwrap();
+        assert!(matches!(
+            opening_of(&query),
+            Ok(Opening::EndQuery(SessionEndQuery {
+                logon_session_id: 1042
+            }))
+        ));
+        // An authority's message is no opening, however it is framed.
+        let ended = wire::encode_session_ended(&libauthd::wire::SessionEnded::default()).unwrap();
+        assert!(matches!(
+            opening_of(&ended),
+            Err((Denial::MalformedRequest, _))
+        ));
+    }
+
+    /// A `SessionEnd` that stops short of its session id is malformed, never
+    /// a request about session zero.
+    #[test]
+    fn a_truncated_session_end_is_malformed() {
+        let mut bytes = wire::encode_session_end(&SessionEnd {
+            logon_session_id: 1042,
+        })
+        .unwrap();
+        // Keep the header and the body's length, and half the id; fix the
+        // lengths so the framing itself is sound.
+        bytes.truncate(wire::HEADER_BYTES + 4 + 4);
+        bytes[wire::HEADER_BYTES..wire::HEADER_BYTES + 4].copy_from_slice(&4u32.to_le_bytes());
+        let total = bytes.len() as u32;
+        bytes[8..12].copy_from_slice(&total.to_le_bytes());
+        assert!(matches!(
+            opening_of(&bytes),
+            Err((Denial::MalformedRequest, "Malformed SessionEnd."))
+        ));
     }
 
     #[test]
