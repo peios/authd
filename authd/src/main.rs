@@ -17,6 +17,8 @@
 //! - **It is never a process factory.** Callers install tokens on themselves.
 //!   authd does not fork user processes and knows nothing about ttys,
 //!   environments, or session leadership. That is what keeps it auditable.
+//!   The one thing it does to processes is end them, when asked to end the
+//!   logon session they run in (PGSS §2.22, [`end`]); that starts nothing.
 //!
 //! # Three sockets
 //!
@@ -63,6 +65,7 @@ mod change;
 mod conversation;
 mod derive;
 mod domain;
+mod end;
 mod home;
 mod user_registry;
 mod ident;
@@ -222,7 +225,8 @@ fn main() -> ExitCode {
 /// **`/run/logon.sock`** admits SYSTEM, which is what the compiled-in `login`
 /// runs as, and Administrators, with full access — and every authenticated
 /// principal with exactly what a connect needs, the same mask ident.sock
-/// grants, so that each can change its own credential (PGSS §2.20).
+/// grants, so that each can change its own credential (PGSS §2.20) and end its
+/// own logon session (§2.22).
 ///
 /// That last grant is not a grant to originate logons. The descriptor no
 /// longer tells an originator from anybody else, and was never what decided

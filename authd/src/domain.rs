@@ -82,6 +82,25 @@ pub fn contains(domain: &SidRef, principal: &SidRef) -> bool {
         && domain[PRELUDE..shared] == principal[PRELUDE..shared]
 }
 
+/// Whether `sid` is a principal of some issued domain: `S-1-5-21-A-B-C-RID`,
+/// a claimable domain plus exactly one RID.
+///
+/// The test for "an account a person could have", as against a well-known
+/// identity (`S-1-5-18`), a service (`S-1-5-80-…`) or a group alias. It does
+/// not say which domain, or that anybody holds it.
+pub fn is_issued_principal(sid: &SidRef) -> bool {
+    let bytes = sid.as_bytes();
+    let Some(domain_len) = bytes.len().checked_sub(4) else {
+        return false;
+    };
+    let mut domain = bytes[..domain_len].to_vec();
+    if domain.len() < 2 {
+        return false;
+    }
+    domain[1] = domain[1].wrapping_sub(1);
+    SidRef::from_bytes(&domain).is_some_and(is_claimable)
+}
+
 /// Whether two SIDs are siblings — same domain, different RID.
 ///
 /// Used for group memberships, where the question is "is this group in the same
@@ -103,6 +122,24 @@ mod tests {
 
     fn sid(text: &str) -> Sid {
         text.parse().expect("must parse")
+    }
+
+    #[test]
+    fn an_issued_principal_is_a_claimable_domain_and_one_rid() {
+        assert!(is_issued_principal(sid("S-1-5-21-1-2-3-1000").as_ref()));
+        assert!(is_issued_principal(sid("S-1-5-21-1-2-3-500").as_ref()));
+        for text in [
+            "S-1-5-21-1-2-3",
+            "S-1-5-21-1-2-3-1000-1",
+            "S-1-5-18",
+            "S-1-5-7",
+            "S-1-5-32-544",
+            "S-1-5-80-1-2-3-4-5",
+            "S-1-5-22-1-2-3-1000",
+            "S-1-1-0",
+        ] {
+            assert!(!is_issued_principal(sid(text).as_ref()), "{text}");
+        }
     }
 
     #[test]

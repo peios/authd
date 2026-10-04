@@ -66,7 +66,7 @@ with a principal who happens to be called `Denied`.
 --- machine\generic\authn\policy logonsocketdescriptor
 canonical: Machine\Generic\Authn\Policy LogonSocketDescriptor
 type: REG_SZ
-default: O:SYG:SYD:P(A;;GA;;;SY)(A;;GA;;;BA)
+default: O:SYG:SYD:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;0x100082;;;AU)
 valid: SDDL; a malformed value falls back to the built-in
 applies: restart
 
@@ -74,8 +74,12 @@ Who may reach `/run/logon.sock`, as SDDL.
 
 The outer gate on originating a logon — asking authd to authenticate
 somebody else. The compiled default admits SYSTEM (which is what the
-built-in `login` runs as) and Administrators. Widening it is genuinely
-site policy: a graphical greeter, a web console, a remote access daemon.
+built-in `login` runs as) and Administrators with full access, and every
+authenticated principal with connect access alone, so that anyone signed
+in can change their own password and end their own session. Widening it is
+genuinely site policy: a graphical greeter, a web console, a remote access
+daemon. A replacement that leaves out the `AU` entry turns both off for
+everyone it leaves out.
 
 **Widening the socket alone changes nothing.** The descriptor decides who
 may connect; `LogonTypes` on that peer's own record decides what they may
@@ -91,6 +95,38 @@ authd's own protocol and its requirement is authd's to state;
 `/run/ident.sock` admits everyone a connect needs, because a service
 account that cannot resolve its own name is worse than useless. All three
 are protected, so `/run`'s inheritance can neither widen nor narrow them.
+
+--- machine\generic\authn\policy sessionendsecurity
+canonical: Machine\Generic\Authn\Policy SessionEndSecurity
+type: REG_SZ
+default: O:SYG:SYD:(A;;0x1;;;SY)(A;;0x1;;;BA)
+valid: SDDL; a malformed value lets nobody end another's session
+applies: live
+
+Who may end somebody else's logon session — sign them out — as SDDL.
+
+authd ends a session on request over `/run/logon.sock` (PGSS Logon
+§2.22): it sends every process whose primary token belongs to the session
+`SIGTERM`, then `SIGKILL` after a grace, and the kernel destroys the
+session when its last token goes. Task Manager and `logonse` ask for it.
+
+The descriptor is access-checked for one right, `0x1`, with the caller's
+own token; every generic right maps to it. The default grants it to SYSTEM
+and Administrators. Granting it to a group lets that group sign anybody
+out.
+
+This value is not consulted when a person ends their **own** session —
+their user SID is the session's, the session is of a logon type a person
+has, and the account is an `S-1-5-21-…` principal. Nobody, whatever this
+grants, may end SYSTEM's session (999), Anonymous's (998) or a service's:
+a service is stopped through the service manager.
+
+**Present but unusable is not absent.** A value that is not a REG_SZ, is
+empty, cannot be read, or is not SDDL lets nobody end another principal's
+session, and authd logs why on each request. Falling back to the default
+instead could grant more than the site wrote.
+
+Read on every request, so a change applies to the next one.
 
 --- machine\generic\authn\policy\<principal>
 canonical: Machine\Generic\Authn\Policy\<principal>

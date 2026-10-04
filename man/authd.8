@@ -13,6 +13,13 @@ and returns a KACS primary token and profile for an authenticated principal.
 The same socket also lets any authenticated principal change its own
 credential, relayed to the principal source that holds it; see
 .BR passwd (1).
+On the same socket authd ends a logon session on request: it sends every
+process whose primary token belongs to the session SIGTERM, waits up to five
+seconds, sends SIGKILL to what is left, and looks again, at most three times.
+The kernel destroys the session when its last token goes.  A person may end
+their own session; ending anyone else's needs the right granted by
+.IR SessionEndSecurity ,
+below.  SYSTEM's session, Anonymous's, and a service's are never ended.
 Identity queries are served separately on
 .IR /run/ident.sock .
 .PP
@@ -33,12 +40,21 @@ runs at PeiosTcb integrity with SeCreateTokenPrivilege and SeTcbPrivilege.
 Its executable must carry a valid Peios TCB PIP signature.  Machine logon
 policy is read from
 .IR Machine\eGeneric\eAuthn\ePolicy .
+.PP
+Who may end another principal's logon session is the SDDL descriptor in the
+REG_SZ value
+.I SessionEndSecurity
+on that key, access-checked with the caller's token for right 0x1 and read on
+every request.  Where it is absent, SYSTEM and Administrators may:
+.IR O:SYG:SYD:(A;;0x1;;;SY)(A;;0x1;;;BA) .
+A value that is present but unusable lets nobody, and is logged.
 .SH FILES
 .TP
 .I /run/logon.sock
 PGSS Logon client socket.  SYSTEM and Administrators may connect, and so may
-every authenticated principal, to change its own credential.  Reaching it
-does not permit originating a logon; that is decided per peer.
+every authenticated principal, to change its own credential and to end its
+own session.  Reaching it does not permit originating a logon; that is
+decided per peer.
 .TP
 .I /run/psi.sock
 Principal Source Interface registration socket.

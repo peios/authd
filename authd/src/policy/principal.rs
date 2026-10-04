@@ -40,6 +40,35 @@ pub fn originator_logon_types(peer: &SidRef) -> Option<LogonTypes> {
     read().originator_logon_types(peer)
 }
 
+/// Who may end another principal's logon session (PGSS §2.22): the configured
+/// descriptor, or the built-in one where none is configured.
+///
+/// `None` where one is configured and cannot be used — not a REG_SZ, empty,
+/// unreadable, or not SDDL — and then nobody may: falling back to the
+/// built-in descriptor could grant more than the site wrote. Logged each time,
+/// since it is read each time.
+pub fn session_end_descriptor() -> Option<peios::security::SecurityDescriptor> {
+    let text = match libauthd_policy::session_end_descriptor() {
+        Ok(text) => text,
+        Err(problem) => {
+            log::error(format_args!("{problem}"));
+            return None;
+        }
+    };
+    match peios::security::sddl::parse(&text) {
+        Ok(sd) => Some(sd),
+        Err(error) => {
+            log::error(format_args!(
+                "{}\\{} is not a usable descriptor ({error}); nobody may end another \
+                 principal's session until it is corrected or removed",
+                libauthd_policy::KEY,
+                libauthd_policy::SESSION_END_SD_VALUE
+            ));
+            None
+        }
+    }
+}
+
 /// The configured SDDL for `/run/logon.sock`, if a site has stated one.
 pub fn logon_socket_descriptor() -> Option<String> {
     libauthd_policy::logon_socket_descriptor().unwrap_or_else(|problem| {
