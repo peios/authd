@@ -49,10 +49,13 @@
 //!
 //! # It listens, as of M4
 //!
-//! Two descriptors now: the outbound PSI connection, and an administrative
-//! listener. They are served from one thread by polling both, which keeps the
-//! store owned by the loop and needs no lock to protect a thing with exactly one
-//! writer. See [`admin`] for what crosses the second one.
+//! Three descriptors now, and the connections of the third: the outbound PSI
+//! connection, an administrative listener, and the self socket's listener,
+//! on which any principal reads their own account. They are served from one
+//! thread by polling them all, which keeps the store owned by the loop and
+//! needs no lock to protect a thing with exactly one writer. See [`admin`]
+//! for what crosses the second, and [`own`] for the third — served without
+//! ever blocking, because everyone can reach it.
 
 mod admin;
 mod codec;

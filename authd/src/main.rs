@@ -225,8 +225,8 @@ fn main() -> ExitCode {
 /// **`/run/logon.sock`** admits SYSTEM, which is what the compiled-in `login`
 /// runs as, and Administrators, with full access — and every authenticated
 /// principal with exactly what a connect needs, the same mask ident.sock
-/// grants, so that each can change its own credential (PGSS §2.20) and end its
-/// own logon session (§2.22).
+/// grants, so that each can change its own credential (PGSS §2.20), add or
+/// remove its own SSH keys (§2.23), and end its own logon session (§2.22).
 ///
 /// That last grant is not a grant to originate logons. The descriptor no
 /// longer tells an originator from anybody else, and was never what decided
