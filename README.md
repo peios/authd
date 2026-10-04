@@ -30,7 +30,7 @@ Three ideas carry most of the design.
 
 - **PGSS Logon** (PSD-012) — the standard a Peios authority must speak. `/run/logon.sock`.
 - **PSI** (PSD-013) — how principal sources federate identity to the authority. Not a conformance requirement; specified so third parties can write sources. `/run/psi.sock`.
-- **LPS** — `lpsd`'s administrative protocol, spoken only by `lps`. `/run/lpsd/admin.sock`.
+- **LPS** — `lpsd`'s administrative protocol, spoken by `lps` and Principals Manager. `/run/lpsd/admin.sock`. Its framing also carries the self socket, `/run/lpsd/self.sock`, on which any principal reads their own account and sets their display name (PSPU §10.11).
 
 ## Building
 
