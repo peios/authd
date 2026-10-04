@@ -73,6 +73,11 @@
 //!     |<--------- CredentialRequest -----------|   (the same rounds)
 //!     |--------- CredentialResponse ---------->|
 //!     |<--- CredentialChanged | Refusal -------|
+//!     |
+//!     |---------- EnrollCredential ----------->|   conversation K
+//!     |<--------- CredentialRequest -----------|   (the current credential)
+//!     |--------- CredentialResponse ---------->|
+//!     |<--- CredentialChanged | Refusal -------|
 //! ```
 //!
 //! A change is a conversation of its own kind rather than an `Authenticate`
@@ -88,8 +93,8 @@ use crate::frame::{self, Framing, Writer};
 use crate::ident::{Fields, Kind, Outcome, Value, Withheld};
 use crate::secret::Secret;
 use crate::wire::{
-    CredentialChangeStart, CredentialRequest, CredentialResponse, Denial, LogonStart, LogonTypes,
-    MAX_REASON_BYTES, Profile, WireError,
+    CredentialChangeStart, CredentialEnrollStart, CredentialRequest, CredentialResponse, Denial,
+    LogonStart, LogonTypes, MAX_REASON_BYTES, Profile, WireError,
 };
 
 /// Four literal bytes opening every message: **P**eios **P**rincipal **S**ource
@@ -127,6 +132,7 @@ pub const MSG_ABANDON: u16 = 0x0004;
 pub const MSG_QUERY: u16 = 0x0005;
 pub const MSG_ENUMERATE_SOURCE: u16 = 0x0006;
 pub const MSG_CHANGE_CREDENTIAL: u16 = 0x0007;
+pub const MSG_ENROLL_CREDENTIAL: u16 = 0x0008;
 // source -> authd. The high bit marks a message sent by the authority, as in
 // PGSS Logon — here the source is the authority for its own principals.
 pub const MSG_REGISTER: u16 = 0x8001;
@@ -187,6 +193,8 @@ impl Capabilities {
     pub const PUSHES_CHANGES: Capabilities = Capabilities(1 << 3);
     /// Answers [`ChangeCredential`].
     pub const CHANGES_CREDENTIALS: Capabilities = Capabilities(1 << 4);
+    /// Answers [`EnrollCredential`].
+    pub const ENROLLS_CREDENTIALS: Capabilities = Capabilities(1 << 5);
 
     pub const fn empty() -> Capabilities {
         Capabilities(0)
@@ -396,6 +404,22 @@ pub struct ChangeCredential {
     /// client no way to name anyone else, so a source asked to change any
     /// principal but this one is being asked something the protocol cannot
     /// express, and must not do it.
+    pub principal: Vec<u8>,
+}
+
+/// authd asking a source to add a credential to a principal's own account, or
+/// to remove one. Opens a conversation. PSPU §2.23.
+///
+/// [`ChangeCredential`]'s sibling, and shaped like it: PGSS Logon's
+/// [`CredentialEnrollStart`] nested whole, plus the principal, which only authd
+/// knows. The same interrogation follows — the source proves the current
+/// credential — and it ends the same way, in [`MSG_CREDENTIAL_CHANGED`] or a
+/// [`Refusal`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EnrollCredential {
+    pub start: CredentialEnrollStart,
+    /// The user of the **verified** peer's token, as binary SID bytes. As in
+    /// [`ChangeCredential`], both who asks and whose credential is enrolled.
     pub principal: Vec<u8>,
 }
 
@@ -872,7 +896,32 @@ pub fn decode_change_credential(buf: &[u8]) -> Result<ChangeCredential, WireErro
     })
 }
 
-/// The source's success terminal for a [`ChangeCredential`]: the new credential
+pub fn encode_enroll_credential(
+    conversation: u64,
+    enroll: &EnrollCredential,
+) -> Result<Vec<u8>, WireError> {
+    let mut w = begin(MSG_ENROLL_CREDENTIAL, conversation);
+    let body = w.open();
+    // Nested for the reason `ChangeCredential` nests its start.
+    let nested = w.open();
+    crate::wire::write_credential_enroll_start_body(&mut w, &enroll.start)?;
+    w.close(nested);
+    w.bytes(&enroll.principal, MAX_SID_BYTES)?;
+    w.close(body);
+    w.finish()
+}
+
+pub fn decode_enroll_credential(buf: &[u8]) -> Result<EnrollCredential, WireError> {
+    let mut b = open_body(buf, MSG_ENROLL_CREDENTIAL)?;
+    let start = crate::wire::read_credential_enroll_start_body(&mut b.open()?)?;
+    Ok(EnrollCredential {
+        start,
+        principal: b.bytes(MAX_SID_BYTES)?.to_vec(),
+    })
+}
+
+/// The source's success terminal for a [`ChangeCredential`] or an
+/// [`EnrollCredential`]: the new credential
 /// is the one it will verify from now on. No fields.
 pub fn encode_credential_changed(conversation: u64) -> Result<Vec<u8>, WireError> {
     let mut w = begin(MSG_CREDENTIAL_CHANGED, conversation);
@@ -1257,6 +1306,68 @@ mod tests {
             },
             principal: vec![1, 5, 0, 0, 0, 0, 0, 5, 21, 0, 0, 0, 1, 0, 0, 0],
         }
+    }
+
+    fn enroll() -> EnrollCredential {
+        EnrollCredential {
+            start: crate::wire::CredentialEnrollStart {
+                supported_credential_types: vec![CredentialType::Password],
+                action: crate::wire::EnrollAction::Remove,
+                credential_type: CredentialType::SshPublicKey,
+                material: "SHA256:abc".into(),
+            },
+            principal: change().principal,
+        }
+    }
+
+    #[test]
+    fn enroll_credential_carries_the_start_and_the_principal() {
+        let bytes = encode_enroll_credential(11, &enroll()).unwrap();
+        let envelope = decode_envelope(&bytes).unwrap();
+        assert_eq!(envelope.msg_type, MSG_ENROLL_CREDENTIAL);
+        assert_eq!(envelope.conversation, 11);
+        assert_eq!(decode_enroll_credential(&bytes).unwrap(), enroll());
+
+        // Neither opening decodes as the other.
+        assert!(decode_change_credential(&bytes).is_err());
+        assert!(decode_enroll_credential(&encode_change_credential(9, &change()).unwrap()).is_err());
+        for cut in 0..bytes.len() {
+            assert!(decode_enroll_credential(&bytes[..cut]).is_err());
+        }
+    }
+
+    /// A field appended to the outer message by a newer authority is skipped.
+    #[test]
+    fn a_field_appended_to_enroll_credential_is_skipped() {
+        let mut w = begin(MSG_ENROLL_CREDENTIAL, 4);
+        let body = w.open();
+        let nested = w.open();
+        crate::wire::write_credential_enroll_start_body(&mut w, &enroll().start).unwrap();
+        w.close(nested);
+        w.bytes(&enroll().principal, MAX_SID_BYTES).unwrap();
+        w.u32(0xdead_beef);
+        w.close(body);
+        let bytes = w.finish().unwrap();
+        assert_eq!(decode_enroll_credential(&bytes).unwrap(), enroll());
+    }
+
+    #[test]
+    fn enrolment_is_its_own_capability() {
+        assert_eq!(Capabilities::ENROLLS_CREDENTIALS.0, 1 << 5);
+        assert!(!Capabilities::CHANGES_CREDENTIALS.contains(Capabilities::ENROLLS_CREDENTIALS));
+        let register = Register {
+            source_name: "lpsd".into(),
+            domain: vec![1, 4, 0, 0, 0, 0, 0, 5, 21, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0, 3, 0, 0, 0],
+            capabilities: Capabilities::CHANGES_CREDENTIALS | Capabilities::ENROLLS_CREDENTIALS,
+            entry_ttl: 0,
+            max_batch: 1,
+        };
+        assert_eq!(
+            decode_register(&encode_register(&register).unwrap())
+                .unwrap()
+                .capabilities,
+            register.capabilities
+        );
     }
 
     #[test]

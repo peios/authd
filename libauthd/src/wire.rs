@@ -93,6 +93,13 @@ pub const MSG_SERVICE_ATTEST: u16 = 0x0020;
 pub const MSG_CREDENTIAL_CHANGE_START: u16 = 0x0030;
 pub const MSG_CREDENTIAL_CHANGED: u16 = 0x8030;
 
+// Adding a credential beside the caller's own, or removing one. PGSS Logon
+// §2.23. A sibling of the change start rather than a field on it: the same
+// rounds, the same proof of the current credential, and the same terminal
+// `MSG_CREDENTIAL_CHANGED` — but the material arrives in the opening, where a
+// change collects it in a round.
+pub const MSG_CREDENTIAL_ENROLL_START: u16 = 0x0031;
+
 // Ending a logon session. PGSS Logon §2.22. Each is a whole conversation in
 // one message: the client asks, the authority answers with the success
 // terminal beside it or with `MSG_ACCESS_DENIED`, and nothing else is said.
@@ -117,6 +124,9 @@ pub const MAX_REMOTE_HOST_BYTES: usize = 256;
 pub const MAX_REASON_BYTES: usize = 512;
 pub const MAX_SUPPORTED_CREDENTIAL_TYPES: usize = 32;
 pub const MAX_SERVICE_NAME_BYTES: usize = 256;
+/// An enrolment's material: one line of an OpenSSH public key file, or a
+/// fingerprint. The same ceiling PLPS puts on a key line (PSPU §10.8).
+pub const MAX_ENROLL_MATERIAL_BYTES: usize = 16384;
 
 // ---------------------------------------------------------------------------
 // Enumerations
@@ -347,6 +357,15 @@ pub enum Denial {
     /// it: a peer that predates §2.22 never sends either message, so it is
     /// never sent this code.
     NoSuchSession = 10,
+    /// The credential an enrolment offered, or named for removal, was refused:
+    /// unreadable, unsupported, already held, one more than the principal may
+    /// have, or not one the principal holds. Only ever the answer to
+    /// [`CredentialEnrollStart`] (§2.23).
+    ///
+    /// Added without a [`VERSION`] bump under the same exception as
+    /// [`Denial::NoSuchSession`]: a peer that predates §2.23 never sends that
+    /// message, so it is never sent this code.
+    CredentialRejected = 11,
 }
 
 impl Denial {
@@ -362,6 +381,7 @@ impl Denial {
             8 => Self::ConversationLimit,
             9 => Self::Internal,
             10 => Self::NoSuchSession,
+            11 => Self::CredentialRejected,
             _ => return None,
         })
     }
@@ -587,6 +607,54 @@ pub struct CredentialChangeStart {
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct CredentialChanged;
 
+/// What a [`CredentialEnrollStart`] asks for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum EnrollAction {
+    /// Enrol the material as a new credential of the principal.
+    Add = 1,
+    /// Remove the credential the material identifies.
+    Remove = 2,
+}
+
+impl EnrollAction {
+    pub fn from_u8(value: u8) -> Option<Self> {
+        Some(match value {
+            1 => Self::Add,
+            2 => Self::Remove,
+            _ => return None,
+        })
+    }
+}
+
+/// Opens a conversation that adds a credential to the caller's own principal,
+/// or removes one from it. Client to authority. PGSS Logon §2.23.
+///
+/// The sibling of [`CredentialChangeStart`], under the same two rules: **no
+/// field names the principal** — it is the user of the connected peer's token —
+/// and **a token is not proof**, so the authority asks for the current
+/// credential in the rounds that follow before it changes anything. A
+/// credential added from an unattended terminal would be a way back in for
+/// whoever found it.
+///
+/// Unlike a change, the material travels in the opening rather than in a
+/// round. It is not secret: an SSH public key, or the fingerprint of one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CredentialEnrollStart {
+    /// Every [`CredentialType`] this client can render, for the proof the
+    /// authority will ask for. The rule of [`LogonStart::supported_credential_types`],
+    /// and mandatory as [`CredentialChangeStart`]'s is.
+    pub supported_credential_types: Vec<CredentialType>,
+    pub action: EnrollAction,
+    /// The kind of credential being added or removed. Only
+    /// [`CredentialType::SshPublicKey`] is defined for enrolment.
+    pub credential_type: CredentialType,
+    /// For [`EnrollAction::Add`] of an SSH public key, one line of an OpenSSH
+    /// public key file; for [`EnrollAction::Remove`], the key's fingerprint as
+    /// `ssh-keygen -l` writes it (`SHA256:` and unpadded base64).
+    pub material: String,
+}
+
 /// End a logon session. Client to authority. PGSS Logon §2.22.
 ///
 /// The whole conversation is this message and the authority's answer:
@@ -792,6 +860,34 @@ pub(crate) fn write_credential_change_start_body(
     start: &CredentialChangeStart,
 ) -> Result<(), WireError> {
     write_supported_credential_types(w, &start.supported_credential_types)
+}
+
+pub(crate) fn read_credential_enroll_start_body(
+    b: &mut Reader<'_>,
+) -> Result<CredentialEnrollStart, WireError> {
+    let supported_credential_types = read_supported_credential_types(b)?;
+    // Both closed: unlike the capability list, these are instructions, and an
+    // authority guessing at an action it does not know would be acting on a
+    // request nobody made.
+    let action = EnrollAction::from_u8(b.u8()?).ok_or(WireError::UnknownValue)?;
+    let credential_type = CredentialType::from_u8(b.u8()?).ok_or(WireError::UnknownValue)?;
+    let material = b.string(MAX_ENROLL_MATERIAL_BYTES)?.to_owned();
+    Ok(CredentialEnrollStart {
+        supported_credential_types,
+        action,
+        credential_type,
+        material,
+    })
+}
+
+pub(crate) fn write_credential_enroll_start_body(
+    w: &mut Writer,
+    start: &CredentialEnrollStart,
+) -> Result<(), WireError> {
+    write_supported_credential_types(w, &start.supported_credential_types)?;
+    w.u8(start.action as u8);
+    w.u8(start.credential_type as u8);
+    w.string(&start.material, MAX_ENROLL_MATERIAL_BYTES)
 }
 
 pub(crate) fn read_credential_request_body(
@@ -1016,6 +1112,22 @@ pub fn encode_credential_change_start(start: &CredentialChangeStart) -> Result<V
     let mut w = Writer::new(&FRAMING, MSG_CREDENTIAL_CHANGE_START);
     let body = w.open();
     write_credential_change_start_body(&mut w, start)?;
+    w.close(body);
+    w.finish()
+}
+
+pub fn decode_credential_enroll_start(buf: &[u8]) -> Result<CredentialEnrollStart, WireError> {
+    read_credential_enroll_start_body(&mut frame::open_body(
+        &FRAMING,
+        buf,
+        MSG_CREDENTIAL_ENROLL_START,
+    )?)
+}
+
+pub fn encode_credential_enroll_start(start: &CredentialEnrollStart) -> Result<Vec<u8>, WireError> {
+    let mut w = Writer::new(&FRAMING, MSG_CREDENTIAL_ENROLL_START);
+    let body = w.open();
+    write_credential_enroll_start_body(&mut w, start)?;
     w.close(body);
     w.finish()
 }
@@ -1855,7 +1967,143 @@ mod tests {
             Denial::NoSuchSession
         );
         assert_eq!(Denial::from_u32(10), Some(Denial::NoSuchSession));
-        assert_eq!(Denial::from_u32(11), None);
+        assert_eq!(Denial::from_u32(11), Some(Denial::CredentialRejected));
+        assert_eq!(Denial::from_u32(12), None);
+    }
+
+    fn enroll_start() -> CredentialEnrollStart {
+        CredentialEnrollStart {
+            supported_credential_types: vec![CredentialType::Password],
+            action: EnrollAction::Add,
+            credential_type: CredentialType::SshPublicKey,
+            material: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI laptop".into(),
+        }
+    }
+
+    #[test]
+    fn credential_enroll_start_round_trips() {
+        let start = enroll_start();
+        assert_eq!(
+            decode_credential_enroll_start(&encode_credential_enroll_start(&start).unwrap())
+                .unwrap(),
+            start
+        );
+        let remove = CredentialEnrollStart {
+            action: EnrollAction::Remove,
+            material: "SHA256:uNiVztksCsDhcc0u9e8BujQXVUpKZIDTMczCvj3tD2s".into(),
+            ..enroll_start()
+        };
+        assert_eq!(
+            decode_credential_enroll_start(&encode_credential_enroll_start(&remove).unwrap())
+                .unwrap(),
+            remove
+        );
+    }
+
+    /// A newer client may append a field; this decoder steps over it.
+    #[test]
+    fn a_field_appended_to_an_enroll_start_is_skipped() {
+        let mut w = Writer::new(&FRAMING, MSG_CREDENTIAL_ENROLL_START);
+        let body = w.open();
+        write_credential_enroll_start_body(&mut w, &enroll_start()).unwrap();
+        w.u32(0xdead_beef);
+        w.string("from the future", 64).unwrap();
+        w.close(body);
+        let bytes = w.finish().unwrap();
+        assert_eq!(decode_credential_enroll_start(&bytes).unwrap(), enroll_start());
+    }
+
+    /// Every field is mandatory: the message is newer than the rule that lets
+    /// a trailing field be absent, and a truncated one must never be read as a
+    /// request with some default action.
+    #[test]
+    fn an_enroll_start_without_its_material_is_malformed() {
+        let mut w = Writer::new(&FRAMING, MSG_CREDENTIAL_ENROLL_START);
+        let body = w.open();
+        w.bytes(&[CredentialType::Password as u8], MAX_SUPPORTED_CREDENTIAL_TYPES)
+            .unwrap();
+        w.u8(EnrollAction::Add as u8);
+        w.u8(CredentialType::SshPublicKey as u8);
+        w.close(body);
+        let bytes = w.finish().unwrap();
+        assert!(decode_credential_enroll_start(&bytes).is_err());
+    }
+
+    /// The action and the credential type are instructions, so a value this
+    /// build does not know is refused — never dropped as a capability is.
+    #[test]
+    fn an_unknown_enroll_action_or_type_is_rejected() {
+        for (action, credential_type) in [(3u8, 2u8), (0, 2), (1, 99)] {
+            let mut w = Writer::new(&FRAMING, MSG_CREDENTIAL_ENROLL_START);
+            let body = w.open();
+            w.bytes(&[CredentialType::Password as u8], MAX_SUPPORTED_CREDENTIAL_TYPES)
+                .unwrap();
+            w.u8(action);
+            w.u8(credential_type);
+            w.string("x", MAX_ENROLL_MATERIAL_BYTES).unwrap();
+            w.close(body);
+            let bytes = w.finish().unwrap();
+            assert_eq!(
+                decode_credential_enroll_start(&bytes).unwrap_err(),
+                WireError::UnknownValue
+            );
+        }
+    }
+
+    /// Like the capability list of every opening, an unknown capability is
+    /// dropped rather than refused.
+    #[test]
+    fn an_unknown_capability_in_an_enroll_start_is_dropped() {
+        let mut w = Writer::new(&FRAMING, MSG_CREDENTIAL_ENROLL_START);
+        let body = w.open();
+        w.bytes(
+            &[CredentialType::Password as u8, 99],
+            MAX_SUPPORTED_CREDENTIAL_TYPES,
+        )
+        .unwrap();
+        w.u8(EnrollAction::Remove as u8);
+        w.u8(CredentialType::SshPublicKey as u8);
+        w.string("SHA256:x", MAX_ENROLL_MATERIAL_BYTES).unwrap();
+        w.close(body);
+        let bytes = w.finish().unwrap();
+        assert_eq!(
+            decode_credential_enroll_start(&bytes)
+                .unwrap()
+                .supported_credential_types,
+            vec![CredentialType::Password]
+        );
+    }
+
+    #[test]
+    fn an_oversized_enroll_material_is_rejected() {
+        let start = CredentialEnrollStart {
+            material: "x".repeat(MAX_ENROLL_MATERIAL_BYTES + 1),
+            ..enroll_start()
+        };
+        assert!(encode_credential_enroll_start(&start).is_err());
+    }
+
+    /// An enrolment, a change and a logon are told apart by message type, and
+    /// no decoder accepts another's.
+    #[test]
+    fn an_enroll_start_decodes_as_nothing_else() {
+        let enroll = encode_credential_enroll_start(&enroll_start()).unwrap();
+        let change = encode_credential_change_start(&CredentialChangeStart {
+            supported_credential_types: vec![CredentialType::Password],
+        })
+        .unwrap();
+        assert!(decode_credential_change_start(&enroll).is_err());
+        assert!(decode_logon_start(&enroll).is_err());
+        assert!(decode_credential_enroll_start(&change).is_err());
+        assert!(decode_credential_enroll_start(&encode_logon_start(&start()).unwrap()).is_err());
+    }
+
+    #[test]
+    fn every_truncation_of_an_enroll_start_errors() {
+        let message = encode_credential_enroll_start(&enroll_start()).unwrap();
+        for cut in 0..message.len() {
+            assert!(decode_credential_enroll_start(&message[..cut]).is_err());
+        }
     }
 
     /// A code newer than the client is still a refusal: the lenient decoder

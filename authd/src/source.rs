@@ -45,7 +45,10 @@ use std::time::Duration;
 
 use libauthd::psi;
 use libauthd::transport::send_message;
-use libauthd::wire::{CredentialChangeStart, CredentialRequest, CredentialResponse, LogonStart};
+use libauthd::wire::{
+    CredentialChangeStart, CredentialEnrollStart, CredentialRequest, CredentialResponse,
+    LogonStart,
+};
 use peios::security::{Sid, SidRef};
 
 use crate::log;
@@ -363,6 +366,27 @@ impl Conversation {
             },
         )
         .map_err(|_| io::Error::other("could not encode a credential change"))?;
+        self.source.send(&message)
+    }
+
+    /// Ask the source to add a credential to a principal's own account, or to
+    /// remove one. PSPU §2.23.
+    ///
+    /// `principal` is the verified peer's user SID, as for
+    /// [`Conversation::change_credential`].
+    pub fn enroll_credential(
+        &self,
+        start: &CredentialEnrollStart,
+        principal: &[u8],
+    ) -> io::Result<()> {
+        let message = psi::encode_enroll_credential(
+            self.id,
+            &psi::EnrollCredential {
+                start: start.clone(),
+                principal: principal.to_vec(),
+            },
+        )
+        .map_err(|_| io::Error::other("could not encode a credential enrolment"))?;
         self.source.send(&message)
     }
 

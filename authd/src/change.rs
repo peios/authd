@@ -1,5 +1,7 @@
 //! Changing the caller's own credential — PGSS Logon §2.20, relayed to the
-//! owning source as PSI's change conversation (PSPU §2.21).
+//! owning source as PSI's change conversation (PSPU §2.21) — and its sibling,
+//! adding a credential of one's own or removing one (PGSS §2.23, PSPU §2.23).
+//! Everything below holds for both.
 //!
 //! # The principal is the peer
 //!
@@ -29,7 +31,10 @@ use std::time::Instant;
 
 use libauthd::psi::Capabilities;
 use libauthd::transport::send_message;
-use libauthd::wire::{CredentialChangeStart, CredentialChanged, Denial, encode_credential_changed};
+use libauthd::wire::{
+    CredentialChangeStart, CredentialChanged, CredentialEnrollStart, CredentialType, Denial,
+    EnrollAction, encode_credential_changed,
+};
 use peios::security::Sid;
 
 use crate::conversation::{Ended, Purpose, deny, relay};
@@ -62,6 +67,41 @@ fn route(registry: &Registry, principal: &Sid) -> Route {
     }
 }
 
+/// Which of the two conversations this module relays.
+#[derive(Clone, Copy)]
+enum Request<'a> {
+    /// PGSS §2.20: replace the credential.
+    Change(&'a CredentialChangeStart),
+    /// PGSS §2.23: add a credential beside it, or remove one.
+    Enroll(&'a CredentialEnrollStart),
+}
+
+impl Request<'_> {
+    fn supported(&self) -> &[CredentialType] {
+        match self {
+            Request::Change(start) => &start.supported_credential_types,
+            Request::Enroll(start) => &start.supported_credential_types,
+        }
+    }
+
+    fn purpose(&self) -> Purpose {
+        match self {
+            Request::Change(_) => Purpose::Change,
+            Request::Enroll(_) => Purpose::Enroll,
+        }
+    }
+
+    fn describe(&self) -> &'static str {
+        match self {
+            Request::Change(_) => "credential change",
+            Request::Enroll(start) => match start.action {
+                EnrollAction::Add => "credential enrolment",
+                EnrollAction::Remove => "credential removal",
+            },
+        }
+    }
+}
+
 /// Serve one change conversation to its terminal message.
 ///
 /// `peer` is the verified user of the connected peer's token, and the only
@@ -73,7 +113,35 @@ pub fn serve(
     start: &CredentialChangeStart,
     deadline: Instant,
 ) -> io::Result<()> {
-    log::info(format_args!("credential change started: peer={peer}"));
+    serve_request(registry, stream, peer, Request::Change(start), deadline)
+}
+
+/// Serve one enrolment conversation (PGSS §2.23) to its terminal message:
+/// adding a credential to `peer`'s own principal, or removing one.
+///
+/// Routed, gated and relayed as a change is, with one difference at the gate:
+/// a source that does not declare `ENROLLS_CREDENTIALS` is refused as
+/// `PermissionDenied`, the answer §2.23 gives for an authority that does not
+/// offer enrolment — because for this principal, it does not.
+pub fn serve_enroll(
+    registry: &Registry,
+    stream: &UnixStream,
+    peer: &Sid,
+    start: &CredentialEnrollStart,
+    deadline: Instant,
+) -> io::Result<()> {
+    serve_request(registry, stream, peer, Request::Enroll(start), deadline)
+}
+
+fn serve_request(
+    registry: &Registry,
+    stream: &UnixStream,
+    peer: &Sid,
+    request: Request<'_>,
+    deadline: Instant,
+) -> io::Result<()> {
+    let what = request.describe();
+    log::info(format_args!("{what} started: peer={peer}"));
 
     let source = match route(registry, peer) {
         Route::Owner(source) => source,
@@ -81,7 +149,7 @@ pub fn serve(
         // There is no credential for this principal anywhere authd can reach.
         Route::Nobody => {
             log::info(format_args!(
-                "refused a credential change for {peer}: no source holds it"
+                "refused a {what} for {peer}: no source holds it"
             ));
             return deny(
                 stream,
@@ -99,21 +167,29 @@ pub fn serve(
     };
 
     // PSI §2.8: never send a source a message it did not declare it answers.
+    //
     // A source that does not change credentials still holds this principal, so
-    // this is a statement about the account rather than an outage.
-    if !source
-        .capabilities()
-        .contains(Capabilities::CHANGES_CREDENTIALS)
-    {
-        log::info(format_args!(
-            "refused a credential change for {peer}: source {} does not change credentials",
-            source.name()
-        ));
-        return deny(
-            stream,
+    // that refusal is a statement about the account rather than an outage. One
+    // that does not enrol them is refused as §2.23 refuses an authority that
+    // does not offer enrolment: for this principal, this authority does not.
+    let (needed, denial, reason) = match request {
+        Request::Change(_) => (
+            Capabilities::CHANGES_CREDENTIALS,
             Denial::AccountRestricted,
             "The credential for this account cannot be changed here.",
-        );
+        ),
+        Request::Enroll(_) => (
+            Capabilities::ENROLLS_CREDENTIALS,
+            Denial::PermissionDenied,
+            "Keys for this account cannot be added or removed here.",
+        ),
+    };
+    if !source.capabilities().contains(needed) {
+        log::info(format_args!(
+            "refused a {what} for {peer}: source {} does not declare it",
+            source.name()
+        ));
+        return deny(stream, denial, reason);
     }
 
     let Some(mut conversation) = source.open() else {
@@ -128,7 +204,12 @@ pub fn serve(
         );
     };
 
-    if let Err(error) = conversation.change_credential(start, peer.as_ref().as_bytes()) {
+    let principal = peer.as_ref().as_bytes();
+    let opened = match request {
+        Request::Change(start) => conversation.change_credential(start, principal),
+        Request::Enroll(start) => conversation.enroll_credential(start, principal),
+    };
+    if let Err(error) = opened {
         log::warn(format_args!(
             "could not reach source {}: {error}",
             source.name()
@@ -142,17 +223,17 @@ pub fn serve(
 
     match relay(
         stream,
-        &start.supported_credential_types,
+        request.supported(),
         &mut conversation,
         deadline,
-        Purpose::Change,
+        request.purpose(),
     )? {
         Some(Ended::Changed) => {
             let message = encode_credential_changed(&CredentialChanged)
                 .map_err(|_| io::Error::other("could not encode a credential change"))?;
             send_message(stream, &message)?;
             log::info(format_args!(
-                "credential changed: user={peer} source={}",
+                "{what} done: user={peer} source={}",
                 conversation.source_name()
             ));
             Ok(())
@@ -375,5 +456,190 @@ mod tests {
         result.expect("served");
         fake_source.join().expect("the fake source");
         assert_eq!(denial(&client), Denial::AuthenticationFailed);
+    }
+
+    // -- Enrolment (PGSS §2.23) -------------------------------------------
+
+    const KEY_LINE: &str = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIexample laptop";
+
+    fn enroll_start() -> CredentialEnrollStart {
+        CredentialEnrollStart {
+            supported_credential_types: vec![CredentialType::Password],
+            action: EnrollAction::Add,
+            credential_type: CredentialType::SshPublicKey,
+            material: KEY_LINE.into(),
+        }
+    }
+
+    fn enroll_for(registry: &Registry, peer: &Sid) -> (UnixStream, io::Result<()>) {
+        let (client, server) = UnixStream::pair().expect("socketpair");
+        let deadline = Instant::now() + Duration::from_secs(60);
+        let result = serve_enroll(registry, &server, peer, &enroll_start(), deadline);
+        (client, result)
+    }
+
+    fn nothing_sent(psi_end: &UnixStream) {
+        psi_end
+            .set_read_timeout(Some(Duration::from_millis(50)))
+            .expect("timeout");
+        assert!(
+            recv_message(&psi::FRAMING, psi_end).is_err(),
+            "the source must have been sent nothing"
+        );
+    }
+
+    /// PSI §2.8: a source that changes passwords but does not declare
+    /// enrolment is sent nothing, and the client hears what an authority that
+    /// does not offer enrolment says (§2.23).
+    #[test]
+    fn a_source_that_does_not_enrol_is_not_asked() {
+        let (registry, _source, psi_end) = with_source(Capabilities::CHANGES_CREDENTIALS);
+        let (client, result) = enroll_for(&registry, &sid("S-1-5-21-1-2-3-1000"));
+        result.expect("served");
+        assert_eq!(denial(&client), Denial::PermissionDenied);
+        nothing_sent(&psi_end);
+    }
+
+    /// And the reverse: declaring enrolment does not make a source one that
+    /// changes passwords.
+    #[test]
+    fn enrolment_does_not_imply_change() {
+        let (registry, _source, psi_end) = with_source(Capabilities::ENROLLS_CREDENTIALS);
+        let (client, result) = serve_for(&registry, &sid("S-1-5-21-1-2-3-1000"));
+        result.expect("served");
+        assert_eq!(denial(&client), Denial::AccountRestricted);
+        nothing_sent(&psi_end);
+    }
+
+    #[test]
+    fn an_enrolment_for_a_principal_no_source_holds_is_restricted() {
+        let (registry, _source, psi_end) = with_source(Capabilities::ENROLLS_CREDENTIALS);
+        let (client, result) = enroll_for(&registry, &sid("S-1-5-18"));
+        result.expect("served");
+        assert_eq!(denial(&client), Denial::AccountRestricted);
+        nothing_sent(&psi_end);
+    }
+
+    #[test]
+    fn an_enrolment_with_a_configured_source_missing_is_unavailable() {
+        let registry = Registry::for_test(&[("lpsd", policy::sources::DEFAULT_SEARCH_ORDER, None)]);
+        let (client, result) = enroll_for(&registry, &sid("S-1-5-21-1-2-3-1000"));
+        result.expect("served");
+        assert_eq!(denial(&client), Denial::AuthorityUnavailable);
+    }
+
+    /// The whole path: the enrolment reaches the owning source naming the
+    /// peer and carrying the material, the proof round is relayed, and the
+    /// source's `CredentialChanged` reaches the client with no descriptor.
+    #[test]
+    fn an_enrolment_the_source_completes_reaches_the_client() {
+        let (registry, _source, psi_end) = with_source(Capabilities::ENROLLS_CREDENTIALS);
+        let peer = sid("S-1-5-21-1-2-3-1000");
+
+        let fake_source = std::thread::spawn(move || {
+            let received = recv_message(&psi::FRAMING, &psi_end).expect("an enrolment");
+            let envelope = psi::decode_envelope(received.expose()).expect("an envelope");
+            assert_eq!(envelope.msg_type, psi::MSG_ENROLL_CREDENTIAL);
+            let enroll = psi::decode_enroll_credential(received.expose()).expect("decodes");
+
+            // The proof round, relayed to the client and back.
+            let ask = psi::encode_credential_request(
+                envelope.conversation,
+                &libauthd::wire::CredentialRequest {
+                    messages: Vec::new(),
+                    prompts: vec![libauthd::wire::Prompt {
+                        parameters: Vec::new(),
+                        credential_ref: 1,
+                        credential_type: CredentialType::Password,
+                        credential_name: "Current password".into(),
+                    }],
+                },
+            )
+            .expect("encodes");
+            libauthd::transport::send_message(&psi_end, &ask).expect("sends");
+            let answer = recv_message(&psi::FRAMING, &psi_end).expect("an answer");
+            let response = psi::decode_credential_response(answer.expose()).expect("decodes");
+            assert_eq!(response.answers[0].data.expose(), b"old");
+
+            let reply = psi::encode_credential_changed(envelope.conversation).expect("encodes");
+            libauthd::transport::send_message(&psi_end, &reply).expect("sends");
+            enroll
+        });
+
+        let (client, server) = UnixStream::pair().expect("socketpair");
+        let answering = std::thread::spawn(move || {
+            let request = recv_message(&wire::FRAMING, &client).expect("the proof prompt");
+            let (msg_type, _) = decode_header(request.expose()).expect("a header");
+            assert_eq!(msg_type, wire::MSG_CREDENTIAL_REQUEST);
+            let response = wire::encode_credential_response(&libauthd::wire::CredentialResponse {
+                answers: vec![libauthd::wire::Answer {
+                    credential_ref: 1,
+                    data: libauthd::Secret::from_slice(b"old"),
+                }],
+            })
+            .expect("encodes");
+            libauthd::transport::send_message(&client, response.expose()).expect("sends");
+            let (terminal, descriptor) =
+                libauthd::transport::recv_message_with_fd(&wire::FRAMING, &client)
+                    .expect("terminal");
+            let (msg_type, _) = decode_header(terminal.expose()).expect("a header");
+            (msg_type, descriptor.is_none())
+        });
+        let deadline = Instant::now() + Duration::from_secs(60);
+        serve_enroll(&registry, &server, &peer, &enroll_start(), deadline).expect("served");
+
+        let enroll = fake_source.join().expect("the fake source");
+        assert_eq!(enroll.principal, peer.as_ref().as_bytes(), "the peer, from the socket");
+        assert_eq!(enroll.start, enroll_start(), "the opening, nested whole");
+        let (msg_type, no_descriptor) = answering.join().expect("the client");
+        assert_eq!(msg_type, MSG_CREDENTIAL_CHANGED);
+        assert!(no_descriptor, "an enrolment hands over no token");
+    }
+
+    fn refusing_with(
+        denial: Denial,
+        capabilities: Capabilities,
+    ) -> (Registry, std::thread::JoinHandle<()>) {
+        let (registry, _source, psi_end) = with_source(capabilities);
+        let fake_source = std::thread::spawn(move || {
+            let received = recv_message(&psi::FRAMING, &psi_end).expect("an opening");
+            let envelope = psi::decode_envelope(received.expose()).expect("an envelope");
+            let reply = psi::encode_refusal(
+                envelope.conversation,
+                &psi::Refusal {
+                    denial,
+                    reason: "That is not an SSH public key this machine accepts.".into(),
+                },
+            )
+            .expect("encodes");
+            libauthd::transport::send_message(&psi_end, &reply).expect("sends");
+        });
+        (registry, fake_source)
+    }
+
+    /// `CredentialRejected` answers an enrolment, and is relayed there...
+    #[test]
+    fn a_rejected_credential_is_relayed_on_an_enrolment() {
+        let (registry, fake_source) = refusing_with(
+            Denial::CredentialRejected,
+            Capabilities::ENROLLS_CREDENTIALS,
+        );
+        let (client, result) = enroll_for(&registry, &sid("S-1-5-21-1-2-3-1000"));
+        result.expect("served");
+        fake_source.join().expect("the fake source");
+        assert_eq!(denial(&client), Denial::CredentialRejected);
+    }
+
+    /// ...and nowhere else: a change offered no material to reject.
+    #[test]
+    fn a_rejected_credential_is_not_relayed_on_a_change() {
+        let (registry, fake_source) = refusing_with(
+            Denial::CredentialRejected,
+            Capabilities::CHANGES_CREDENTIALS,
+        );
+        let (client, result) = serve_for(&registry, &sid("S-1-5-21-1-2-3-1000"));
+        result.expect("served");
+        fake_source.join().expect("the fake source");
+        assert_eq!(denial(&client), Denial::Internal);
     }
 }
