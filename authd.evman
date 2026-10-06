@@ -1,17 +1,3 @@
---- field source.token.sid
-type: bin.sid
-
-The user SID of the token of the process that asked for an operation on
-someone else's behalf: the program that originated a logon, such as
-`login`, sshd or a graphical greeter, as against the principal being signed
-in. The emitter reads it from the connected peer's token, never from
-anything the peer sent.
-
-Not `subject.token.sid`, which is the principal the record is about.
-Several originators run as SYSTEM, so this field says which principal
-asked, not which program; the kernel-stamped header names the emitter, not
-the originator, so nothing else in the record does.
-
 --- event authd.logon.attempted
 tier: essential
 gating: none — every logon that reaches a principal source's question, or is refused before one, is recorded
