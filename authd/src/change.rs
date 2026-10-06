@@ -228,7 +228,7 @@ fn serve_request(
         deadline,
         request.purpose(),
     )? {
-        Some(Ended::Changed) => {
+        Ok(Ended::Changed) => {
             let message = encode_credential_changed(&CredentialChanged)
                 .map_err(|_| io::Error::other("could not encode a credential change"))?;
             send_message(stream, &message)?;
@@ -242,12 +242,12 @@ fn serve_request(
         // sent. Answered anyway rather than trusted: a mistake there must cost
         // a denial, never a connection closed with nothing said — and never,
         // on this path, a token.
-        Some(Ended::Asserted(_)) => deny(
+        Ok(Ended::Asserted(_)) => deny(
             stream,
             Denial::Internal,
             "The authority could not complete the change.",
         ),
-        None => Ok(()),
+        Err(_) => Ok(()),
     }
 }
 

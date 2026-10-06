@@ -42,12 +42,20 @@ use libauthd::wire::{
     encode_session_ended,
 };
 use libauthd_policy::SESSION_END;
-use peios::access::AccessCheck;
+use peios::access::{AccessCheck, AuditContext};
 use peios::security::{AccessMask, GenericMapping, Sid, SidRef};
 use peios::token::{Token, TokenAccess};
 
+use crate::audit;
 use crate::conversation::deny;
 use crate::log;
+
+/// The `object.kind` of the access check against `SessionEndSecurity`: the
+/// right to end other principals' sessions, which is authd's alone to guard.
+/// Named for authd, as eventd's `eventd-admin` and peinit's `peinit-system`
+/// are, because `SESSION_END` is authd's mask and decodes against nothing
+/// else; a bare `session` would read as the kernel's session object.
+const AUDIT_KIND: &str = "authd-session-end";
 
 /// How long a process is given to exit after `SIGTERM`, before `SIGKILL`.
 ///
@@ -212,16 +220,35 @@ pub(crate) fn decide(
 ///
 /// Fails closed: a descriptor that cannot be used, or a check that cannot be
 /// run, grants nothing.
+///
+/// The check names what it guarded with an audit context of kind
+/// [`AUDIT_KIND`], so that when the descriptor's SACL asks for it KACS records
+/// the decision — a refusal above all — as `kacs.audit.access.checked` with
+/// `object.kind` `authd-session-end` (PGSS §6.7). authd writes no denial event
+/// of its own: access decisions are KACS's to record.
 fn may_end_others(token: &Token) -> bool {
     let Some(sd) = crate::policy::session_end_descriptor() else {
         return false;
     };
     // One right, so every generic right means it.
     let mapping = GenericMapping::new(SESSION_END, SESSION_END, SESSION_END, SESSION_END);
-    match AccessCheck::new(&sd, AccessMask::from_bits_retain(SESSION_END), mapping)
-        .token(token.as_fd())
-        .check()
-    {
+    let context = match AuditContext::new(AUDIT_KIND, &[]) {
+        Ok(context) => Some(context),
+        Err(error) => {
+            // A constant kind cannot fail to encode; if it somehow does, the
+            // decision still stands and only its record goes unnamed.
+            log::error(format_args!(
+                "could not build the session-end audit context: {error}"
+            ));
+            None
+        }
+    };
+    let mut check = AccessCheck::new(&sd, AccessMask::from_bits_retain(SESSION_END), mapping);
+    check.token(token.as_fd());
+    if let Some(context) = &context {
+        check.audit_context(context);
+    }
+    match check.check() {
         Ok(decision) => decision.allowed,
         Err(error) => {
             log::error(format_args!(
@@ -346,6 +373,22 @@ fn log_outcome(peer: &Sid, target: &Listed, outcome: &SessionEnded) {
         "ended session {} (user={}) at the request of {peer}: {} processes ended, {} remaining",
         target.id, target.user, outcome.ended, outcome.remaining
     ));
+    audit::essential("authd.session.ended", &ended_record(peer, target, outcome));
+}
+
+/// `authd.session.ended`: who asked, whose session it was, and whether
+/// anything was left holding it.
+fn ended_record(peer: &Sid, target: &Listed, outcome: &SessionEnded) -> audit::Record {
+    let mut record = audit::Record::new();
+    record
+        .sid("subject.token.sid", peer.as_ref())
+        .uint("object.session.id", target.id)
+        .sid("object.session.user.sid", target.user.as_ref());
+    if let Some(name) = audit::logon_type_name(target.logon_type) {
+        record.str("object.session.logon-type", name);
+    }
+    record.outcome((outcome.remaining != 0).then_some("processes-remaining"));
+    record
 }
 
 // ---------------------------------------------------------------------------
@@ -671,6 +714,65 @@ mod tests {
     }
     fn refused() -> bool {
         false
+    }
+
+    /// The record names who asked and whose session it was by SID, and a
+    /// session something still holds is an end that did not finish.
+    #[test]
+    fn an_ended_session_is_recorded_with_who_asked() {
+        let target = listed(4242, BOB, 10);
+        let asker = sid(ALICE);
+        log_outcome(
+            &asker,
+            &target,
+            &SessionEnded {
+                ended: 3,
+                remaining: 0,
+            },
+        );
+        log_outcome(
+            &asker,
+            &target,
+            &SessionEnded {
+                ended: 1,
+                remaining: 2,
+            },
+        );
+
+        let written = audit::take();
+        assert_eq!(written.len(), 2);
+        let (event_type, done) = &written[0];
+        assert_eq!(event_type, "authd.session.ended");
+        assert_eq!(
+            done.get("subject.token.sid"),
+            Some(&audit::Value::Bin(asker.as_ref().as_bytes().to_vec()))
+        );
+        assert_eq!(done.get("object.session.id"), Some(&audit::Value::Uint(4242)));
+        assert_eq!(
+            done.get("object.session.user.sid"),
+            Some(&audit::Value::Bin(sid(BOB).as_ref().as_bytes().to_vec()))
+        );
+        assert_eq!(
+            done.get("object.session.logon-type"),
+            Some(&audit::Value::Str("remote-interactive".into()))
+        );
+        assert_eq!(done.get("outcome.success"), Some(&audit::Value::Bool(true)));
+        assert_eq!(done.get("outcome.reason"), None);
+
+        let (_, unfinished) = &written[1];
+        assert_eq!(unfinished.get("outcome.success"), Some(&audit::Value::Bool(false)));
+        assert_eq!(
+            unfinished.get("outcome.reason"),
+            Some(&audit::Value::Str("processes-remaining".into()))
+        );
+    }
+
+    /// The context the session-end check names its descriptor with is one the
+    /// kernel will accept.
+    #[test]
+    fn the_audit_context_is_well_formed() {
+        let context = AuditContext::new(AUDIT_KIND, &[]).expect("a valid kind");
+        AuditContext::from_bytes(context.as_bytes().to_vec()).expect("the kernel's rules");
     }
 
     #[test]

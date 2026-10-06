@@ -21,3 +21,7 @@ license      = "((MIT OR Apache-2.0) AND Unicode-3.0) AND Apache-2.0 AND (Apache
 # values in the registry; this is what explains what one means. Hand-written
 # beside the recipe, so it comes from source with no build target involved.
 "@source:authd.regman"                  = "usr/share/regman/authd.regman"
+# evman documentation for the events authd writes (PGSS §6.10): what each
+# record and field means, which `evman` and the event viewer read. Like the
+# regman file, hand-written beside the recipe and taken from source.
+"@source:authd.evman"                   = "usr/share/evman/authd.evman"

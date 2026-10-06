@@ -61,6 +61,7 @@
 //! more than one configured source sends every logon to the first (PEI-304).
 
 mod attest;
+mod audit;
 mod change;
 mod conversation;
 mod derive;
