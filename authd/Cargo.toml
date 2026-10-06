@@ -21,4 +21,4 @@ libauthd = { path = "../libauthd" }
 # Without its `write` feature it opens no key for writing.
 libauthd-policy = { path = "../libauthd-policy" }
 libc = "0.2"
-peios = { git = "https://github.com/peios/peios-rs.git", rev = "02c87cb643c30eef6b74cd1d9d8b0ae067bed69a" }
+peios = { git = "https://github.com/peios/peios-rs.git", rev = "f8c84930f2b71763bcf0550df0b1420a0f63b21e" }
