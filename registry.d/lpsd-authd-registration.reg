@@ -36,6 +36,14 @@
     "(nobody). That is the safe direction -- 65534 grants nothing -- and it is",
     "visible in both the warning authd logs at registration and the uid itself.",
     "",
+    "The Policy record is what authd grants lpsd's virtual account, named by",
+    "the service SID derived from 'lpsd'. System integrity, because lpsd holds",
+    "every local verifier; SeAuditPrivilege, because KMES refuses events from",
+    "a token without it and lpsd records the credentials it checks and every",
+    "change to its accounts and groups (lpsd.evman). SeChangeNotifyPrivilege",
+    "is repeated from Everyone so that lpsd still traverses if that record is",
+    "edited away. lpsd-service.reg's RequiredPrivileges names the same set.",
+    "",
     "Shipped by the lpsd package into /usr/share/regim/; it only",
     "applies if an image opts in via [registry] autoapply in its peiso.toml.",
     "The package proposes, the image decides."
@@ -73,6 +81,14 @@
     {
       "path": "Machine\\Generic\\Authn\\Policy\\S-1-5-80-4242895835-3884168475-4287610261-1596539771-2019494472",
       "values": [
+        {
+          "name": "Privileges",
+          "type": "multi",
+          "data": [
+            "SeChangeNotifyPrivilege",
+            "SeAuditPrivilege"
+          ]
+        },
         {
           "name": "Integrity",
           "type": "sz",

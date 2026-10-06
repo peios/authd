@@ -485,6 +485,47 @@ pub struct Identity {
     pub claims: Vec<Claim>,
 }
 
+/// Why a credential did not sign anyone in. Told to the audit trail, never to
+/// the caller: on the wire every one of these is "authentication failed".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Unverified {
+    /// No account by that name.
+    NoSuchAccount,
+    /// The account exists and the credential did not verify.
+    WrongCredential,
+    /// The credential held, and the account is disabled.
+    Disabled,
+    /// The account's credential policy does not allow this kind of credential,
+    /// or it holds no such credential.
+    NotPermitted,
+}
+
+impl Unverified {
+    /// The `outcome.reason` of `lpsd.credential.verified`.
+    pub fn reason(self) -> &'static str {
+        match self {
+            Self::NoSuchAccount => "no-such-account",
+            Self::WrongCredential => "wrong-credential",
+            Self::Disabled => "disabled",
+            Self::NotPermitted => "not-permitted",
+        }
+    }
+}
+
+/// What checking a credential found: the identity, or why not, and the
+/// account's SID whenever there was an account.
+#[derive(Debug)]
+pub struct Verification {
+    pub account: Option<Sid>,
+    pub result: Result<Identity, Unverified>,
+}
+
+impl Verification {
+    fn of(account: Option<Sid>, result: Result<Identity, Unverified>) -> Self {
+        Self { account, result }
+    }
+}
+
 /// What the store needs before it can authenticate a given identifier.
 ///
 /// Explicit policy separates permitted material from no-credential access.
@@ -1579,7 +1620,20 @@ impl Store {
     /// costs what *those* parameters cost, which the decoy does not match. That
     /// distinguishes "old account" from "no account", not "account" from "no
     /// account", and it is inherent to keeping old verifiers working at all.
+    ///
+    /// The daemon calls [`Store::verify_password`], which is this with the
+    /// reason kept for the audit trail; this form is the tests'.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn authenticate(&self, identifier: &[u8], secret: &[u8]) -> Option<Identity> {
+        self.verify_password(identifier, secret).result.ok()
+    }
+
+    /// [`Store::authenticate`], saying why a failure failed and whose account
+    /// it was — for the audit trail, and never for the wire.
+    ///
+    /// The timing discipline is `authenticate`'s, because this is it: one
+    /// derivation whatever the name, taken before anything is decided.
+    pub fn verify_password(&self, identifier: &[u8], secret: &[u8]) -> Verification {
         let found = self.principals.iter().find(|p| p.matches(identifier));
         // A passwordless principal takes the decoy too. It is not authenticable
         // by password at all, and giving it its own early return would cost a
@@ -1593,15 +1647,29 @@ impl Store {
         // Unconditional, and before any decision is taken on `found`.
         let correct = verifier.verify(secret);
 
-        let principal = found?;
-        if !correct
-            || !principal.enabled
-            || !principal.policy.password()
-            || principal.verifier.is_none()
-        {
-            return None;
-        }
-        self.identity_of(principal)
+        let Some(principal) = found else {
+            return Verification::of(None, Err(Unverified::NoSuchAccount));
+        };
+        let account = self.sid_of(principal.rid).ok();
+        // In this order, so the reason is the first thing that stopped it: a
+        // wrong password on a disabled account is a wrong password.
+        let result = if !correct {
+            Err(Unverified::WrongCredential)
+        } else if !principal.enabled {
+            Err(Unverified::Disabled)
+        } else if !principal.policy.password() || principal.verifier.is_none() {
+            Err(Unverified::NotPermitted)
+        } else {
+            self.identity_of(principal).ok_or(Unverified::WrongCredential)
+        };
+        Verification::of(account, result)
+    }
+
+    /// The SID of the account an identifier names, if lpsd holds one — for
+    /// the audit record of a check that went no further than the name.
+    pub fn account_sid(&self, identifier: &[u8]) -> Option<Sid> {
+        let principal = self.principals.iter().find(|p| p.matches(identifier))?;
+        self.sid_of(principal.rid).ok()
     }
 
     /// Password-side collection policy. A key-only or denied principal must
@@ -1666,6 +1734,37 @@ impl Store {
             return None;
         }
         self.identity_of(p)
+    }
+
+    /// [`Store::authenticate_key`], saying why a failure failed and whose
+    /// account it was — for the audit trail, and never for the wire.
+    pub fn verify_key(
+        &self,
+        binding: &libauthd::ssh::Binding,
+        offer: &libauthd::ssh::Offer,
+        generation: Option<(u32, u64)>,
+    ) -> Verification {
+        let Some(p) = self
+            .principals
+            .iter()
+            .find(|p| p.matches(binding.username.as_bytes()))
+        else {
+            return Verification::of(None, Err(Unverified::NoSuchAccount));
+        };
+        let account = self.sid_of(p.rid).ok();
+        let result = match self.authenticate_key(binding, offer, generation) {
+            Some(identity) => Ok(identity),
+            None if !p.enabled => Err(Unverified::Disabled),
+            // Keys not allowed, or not this key: the account does not let this
+            // credential sign it in.
+            None if !self.key_eligible(binding.username.as_bytes(), offer) => {
+                Err(Unverified::NotPermitted)
+            }
+            // A key it holds, whose signature did not verify, or that changed
+            // between the offer and the proof.
+            None => Err(Unverified::WrongCredential),
+        };
+        Verification::of(account, result)
     }
 
     pub fn set_credential_policy(&mut self, name: &str, policy: Policy) -> Result<(), StoreError> {

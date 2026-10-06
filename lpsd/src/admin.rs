@@ -51,9 +51,10 @@ use std::time::Duration;
 use libauthd::lps::{self, Failed, Failure};
 use libauthd::transport::{recv_message, send_message};
 use libauthd::{LPSD_ADMIN_SOCKET_PATH, LPSD_RUN_DIR};
-use peios::security::{GroupAttributes, Sid, WellKnown};
+use peios::security::{GroupAttributes, Sid, SidRef, WellKnown};
 use peios::token::Token;
 
+use crate::audit;
 use crate::log;
 use libauthd::psi;
 
@@ -206,7 +207,15 @@ fn protect(path: &Path) {
     }
 }
 
-/// Whether the peer on this connection may administer the store.
+/// The administrator on this connection — the user SID of the peer's token —
+/// or `None` if the peer may not administer the store.
+///
+/// The SID is returned rather than a yes, because it is who every record of
+/// the request names as having acted (`subject.token.sid`).
+///
+/// This is a test of the token, not a KACS access check against a
+/// descriptor, so a refusal here reaches no audit record: KACS records only
+/// the decisions it makes.
 ///
 /// Two ways to satisfy it:
 ///
@@ -218,31 +227,124 @@ fn protect(path: &Path) {
 ///   a machine is created by a boot-time service before any human principal
 ///   exists to be an administrator. Without this there would be no way to
 ///   bootstrap an account at all.
-fn may_administer(stream: &UnixStream) -> bool {
+fn may_administer(stream: &UnixStream) -> Option<Sid> {
     let token = match Token::open_peer(stream.as_fd()) {
         Ok(token) => token,
         Err(error) => {
             log::warn(format_args!(
                 "admin: could not read a peer's token: {error}"
             ));
-            return false;
+            return None;
         }
     };
 
-    if token
-        .user()
-        .is_ok_and(|user| user == Sid::well_known(WellKnown::System))
-    {
-        return true;
+    // A token whose user cannot be read is nobody this can record, and so
+    // nobody it admits.
+    let user = match token.user() {
+        Ok(user) => user,
+        Err(error) => {
+            log::warn(format_args!("admin: could not read a peer's user: {error}"));
+            return None;
+        }
+    };
+    if user == Sid::well_known(WellKnown::System) {
+        return Some(user);
     }
 
     let administrators = Sid::well_known(WellKnown::Administrators);
-    token.groups().is_ok_and(|groups| {
+    let administrator = token.groups().is_ok_and(|groups| {
         groups.iter().any(|(sid, attributes)| {
             *sid == administrators
                 && GroupAttributes::from_bits_retain(*attributes).contains(GroupAttributes::ENABLED)
         })
-    })
+    });
+    administrator.then_some(user)
+}
+
+/// What a mutating request is recorded as: which event, what it changed, and
+/// whom. Filled in by [`dispatch`] as it learns them — the account and group
+/// before anything is applied, so that a refusal and a deletion still name
+/// them, and a new account or group once it has a SID.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Act {
+    event: &'static str,
+    operation: Option<&'static str>,
+    account: Option<Sid>,
+    group: Option<Sid>,
+    /// The request creates the account or group named, which therefore does
+    /// not exist unless it succeeded.
+    creates: bool,
+}
+
+impl Act {
+    fn new(event: &'static str) -> Self {
+        Self {
+            event,
+            operation: None,
+            account: None,
+            group: None,
+            creates: false,
+        }
+    }
+
+    /// `lpsd.account.modified`, doing `operation` to the account `name`.
+    fn modified(store: &Store, operation: &'static str, name: &str) -> Self {
+        Self {
+            operation: Some(operation),
+            account: account_sid(store, name),
+            ..Self::new("lpsd.account.modified")
+        }
+    }
+
+    /// The record, given who asked and how it ended.
+    fn record(&self, administrator: &SidRef, failed: Option<&str>) -> audit::Record {
+        let mut record = audit::Record::new();
+        record.sid("subject.token.sid", administrator);
+        // A creation that did not happen created nothing to name.
+        if !(self.creates && failed.is_some()) {
+            if let Some(account) = &self.account {
+                record.sid("object.account.sid", account.as_ref());
+            }
+            if let Some(group) = &self.group {
+                record.sid("object.group.sid", group.as_ref());
+            }
+        }
+        if let Some(operation) = self.operation {
+            record.str("operation.name", operation);
+        }
+        record.outcome(failed);
+        record
+    }
+}
+
+/// The SID of the account `name`, if the store holds one.
+fn account_sid(store: &Store, name: &str) -> Option<Sid> {
+    store.record(name).ok().map(|record| record.sid)
+}
+
+/// The SID of the group `name` — the store's own, or a well-known one — if
+/// there is one.
+fn group_sid(store: &Store, name: &str) -> Option<Sid> {
+    store.resolve_group(name).ok()
+}
+
+/// The SID of the object a new RID was given.
+fn created_sid(store: &Store, rid: u32) -> Option<Sid> {
+    match store.lookup_relative_id(rid)? {
+        store::Object::Principal(record) => Some(record.sid),
+        store::Object::Group(group) => Some(group.sid),
+    }
+}
+
+/// What a failed request is recorded as: the failure `lps` was told.
+fn failure_reason(failure: Failure) -> &'static str {
+    match failure {
+        Failure::NotFound => "not-found",
+        Failure::Exists => "exists",
+        Failure::Invalid => "invalid",
+        Failure::Denied => "denied",
+        Failure::Internal => "internal",
+    }
 }
 
 /// Serve one administrative request, persisting through `save` before
@@ -264,7 +366,7 @@ pub fn serve(
         return;
     }
 
-    if !may_administer(&stream) {
+    let Some(administrator) = may_administer(&stream) else {
         log::warn(format_args!(
             "admin: refused a caller that is not an administrator"
         ));
@@ -274,7 +376,7 @@ pub fn serve(
             "Not authorised to administer the local principal store.",
         );
         return;
-    }
+    };
 
     let received = match recv_message(&lps::FRAMING, &stream) {
         Ok(received) => received,
@@ -295,7 +397,8 @@ pub fn serve(
     // alternatives for keeping memory and disk in step.
     let snapshot = store.clone();
 
-    let answer = dispatch(store, registered, msg_type, received.expose());
+    let mut act = None;
+    let answer = dispatch(store, registered, msg_type, received.expose(), &mut act);
 
     // Check the daemon's own answer against the protocol's declared pairing.
     // A reply of the wrong type is a bug here, and its symptom is the worst
@@ -315,10 +418,20 @@ pub fn serve(
         }
     }
 
+    // Recorded once the outcome is settled — after the save, so a success is
+    // only ever recorded for a change that is durable — and before the reply,
+    // so the record exists by the time `lps` reports it.
+    let record = |failed: Option<&str>| {
+        if let Some(act) = &act {
+            audit::essential(act.event, &act.record(administrator.as_ref(), failed));
+        }
+    };
+
     match answer {
         Ok((Changed::Yes, reply)) => match save(store) {
             Ok(()) => {
                 log::info(format_args!("admin: {}", describe(msg_type)));
+                record(None);
                 send(&stream, &reply);
             }
             Err(error) => {
@@ -327,6 +440,7 @@ pub fn serve(
                     "admin: could not persist {}: {error}; the change was rolled back",
                     describe(msg_type)
                 ));
+                record(Some("not-saved"));
                 refuse(
                     &stream,
                     Failure::Internal,
@@ -334,6 +448,8 @@ pub fn serve(
                 );
             }
         },
+        // Nothing changed — a read, or a change to what already was — so
+        // nothing happened to record.
         Ok((Changed::No, reply)) => send(&stream, &reply),
         Err(refused) => {
             // Every mutating method validates before it writes, so a refusal
@@ -344,6 +460,7 @@ pub fn serve(
                 describe(msg_type),
                 refused.reason()
             ));
+            record(Some(failure_reason(refused.failure())));
             refuse(&stream, refused.failure(), &refused.reason());
         }
     }
@@ -380,11 +497,16 @@ fn describe(msg_type: u16) -> &'static str {
     }
 }
 
+/// Serve one decoded request. A request that can change the store sets `act`
+/// to what it will be recorded as, as soon as it has decoded whom it is about
+/// — so a refusal is recorded too. A read leaves it `None`, and so do the two
+/// group changes no event type covers yet (`group-rename`, `group-describe`).
 fn dispatch(
     store: &mut Store,
     registered: psi::Registered,
     msg_type: u16,
     buf: &[u8],
+    act: &mut Option<Act>,
 ) -> Result<(Changed, Vec<u8>), Refused> {
     // What a relative Unix ID projects to once authd has rebased it. Shown to
     // an operator rather than used for anything: lpsd stores and asserts the
@@ -426,14 +548,17 @@ fn dispatch(
                     public_key,
                     label,
                 } => {
+                    *act = Some(Act::modified(store, "key-add", &name));
                     store.add_key(&name, &public_key, &label)?;
                     Ok((Changed::Yes, encoded(lps::encode_done())?))
                 }
                 lps::KeyRequest::Remove { name, id } => {
+                    *act = Some(Act::modified(store, "key-remove", &name));
                     store.remove_key(&name, id)?;
                     Ok((Changed::Yes, encoded(lps::encode_done())?))
                 }
                 lps::KeyRequest::Policy { name, policy } => {
+                    *act = Some(Act::modified(store, "set-credential-policy", &name));
                     store.set_credential_policy(&name, policy)?;
                     Ok((Changed::Yes, encoded(lps::encode_done())?))
                 }
@@ -494,6 +619,10 @@ fn dispatch(
 
         lps::MSG_ADD => {
             let add = request(lps::decode_add(buf))?;
+            *act = Some(Act {
+                creates: true,
+                ..Act::new("lpsd.account.created")
+            });
             // Resolved here rather than by the tool, so `lps` needs no copy of
             // the well-known table or the domain — see `Store::resolve_group`.
             let groups = add
@@ -526,29 +655,44 @@ fn dispatch(
                     lps::Credential::None => None,
                 },
             )?;
+            if let Some(act) = act.as_mut() {
+                act.account = created_sid(store, rid);
+            }
             Ok((Changed::Yes, encoded(lps::encode_created(rid))?))
         }
 
         lps::MSG_REMOVE => {
             let named = request(lps::decode_remove(buf))?;
+            // Before it goes: afterwards there is nothing to ask.
+            *act = Some(Act {
+                account: account_sid(store, &named.name),
+                ..Act::new("lpsd.account.deleted")
+            });
             store.remove(&named.name)?;
             Ok((Changed::Yes, encoded(lps::encode_done())?))
         }
 
         lps::MSG_SET_ENABLED => {
             let set = request(lps::decode_set_enabled(buf))?;
+            *act = Some(Act::modified(store, "set-enabled", &set.name));
             let changed = store.set_enabled(&set.name, set.enabled)?;
             Ok((changed_flag(changed), encoded(lps::encode_done())?))
         }
 
         lps::MSG_SET_PASSWORD => {
             let set = request(lps::decode_set_password(buf))?;
+            *act = Some(Act::modified(store, "set-password", &set.name));
             store.set_password(&set.name, set.secret)?;
             Ok((Changed::Yes, encoded(lps::encode_done())?))
         }
 
         lps::MSG_GROUP_ADD => {
             let membership = request(lps::decode_group_add(buf))?;
+            *act = Some(Act {
+                account: account_sid(store, &membership.name),
+                group: group_sid(store, &membership.group),
+                ..Act::new("lpsd.group.member.added")
+            });
             let group = store.resolve_group(&membership.group)?;
             let changed = store.add_membership(&membership.name, group)?;
             Ok((changed_flag(changed), encoded(lps::encode_done())?))
@@ -556,6 +700,11 @@ fn dispatch(
 
         lps::MSG_GROUP_REMOVE => {
             let membership = request(lps::decode_group_remove(buf))?;
+            *act = Some(Act {
+                account: account_sid(store, &membership.name),
+                group: group_sid(store, &membership.group),
+                ..Act::new("lpsd.group.member.removed")
+            });
             let group = store.resolve_group(&membership.group)?;
             let changed = store.remove_membership(&membership.name, group.as_ref())?;
             Ok((changed_flag(changed), encoded(lps::encode_done())?))
@@ -580,7 +729,14 @@ fn dispatch(
 
         lps::MSG_GROUP_CREATE => {
             let group = request(lps::decode_group_create(buf))?;
+            *act = Some(Act {
+                creates: true,
+                ..Act::new("lpsd.group.created")
+            });
             let rid = store.create_group(&group.name, &group.description)?;
+            if let Some(act) = act.as_mut() {
+                act.group = created_sid(store, rid);
+            }
             Ok((Changed::Yes, encoded(lps::encode_created(rid))?))
         }
 
@@ -598,12 +754,18 @@ fn dispatch(
 
         lps::MSG_GROUP_DELETE => {
             let named = request(lps::decode_group_delete(buf))?;
+            // Before it goes: afterwards there is nothing to ask.
+            *act = Some(Act {
+                group: group_sid(store, &named.name),
+                ..Act::new("lpsd.group.deleted")
+            });
             store.delete_group(&named.name)?;
             Ok((Changed::Yes, encoded(lps::encode_done())?))
         }
 
         lps::MSG_SET_PROFILE => {
             let set = request(lps::decode_set_profile(buf))?;
+            *act = Some(Act::modified(store, "set-profile", &set.name));
             // Every field is applied before anything is reported, and a refusal
             // from any one of them aborts the request — `serve` restores the
             // snapshot, so a half-applied profile is not reachable.
@@ -622,6 +784,10 @@ fn dispatch(
 
         lps::MSG_SET_PRIMARY_GROUP => {
             let membership = request(lps::decode_set_primary_group(buf))?;
+            *act = Some(Act {
+                group: group_sid(store, &membership.group),
+                ..Act::modified(store, "set-primary-group", &membership.name)
+            });
             let group = store.resolve_group(&membership.group)?;
             let changed = store.set_primary_group(&membership.name, group)?;
             Ok((changed_flag(changed), encoded(lps::encode_done())?))
@@ -629,24 +795,28 @@ fn dispatch(
 
         lps::MSG_SET_CLAIM => {
             let set = request(lps::decode_set_claim(buf))?;
+            *act = Some(Act::modified(store, "set-claim", &set.name));
             let changed = store.set_claim(&set.name, set.claim)?;
             Ok((changed_flag(changed), encoded(lps::encode_done())?))
         }
 
         lps::MSG_REMOVE_CLAIM => {
             let named = request(lps::decode_remove_claim(buf))?;
+            *act = Some(Act::modified(store, "remove-claim", &named.name));
             let changed = store.remove_claim(&named.name, &named.claim_name)?;
             Ok((changed_flag(changed), encoded(lps::encode_done())?))
         }
 
         lps::MSG_RENAME => {
             let rename = request(lps::decode_rename(buf))?;
+            *act = Some(Act::modified(store, "rename", &rename.name));
             let changed = store.rename(&rename.name, &rename.new_name)?;
             Ok((changed_flag(changed), encoded(lps::encode_done())?))
         }
 
         lps::MSG_SET_LOGON_TYPES => {
             let set = request(lps::decode_set_logon_types(buf))?;
+            *act = Some(Act::modified(store, "set-logon-types", &set.name));
             let changed = store.set_logon_types(&set.name, set.permitted_logon_types)?;
             Ok((changed_flag(changed), encoded(lps::encode_done())?))
         }
@@ -692,9 +862,124 @@ mod tests {
     use super::*;
 
     fn ask(store: &mut Store, msg_type: u16, message: &[u8]) -> Result<Vec<u8>, Failure> {
-        dispatch(store, psi::Registered::default(), msg_type, message)
+        dispatch(store, psi::Registered::default(), msg_type, message, &mut None)
             .map(|(_, reply)| reply)
             .map_err(|refused| refused.failure())
+    }
+
+    /// What a request would be recorded as, and whether it was refused.
+    fn act_of(store: &mut Store, msg_type: u16, message: &[u8]) -> (Option<Act>, bool) {
+        let mut act = None;
+        let refused = dispatch(store, psi::Registered::default(), msg_type, message, &mut act)
+            .is_err();
+        (act, refused)
+    }
+
+    fn bin(sid: &Sid) -> audit::Value {
+        audit::Value::Bin(sid.as_ref().as_bytes().to_vec())
+    }
+
+    /// An account created names its new SID; a group membership names both
+    /// the account and the group, a well-known group included; and a deletion
+    /// names what it deleted, found before it went.
+    #[test]
+    fn changes_are_recorded_by_sid() {
+        let mut store = Store::provision().unwrap();
+        let admin: Sid = "S-1-5-21-9-9-9-500".parse().unwrap();
+
+        let message = lps::encode_add(&dana()).unwrap();
+        let (act, refused) = act_of(&mut store, lps::MSG_ADD, message.expose());
+        assert!(!refused);
+        let act = act.unwrap();
+        assert_eq!(act.event, "lpsd.account.created");
+        let dana_sid = store.record("dana").unwrap().sid;
+        assert_eq!(act.account.as_ref(), Some(&dana_sid));
+        let record = act.record(admin.as_ref(), None);
+        assert_eq!(record.get("subject.token.sid"), Some(&bin(&admin)));
+        assert_eq!(record.get("object.account.sid"), Some(&bin(&dana_sid)));
+        assert_eq!(record.get("outcome.success"), Some(&audit::Value::Bool(true)));
+        // A creation that failed names nothing it did not create.
+        let failed = act.record(admin.as_ref(), Some("not-saved"));
+        assert_eq!(failed.get("object.account.sid"), None);
+        assert_eq!(
+            failed.get("outcome.reason"),
+            Some(&audit::Value::Str("not-saved".into()))
+        );
+
+        add(
+            &mut store,
+            &lps::Add {
+                name: "erin".into(),
+                groups: vec![],
+                ..dana()
+            },
+        )
+        .unwrap();
+        let erin_sid = store.record("erin").unwrap().sid;
+        let message = lps::encode_group_add(&lps::Membership {
+            name: "erin".into(),
+            group: "Administrators".into(),
+        })
+        .unwrap();
+        let (act, refused) = act_of(&mut store, lps::MSG_GROUP_ADD, &message);
+        assert!(!refused);
+        let act = act.unwrap();
+        assert_eq!(act.event, "lpsd.group.member.added");
+        assert_eq!(act.account.as_ref(), Some(&erin_sid));
+        assert_eq!(
+            act.group.as_ref(),
+            Some(&Sid::well_known(WellKnown::Administrators))
+        );
+
+        let message = lps::encode_remove(&lps::Named {
+            name: "erin".into(),
+        })
+        .unwrap();
+        let (act, refused) = act_of(&mut store, lps::MSG_REMOVE, &message);
+        assert!(!refused);
+        let act = act.unwrap();
+        assert_eq!(act.event, "lpsd.account.deleted");
+        assert_eq!(act.account.as_ref(), Some(&erin_sid));
+    }
+
+    /// A refused change is recorded with what it was about, and a read is not
+    /// recorded at all.
+    #[test]
+    fn a_refusal_is_an_act_and_a_read_is_not() {
+        let mut store = Store::provision().unwrap();
+        add(&mut store, &dana()).unwrap();
+
+        // dana is the only administrator, so she may not be disabled.
+        let message = lps::encode_set_enabled(&lps::SetEnabled {
+            name: "dana".into(),
+            enabled: false,
+        })
+        .unwrap();
+        let (act, refused) = act_of(&mut store, lps::MSG_SET_ENABLED, &message);
+        assert!(refused);
+        let act = act.unwrap();
+        assert_eq!(act.event, "lpsd.account.modified");
+        assert_eq!(act.operation, Some("set-enabled"));
+        assert_eq!(act.account, Some(store.record("dana").unwrap().sid));
+
+        let message = lps::encode_show(&lps::Named {
+            name: "dana".into(),
+        })
+        .unwrap();
+        assert_eq!(act_of(&mut store, lps::MSG_SHOW, &message), (None, false));
+    }
+
+    #[test]
+    fn every_failure_has_a_reason() {
+        for failure in [
+            Failure::Denied,
+            Failure::NotFound,
+            Failure::Exists,
+            Failure::Invalid,
+            Failure::Internal,
+        ] {
+            assert!(!failure_reason(failure).is_empty());
+        }
     }
 
     fn add(store: &mut Store, add: &lps::Add<'_>) -> Result<Vec<u8>, Failure> {
