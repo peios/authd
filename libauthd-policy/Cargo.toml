@@ -8,7 +8,7 @@ publish = false
 
 [dependencies]
 libauthd = { path = "../libauthd" }
-peios = { git = "https://github.com/peios/peios-rs.git", rev = "02c87cb643c30eef6b74cd1d9d8b0ae067bed69a" }
+peios = { git = "https://github.com/peios/peios-rs.git", rev = "f8c84930f2b71763bcf0550df0b1420a0f63b21e" }
 # Deriving a service's SID from its name: records are keyed by them, and a
 # program naming a record's service derives it as authd does. Pure
 # computation with no I/O and no unsafe; peinit carries the same dependency
