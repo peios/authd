@@ -25,7 +25,7 @@ dependencies = [
 
 [[package]]
 name = "authd"
-version = "0.0.23"
+version = "0.0.24"
 dependencies = [
  "libauthd",
  "libauthd-policy",
@@ -369,21 +369,21 @@ dependencies = [
 
 [[package]]
 name = "libauthd"
-version = "0.0.23"
+version = "0.0.24"
 dependencies = [
  "libc",
 ]
 
 [[package]]
 name = "libauthd-client"
-version = "0.0.23"
+version = "0.0.24"
 dependencies = [
  "libauthd",
 ]
 
 [[package]]
 name = "libauthd-policy"
-version = "0.0.23"
+version = "0.0.24"
 dependencies = [
  "libauthd",
  "peios",
@@ -414,14 +414,14 @@ checksum = "b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981"
 
 [[package]]
 name = "libsession"
-version = "0.0.23"
+version = "0.0.24"
 dependencies = [
  "peios",
 ]
 
 [[package]]
 name = "libtty"
-version = "0.0.23"
+version = "0.0.24"
 dependencies = [
  "libauthd",
  "libc",
@@ -435,7 +435,7 @@ checksum = "f9f8bd3e56ce4dfc153cf470fffbfa98c7620958b312ca5c3a4b8d5181fd13c6"
 
 [[package]]
 name = "login"
-version = "0.0.23"
+version = "0.0.24"
 dependencies = [
  "libauthd",
  "libc",
@@ -446,7 +446,7 @@ dependencies = [
 
 [[package]]
 name = "lps"
-version = "0.0.23"
+version = "0.0.24"
 dependencies = [
  "libauthd",
  "libauthd-client",
@@ -456,7 +456,7 @@ dependencies = [
 
 [[package]]
 name = "lpsd"
-version = "0.0.23"
+version = "0.0.24"
 dependencies = [
  "argon2",
  "libauthd",
@@ -492,7 +492,7 @@ dependencies = [
 
 [[package]]
 name = "nss_peios"
-version = "0.0.23"
+version = "0.0.24"
 dependencies = [
  "libauthd",
  "libauthd-client",
