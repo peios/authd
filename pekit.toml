@@ -51,8 +51,8 @@ done
 # revision. No sibling checkout or mutable Cargo cache is visible here.
 unset PEIOS_LIB_DIR PEIOS_INCLUDE PKM_UAPI
 # A newer API-compatible libpeios SDK is valid; a different SONAME ABI is not.
-pkg-config --atleast-version=0.5.0 peios || {
-  echo "authd: dev.peios.libpeios-devel >= 0.5.0 (ABI 0) is required" >&2
+pkg-config --atleast-version=0.5.8 peios || {
+  echo "authd: dev.peios.libpeios-devel >= 0.5.8 (ABI 0) is required" >&2
   exit 1
 }
 readelf -dW "$(pkg-config --variable=libdir peios)/libpeios.so" |
@@ -238,7 +238,7 @@ test -n "$(find "$DEBUG_ROOT" -type f -print -quit)"
 "org.sourceware.debugedit"    = "*"
 "org.python.python3"          = "*"
 "org.llvm.clang"              = ">= 22"
-"dev.peios.libpeios-devel"    = ">= 0.5.0"
+"dev.peios.libpeios-devel"    = ">= 0.5.8"
 "dev.peios.kernel-headers"    = "*"
 "dev.peios.packaging-tools"   = "*"
 
@@ -252,8 +252,8 @@ mkdir -p "$CARGO_HOME"
 cp "$PEKIT_VENDOR_OUT/cargo-config.toml" "$CARGO_HOME/config.toml"
 unset PEIOS_LIB_DIR PEIOS_INCLUDE PKM_UAPI
 # A newer API-compatible libpeios SDK is valid; a different SONAME ABI is not.
-pkg-config --atleast-version=0.5.0 peios || {
-  echo "authd: dev.peios.libpeios-devel >= 0.5.0 (ABI 0) is required" >&2
+pkg-config --atleast-version=0.5.8 peios || {
+  echo "authd: dev.peios.libpeios-devel >= 0.5.8 (ABI 0) is required" >&2
   exit 1
 }
 readelf -dW "$(pkg-config --variable=libdir peios)/libpeios.so" |
@@ -385,5 +385,5 @@ rm -f "$PEKIT_OUT/lps-help" "$PEKIT_OUT/login-out" "$PEKIT_OUT/login-err"
 "org.sourceware.debugedit"    = "*"
 "org.python.python3"          = "*"
 "org.llvm.clang"              = ">= 22"
-"dev.peios.libpeios-devel"    = ">= 0.5.0"
+"dev.peios.libpeios-devel"    = ">= 0.5.8"
 "dev.peios.kernel-headers"    = "*"
