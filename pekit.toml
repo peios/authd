@@ -337,9 +337,9 @@ for path in files:
 expected = {
     "authd-service.reg": [
         "SeChangeNotifyPrivilege", "SeCreateTokenPrivilege", "SeTcbPrivilege",
-        "SeRestorePrivilege"
+        "SeRestorePrivilege", "SeAuditPrivilege"
     ],
-    "lpsd-service.reg": ["SeChangeNotifyPrivilege"],
+    "lpsd-service.reg": ["SeChangeNotifyPrivilege", "SeAuditPrivilege"],
     "login-console.reg": [
         "SeChangeNotifyPrivilege", "SeAssignPrimaryTokenPrivilege", "SeTcbPrivilege"
     ],
