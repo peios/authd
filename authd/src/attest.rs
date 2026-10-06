@@ -68,7 +68,7 @@ use libauthd::wire::{LogonType, LogonTypes};
 
 use crate::source::Registry;
 use crate::unix_id::Projection;
-use crate::{derive, log, peer, policy, resolve, service_sid};
+use crate::{audit, derive, log, peer, policy, resolve, service_sid};
 
 /// The identities the authority mints without consulting any source.
 ///
@@ -92,17 +92,76 @@ pub fn may_attest(peer: &Sid, peer_is_init: bool) -> bool {
 }
 
 /// Serve one `ServiceAttest`, having already established the peer's identity.
+///
+/// Recorded as `authd.service.attested`, granted or refused, once the request
+/// ends however it ends.
 pub fn serve(
     registry: &Registry,
     stream: &UnixStream,
     peer: &Sid,
     attest: &ServiceAttest,
 ) -> io::Result<()> {
+    let mut attestation = Attestation::new(peer, attest);
+    let result = attest_service(registry, stream, peer, attest, &mut attestation);
+    attestation.finish();
+    result
+}
+
+/// What will be recorded of one attestation, filled in as it proceeds.
+struct Attestation {
+    record: audit::Record,
+    /// `None` until a terminal. Every path reaches one before it can fail, so
+    /// `None` at the end is a mistake here, recorded as `internal`.
+    outcome: Option<Result<(), &'static str>>,
+}
+
+impl Attestation {
+    fn new(peer: &Sid, attest: &ServiceAttest) -> Self {
+        let mut record = audit::Record::new();
+        record.sid("subject.token.sid", peer.as_ref());
+        if !attest.service.trim().is_empty() {
+            record.str("object.service.name", &attest.service);
+        }
+        Self {
+            record,
+            outcome: None,
+        }
+    }
+
+    /// Send a denial, and record it as how the attestation ended.
+    fn refuse(&mut self, stream: &UnixStream, denial: Denial, reason: &str) -> io::Result<()> {
+        self.outcome = Some(Err(audit::denial_reason(denial)));
+        deny(stream, denial, reason)
+    }
+
+    fn finish(self) {
+        let Self {
+            mut record,
+            outcome,
+        } = self;
+        audit::standard("authd.service.attested", move || {
+            record.outcome(match outcome {
+                Some(Ok(())) => None,
+                Some(Err(reason)) => Some(reason),
+                None => Some("internal"),
+            });
+            record
+        });
+    }
+}
+
+fn attest_service(
+    registry: &Registry,
+    stream: &UnixStream,
+    peer: &Sid,
+    attest: &ServiceAttest,
+    attestation: &mut Attestation,
+) -> io::Result<()> {
     if !may_attest(peer, peer::is_init(stream)) {
         log::warn(format_args!(
             "refused attestation from {peer}: not the service manager"
         ));
-        return deny(
+        return attestation.refuse(
             stream,
             Denial::PermissionDenied,
             "Caller may not attest service identities.",
@@ -114,7 +173,7 @@ pub fn serve(
     // empty string — a perfectly well-formed SID naming nothing, which would be
     // shared by every service that made the same mistake.
     if attest.service.trim().is_empty() {
-        return deny(
+        return attestation.refuse(
             stream,
             Denial::MalformedRequest,
             "A service attestation must name a service.",
@@ -125,7 +184,7 @@ pub fn serve(
             "attestation for service {:?}: name does not derive a usable SID",
             attest.service
         ));
-        return deny(
+        return attestation.refuse(
             stream,
             Denial::MalformedRequest,
             "That service name does not derive a usable identity.",
@@ -136,7 +195,7 @@ pub fn serve(
     // them, no credential could exist for them, and they are designated by
     // construction.
     if let Some(user) = virtual_identity(&attest.identity, &service) {
-        return mint_and_send(stream, user.as_ref(), &[], &service, &attest.service);
+        return mint_and_send(stream, user.as_ref(), &[], &service, &attest.service, attestation);
     }
 
     // Anything else is a principal somebody holds, so it is resolved and its
@@ -148,7 +207,7 @@ pub fn serve(
             "refused attestation of {:?} for service {:?}",
             attest.identity, attest.service
         ));
-        return deny(
+        return attestation.refuse(
             stream,
             Denial::AccountRestricted,
             "That identity may not be used for a service logon.",
@@ -161,6 +220,7 @@ pub fn serve(
         &resolved.groups,
         &service,
         &attest.service,
+        attestation,
     )
 }
 
@@ -259,6 +319,7 @@ fn mint_and_send(
     memberships: &[Sid],
     service: &Sid,
     service_name: &str,
+    attestation: &mut Attestation,
 ) -> io::Result<()> {
     // The service SID is asserted rather than derived, in the sense that
     // `token_groups` takes it alongside anything a source would have claimed.
@@ -305,13 +366,25 @@ fn mint_and_send(
         Ok(granted) => granted,
         Err(error) => {
             log::warn(format_args!("could not mint service token: {error}"));
-            return deny(
+            return attestation.refuse(
                 stream,
                 Denial::Internal,
                 "The authority could not issue a token.",
             );
         }
     };
+
+    // The token exists from here, so the record names it whether or not it
+    // reaches the service manager.
+    let record = &mut attestation.record;
+    record
+        .sid("object.token.sid", user)
+        .uint("object.session.id", granted.session.0)
+        .uint("object.token.privileges", outcome.privileges.bits());
+    if let Ok(statistics) = granted.token.statistics() {
+        record.uint("object.token.id", statistics.token_id);
+    }
+    attestation.outcome = Some(Err("undelivered"));
 
     // A service has no profile. Every field is already optional and every
     // client already falls back, so saying nothing is both correct and what an
@@ -323,6 +396,7 @@ fn mint_and_send(
     .map_err(|_| io::Error::other("could not encode grant"))?;
 
     send_message_with_fd(stream, &message, granted.token.as_fd())?;
+    attestation.outcome = Some(Ok(()));
 
     log::info(format_args!(
         "service token granted: user={user} service={service_name} service_sid={service} \
@@ -381,6 +455,40 @@ mod tests {
                 .iter()
                 .any(|(value, _)| value == &sid("S-1-5-19") || value == &sid("S-1-5-18"))
         );
+    }
+
+    /// A refused attestation is recorded with who asked, for which service,
+    /// and why — and names no identity, since none was minted.
+    #[test]
+    fn a_refused_attestation_is_recorded() {
+        use std::os::unix::net::UnixStream;
+
+        let (ours, _theirs) = UnixStream::pair().unwrap();
+        let peer = sid("S-1-5-21-1-2-3-1000");
+        let request = ServiceAttest {
+            identity: "LocalService".into(),
+            service: "jellyfin".into(),
+        };
+        serve(&Registry::configured(&[]), &ours, &peer, &request).unwrap();
+
+        let written = audit::take();
+        assert_eq!(written.len(), 1, "{written:?}");
+        let (event_type, record) = &written[0];
+        assert_eq!(event_type, "authd.service.attested");
+        assert_eq!(
+            record.get("subject.token.sid"),
+            Some(&audit::Value::Bin(peer.as_ref().as_bytes().to_vec()))
+        );
+        assert_eq!(
+            record.get("object.service.name"),
+            Some(&audit::Value::Str("jellyfin".into()))
+        );
+        assert_eq!(record.get("outcome.success"), Some(&audit::Value::Bool(false)));
+        assert_eq!(
+            record.get("outcome.reason"),
+            Some(&audit::Value::Str("permission-denied".into()))
+        );
+        assert_eq!(record.get("object.token.sid"), None);
     }
 
     #[test]

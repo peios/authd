@@ -1,0 +1,147 @@
+--- field source.token.sid
+type: bin.sid
+
+The user SID of the token of the process that asked for an operation on
+someone else's behalf: the program that originated a logon, such as
+`login`, sshd or a graphical greeter, as against the principal being signed
+in. The emitter reads it from the connected peer's token, never from
+anything the peer sent.
+
+Not `subject.token.sid`, which is the principal the record is about.
+Several originators run as SYSTEM, so this field says which principal
+asked, not which program; the kernel-stamped header names the emitter, not
+the originator, so nothing else in the record does.
+
+--- event authd.logon.attempted
+tier: essential
+gating: none — every logon that reaches a principal source's question, or is refused before one, is recorded
+cardinality: once per `LogonStart` authd reads; a connection that opens with anything else writes none
+
+The record that something asked authd to sign a principal in, and whether
+it did. Written once per logon conversation, when it ends: with a token
+minted and handed over, or with the denial authd sent the originator.
+Success and failure are one type, so "every failed logon" is one query.
+
+**The principal's name is never recorded.** On a failure authd does not
+know who was signing in: a principal source answers "authentication
+failed" alike for a name it does not hold and for a wrong credential, and
+the name the originator sent is the caller's input, not an identity. The
+source's own record, such as `lpsd.credential.verified`, says what the
+wire hides. On a success the principal is `subject.token.sid`.
+
+Essential because a logon is the most important thing an operating system
+records about who uses it, and a machine signs people in rarely enough for
+every attempt to be kept.
+
+field: source.token.sid                     required
+  The originator: the principal of the process on the other end of
+  `/run/logon.sock` that asked for the logon.
+field: source.address                       optional
+  The remote peer the originator says the logon is for, where it named one
+  and it is an IP address. It is the originator's word, as `login -h` or
+  sshd passes it; a host name is not recorded.
+field: object.session.logon-type            required
+  The logon type the originator asked for, whether or not it was granted.
+field: object.session.auth-package          optional
+  The principal source authd asked to verify the credential. Absent when
+  the logon was refused before a source was chosen.
+field: subject.token.sid                    when outcome.success == true
+  The principal signed in: the user SID of the token minted.
+field: object.session.id                    optional
+  The logon session created for the sign-on. Every record of what the
+  principal does in it carries the same value as `subject.token.auth-id`.
+  Present whenever a token was minted: on a success, and on an
+  `undelivered` failure.
+field: object.token.id                      optional
+  The token minted for the originator, present exactly when
+  `object.session.id` is.
+field: outcome.success                      required
+  True only when the token reached the originator.
+field: outcome.reason                       when outcome.success == false
+  values: malformed-request | unsupported-version | permission-denied | authentication-failed | logon-type-not-permitted | account-restricted | authority-unavailable | conversation-limit | internal | abandoned | undelivered
+  closed: false
+  The denial authd sent the originator, in kebab-case, whether authd decided
+  it or relayed it from the source; `authentication-failed` covers an
+  unknown principal and a wrong credential alike. `abandoned` is a
+  conversation that ended without a terminal answer, because the
+  originator's or the source's connection failed. `undelivered` is a token
+  minted that could not be handed over; its session is reaped once nothing
+  holds it.
+
+--- event authd.service.attested
+tier: standard
+gating: none — every service attestation that names a service is recorded
+cardinality: once per `ServiceAttest` authd reads
+
+The record that the service manager asked authd for a service's token,
+with no credential behind it, and whether authd minted one. The service
+manager is PID 1 running as SYSTEM, and authd takes the service name on its
+word, because the process the token is for does not exist yet (PGSS Logon
+§2.19).
+
+Standard rather than essential because every service with an identity
+other than SYSTEM is attested on every start, so a machine writes these
+in proportion to its service restarts.
+
+field: subject.token.sid                    required
+  The principal that asked: the user SID of the peer's token, SYSTEM for
+  the service manager.
+field: object.service.name                  optional
+  The service the token is for, as the service manager named it. Absent
+  only when the request named no service.
+field: object.token.sid                     optional
+  The identity attested: the service's virtual account, a built-in
+  service identity such as LocalService, or a principal designated for
+  service logon. Present whenever a token was minted: on a success, and on
+  an `undelivered` failure.
+field: object.session.id                    optional
+  The logon session created for the service, present exactly when
+  `object.token.sid` is.
+field: object.token.id                      optional
+  The token minted, present exactly when `object.token.sid` is.
+field: object.token.privileges              optional
+  The privileges local policy granted the token, all of them enabled.
+  Present exactly when `object.token.sid` is.
+field: outcome.success                      required
+  True only when the token reached the service manager.
+field: outcome.reason                       when outcome.success == false
+  values: permission-denied | malformed-request | account-restricted | internal | undelivered
+  closed: false
+  The denial authd sent. `permission-denied` is a peer that is not the
+  service manager; `account-restricted` an identity no source holds, or
+  one not designated for service logon, which authd does not tell apart;
+  `undelivered` a token minted that could not be handed over.
+
+--- event authd.session.ended
+tier: essential
+gating: none — every session end authd carries out is recorded; a refused request and a query are not
+cardinality: once per `SessionEnd` authd acts on
+
+The record that authd ended a logon session at someone's request, by
+ending every process whose primary token belongs to it (PGSS Logon
+§2.22). The kernel destroys the session when the last reference drops,
+and records that as `kacs.session.destroyed`; this record adds who asked,
+which the kernel cannot know.
+
+A refusal is not recorded here. Who may end another principal's session is
+decided by an access check against the `SessionEndSecurity` descriptor,
+which KACS records as `kacs.audit.access.checked` with `object.kind`
+`authd-session-end` when the descriptor's SACL asks it to.
+
+Essential because ending somebody's session is rare and is an
+administrative act on another principal.
+
+field: subject.token.sid                    required
+  The principal that asked: themselves, signing out, or someone the
+  descriptor permits to end other principals' sessions.
+field: object.session.id                    required
+field: object.session.user.sid              required
+  Whose session it was.
+field: object.session.logon-type            required
+field: outcome.success                      required
+  True when no process was left holding the session.
+field: outcome.reason                       when outcome.success == false
+  values: processes-remaining
+  closed: false
+  Some processes survived every round, or could not be examined. The
+  session lives on until they exit.

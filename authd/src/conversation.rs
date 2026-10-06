@@ -45,6 +45,7 @@
 //! ending the way only the other may.
 
 use std::io;
+use std::net::IpAddr;
 use std::os::fd::AsFd;
 use std::os::unix::net::UnixStream;
 use std::sync::Arc;
@@ -64,6 +65,7 @@ use libauthd::wire::{
 };
 use peios::security::{Sid, SidRef};
 
+use crate::audit;
 use crate::derive;
 use crate::home;
 use crate::log;
@@ -298,23 +300,99 @@ fn run(registry: &Registry, stream: &UnixStream, deadline: Instant) -> io::Resul
         Err(denial) => return deny(stream, denial.0, denial.1),
     };
 
+    // From here this is a logon attempt, and exactly one record of it is
+    // written however it ends — including by an I/O error, which is why the
+    // record is written here rather than at each terminal below.
+    let mut attempt = Attempt::new(&peer, &start);
+    let result = logon(registry, stream, &peer, originator, &start, deadline, &mut attempt);
+    attempt.finish();
+    result
+}
+
+/// What will be recorded of one logon attempt as `authd.logon.attempted`,
+/// filled in as the conversation learns it.
+///
+/// Never the identifier the client sent: on a failure authd does not know who
+/// was signing in, and on a success the minted token's SID says it.
+struct Attempt {
+    record: audit::Record,
+    /// `None` until a terminal: a conversation that never reaches one was
+    /// abandoned, by the client or the source going away.
+    outcome: Option<Result<(), &'static str>>,
+}
+
+impl Attempt {
+    fn new(peer: &Sid, start: &LogonStart) -> Self {
+        let mut record = audit::Record::new();
+        record.sid("source.token.sid", peer.as_ref());
+        // The originator's word for where the logon comes from, kept only when
+        // it is an address: `source.address` is one, and `login -h` will pass
+        // a host name.
+        if let Some(address) = start
+            .remote_host
+            .as_deref()
+            .and_then(|host| host.trim().parse::<IpAddr>().ok())
+        {
+            record.str("source.address", &address.to_string());
+        }
+        if let Some(name) = audit::logon_type_name(start.logon_type as u32) {
+            record.str("object.session.logon-type", name);
+        }
+        Self {
+            record,
+            outcome: None,
+        }
+    }
+
+    /// Send a denial, and record it as how the attempt ended.
+    fn refuse(&mut self, stream: &UnixStream, denial: Denial, reason: &str) -> io::Result<()> {
+        self.denied(denial);
+        deny(stream, denial, reason)
+    }
+
+    /// Record a denial that has already been sent.
+    fn denied(&mut self, denial: Denial) {
+        self.outcome = Some(Err(audit::denial_reason(denial)));
+    }
+
+    fn finish(mut self) {
+        let reason = match self.outcome {
+            Some(Ok(())) => None,
+            Some(Err(reason)) => Some(reason),
+            None => Some("abandoned"),
+        };
+        self.record.outcome(reason);
+        audit::essential("authd.logon.attempted", &self.record);
+    }
+}
+
+/// A logon, from the opening `LogonStart` to a token or a denial.
+fn logon(
+    registry: &Registry,
+    stream: &UnixStream,
+    peer: &Sid,
+    originator: bool,
+    start: &LogonStart,
+    deadline: Instant,
+    attempt: &mut Attempt,
+) -> io::Result<()> {
     if !originator {
         log::warn(format_args!(
             "refused logon from {peer}: not a permitted originator"
         ));
-        return deny(
+        return attempt.refuse(
             stream,
             Denial::PermissionDenied,
             "Caller may not originate logons.",
         );
     }
 
-    if !may_request(&peer, start.logon_type) {
+    if !may_request(peer, start.logon_type) {
         log::warn(format_args!(
             "refused {:?} logon from {peer}: not permitted for this originator",
             start.logon_type
         ));
-        return deny(
+        return attempt.refuse(
             stream,
             Denial::LogonTypeNotPermitted,
             "Caller may not request that logon type.",
@@ -322,7 +400,7 @@ fn run(registry: &Registry, stream: &UnixStream, deadline: Instant) -> io::Resul
     }
 
     if start.ssh_binding.is_some() && !crate::peer::ssh_originator(stream) {
-        return deny(
+        return attempt.refuse(
             stream,
             Denial::PermissionDenied,
             "Caller may not bind SSH authentication.",
@@ -350,7 +428,7 @@ fn run(registry: &Registry, stream: &UnixStream, deadline: Instant) -> io::Resul
             source
         }
         crate::resolve::Route::Unavailable => {
-            return deny(
+            return attempt.refuse(
                 stream,
                 Denial::AuthorityUnavailable,
                 "The authority could not be reached.",
@@ -361,32 +439,35 @@ fn run(registry: &Registry, stream: &UnixStream, deadline: Instant) -> io::Resul
                 "no principal source can answer for {}",
                 String::from_utf8_lossy(&start.identifier)
             ));
-            return deny(
+            return attempt.refuse(
                 stream,
                 Denial::AuthorityUnavailable,
                 "No authority is available for that principal.",
             );
         }
     };
+    // The session's auth package, should one be minted: the same name
+    // `derive::mint` gives the kernel, so the two records agree.
+    attempt.record.str("object.session.auth-package", source.name());
 
     let Some(mut conversation) = source.open() else {
         log::warn(format_args!(
             "source {} could not accept another conversation",
             source.name()
         ));
-        return deny(
+        return attempt.refuse(
             stream,
             Denial::AuthorityUnavailable,
             "The authority is busy. Try again shortly.",
         );
     };
 
-    if let Err(error) = conversation.authenticate(&start, peer.as_ref().as_bytes()) {
+    if let Err(error) = conversation.authenticate(start, peer.as_ref().as_bytes()) {
         log::warn(format_args!(
             "could not reach source {}: {error}",
             source.name()
         ));
-        return deny(
+        return attempt.refuse(
             stream,
             Denial::AuthorityUnavailable,
             "The authority could not be reached.",
@@ -400,32 +481,36 @@ fn run(registry: &Registry, stream: &UnixStream, deadline: Instant) -> io::Resul
         deadline,
         Purpose::Logon,
     )? {
-        Some(Ended::Asserted(assertion)) => grant(stream, &start, &conversation, &assertion),
+        Ok(Ended::Asserted(assertion)) => grant(stream, start, &conversation, &assertion, attempt),
         // `relay` ends a logon in an assertion or in a denial it has already
         // sent. Answered anyway rather than trusted, so that a mistake there
         // costs a denial and never a connection closed with nothing said.
-        Some(Ended::Changed) => deny(
+        Ok(Ended::Changed) => attempt.refuse(
             stream,
             Denial::Internal,
             "The authority could not complete the logon.",
         ),
-        None => Ok(()),
+        Err(denial) => {
+            attempt.denied(denial);
+            Ok(())
+        }
     }
 }
 
 /// Carry messages between the client and the source until one of them
 /// finishes.
 ///
-/// Returns how the conversation ended, or `None` where it ended in a denial
-/// that has already been sent. `supported` is the client's capability list,
-/// from whichever message opened the conversation.
+/// Returns how the conversation ended, or the denial it ended in, which has
+/// already been sent — returned so that the audit record can say what the
+/// client was told. `supported` is the client's capability list, from
+/// whichever message opened the conversation.
 pub(crate) fn relay(
     stream: &UnixStream,
     supported: &[CredentialType],
     conversation: &mut Conversation,
     deadline: Instant,
     purpose: Purpose,
-) -> io::Result<Option<Ended>> {
+) -> io::Result<Result<Ended, Denial>> {
     let noun = purpose.noun();
     let rounds = if supported.contains(&CredentialType::SshPublicKey) {
         17
@@ -560,7 +645,7 @@ pub(crate) fn relay(
                         &format!("The authority could not complete the {noun}."),
                     );
                 }
-                return Ok(Some(Ended::Asserted(assertion)));
+                return Ok(Ok(Ended::Asserted(assertion)));
             }
 
             Inbound::Changed => {
@@ -576,7 +661,7 @@ pub(crate) fn relay(
                         &format!("The authority could not complete the {noun}."),
                     );
                 }
-                return Ok(Some(Ended::Changed));
+                return Ok(Ok(Ended::Changed));
             }
 
             Inbound::Refuse(refusal) => {
@@ -649,8 +734,12 @@ pub(crate) fn relay(
 }
 
 /// Send a denial and report the conversation as ended by it.
-fn denied(stream: &UnixStream, denial: Denial, reason: &str) -> io::Result<Option<Ended>> {
-    deny(stream, denial, reason).map(|()| None)
+fn denied(
+    stream: &UnixStream,
+    denial: Denial,
+    reason: &str,
+) -> io::Result<Result<Ended, Denial>> {
+    deny(stream, denial, reason).map(|()| Err(denial))
 }
 
 /// PSI rules 4 and 5, applied before rule 2.
@@ -817,12 +906,13 @@ fn ask_client(
     })
 }
 
-/// Mint and hand over the token.
+/// Mint and hand over the token, recording how it went in `attempt`.
 fn grant(
     stream: &UnixStream,
     start: &LogonStart,
     conversation: &Conversation,
     assertion: &libauthd::psi::Assertion,
+    attempt: &mut Attempt,
 ) -> io::Result<()> {
     let source_name = conversation.source_name();
     if start
@@ -832,7 +922,7 @@ fn grant(
             .authenticated_credential_type
             .is_some_and(|actual| !start.supported_credential_types.contains(&actual))
     {
-        return deny(
+        return attempt.refuse(
             stream,
             Denial::AuthenticationFailed,
             "Authentication failed.",
@@ -847,7 +937,7 @@ fn grant(
             "source {source_name} asserted {} bytes that are not a valid SID",
             assertion.user_sid.len()
         ));
-        return deny(
+        return attempt.refuse(
             stream,
             Denial::Internal,
             "The authority returned an unusable identity.",
@@ -875,7 +965,7 @@ fn grant(
             assertion.canonical_name,
             assertion.permitted_logon_types.effective().bits()
         ));
-        return deny(
+        return attempt.refuse(
             stream,
             Denial::AccountRestricted,
             "That account may not be used for this kind of sign-on.",
@@ -899,7 +989,7 @@ fn grant(
              registered for ({})",
             conversation.domain()
         ));
-        return deny(
+        return attempt.refuse(
             stream,
             Denial::Internal,
             "The authority returned an identity it is not entitled to assert.",
@@ -918,7 +1008,7 @@ fn grant(
                 "source {source_name} asserted a group of {} bytes that is not a valid SID",
                 group.sid.len()
             ));
-            return deny(
+            return attempt.refuse(
                 stream,
                 Denial::Internal,
                 "The authority returned an unusable group membership.",
@@ -960,7 +1050,7 @@ fn grant(
                      valid SID",
                     assertion.primary_group.len()
                 ));
-                return deny(
+                return attempt.refuse(
                     stream,
                     Denial::Internal,
                     "The authority returned an unusable primary group.",
@@ -992,7 +1082,7 @@ fn grant(
                 "source {source_name} asserted {foreign} for {user}, which is outside that \
                  principal's domain, and it may not assert foreign memberships"
             ));
-            return deny(
+            return attempt.refuse(
                 stream,
                 Denial::Internal,
                 "The authority returned a membership it is not permitted to assert.",
@@ -1047,7 +1137,7 @@ fn grant(
             log::error(format_args!(
                 "source {source_name} asserted an unusable claim for {user}: {error}"
             ));
-            return deny(
+            return attempt.refuse(
                 stream,
                 Denial::Internal,
                 "The authority returned an unusable claim.",
@@ -1059,7 +1149,7 @@ fn grant(
             "source {source_name} asserted a claim for {user} carrying a value that is not a \
              valid SID"
         ));
-        return deny(
+        return attempt.refuse(
             stream,
             Denial::Internal,
             "The authority returned an unusable claim.",
@@ -1087,7 +1177,7 @@ fn grant(
         Ok(granted) => granted,
         Err(error) => {
             log::warn(format_args!("could not mint token: {error}"));
-            return deny(
+            return attempt.refuse(
                 stream,
                 Denial::Internal,
                 "The authority could not issue a token.",
@@ -1135,6 +1225,15 @@ fn grant(
     home::ensure(user, &profile.home);
     crate::user_registry::ensure(user);
 
+    // A token exists from here, so the record names it whether or not it is
+    // handed over: a session that appears in the kernel's records without a
+    // matching success is then explained rather than a mystery.
+    attempt.record.uint("object.session.id", granted.session.0);
+    if let Ok(statistics) = granted.token.statistics() {
+        attempt.record.uint("object.token.id", statistics.token_id);
+    }
+    attempt.outcome = Some(Err("undelivered"));
+
     let message = encode_access_granted(&AccessGranted {
         session_id: granted.session.0,
         profile,
@@ -1142,6 +1241,8 @@ fn grant(
     .map_err(|_| io::Error::other("could not encode grant"))?;
 
     send_message_with_fd(stream, &message, granted.token.as_fd())?;
+    attempt.record.sid("subject.token.sid", user);
+    attempt.outcome = Some(Ok(()));
 
     log::info(format_args!(
         "logon granted: user={user} name={} session={} type={:?} source={source_name} \
@@ -1350,6 +1451,95 @@ mod tests {
 
     fn sid_of(text: &str) -> Sid {
         text.parse().expect("a well-formed SID")
+    }
+
+    /// The one logon record a test caused, failing if there is not exactly
+    /// one.
+    fn one_attempt() -> audit::Record {
+        let mut written = audit::take();
+        assert_eq!(written.len(), 1, "{written:?}");
+        let (event_type, record) = written.remove(0);
+        assert_eq!(event_type, "authd.logon.attempted");
+        record
+    }
+
+    /// A refused originator is a failed logon attempt, recorded with who asked
+    /// and what they were told, and never with the name they asked about.
+    #[test]
+    fn a_refused_logon_is_recorded_without_the_name() {
+        let (ours, theirs) = UnixStream::pair().unwrap();
+        let peer = sid_of("S-1-5-21-1-2-3-1000");
+        let start = LogonStart {
+            remote_host: Some("192.0.2.7".into()),
+            ..start_supporting(vec![CredentialType::Password])
+        };
+        let registry = Registry::configured(&[]);
+
+        let mut attempt = Attempt::new(&peer, &start);
+        let deadline = Instant::now() + CONVERSATION_DEADLINE;
+        logon(&registry, &ours, &peer, false, &start, deadline, &mut attempt).unwrap();
+        attempt.finish();
+        drop(theirs);
+
+        let record = one_attempt();
+        assert_eq!(
+            record.get("source.token.sid"),
+            Some(&audit::Value::Bin(peer.as_ref().as_bytes().to_vec()))
+        );
+        assert_eq!(
+            record.get("source.address"),
+            Some(&audit::Value::Str("192.0.2.7".into()))
+        );
+        assert_eq!(
+            record.get("object.session.logon-type"),
+            Some(&audit::Value::Str("interactive".into()))
+        );
+        assert_eq!(record.get("outcome.success"), Some(&audit::Value::Bool(false)));
+        assert_eq!(
+            record.get("outcome.reason"),
+            Some(&audit::Value::Str("permission-denied".into()))
+        );
+        assert_eq!(record.get("subject.token.sid"), None);
+        assert_eq!(record.get("object.session.auth-package"), None);
+        let payload = record.encode().unwrap();
+        assert!(
+            !payload.windows(4).any(|window| window == b"jack"),
+            "the identifier reached the record"
+        );
+    }
+
+    /// `source.address` is an address. A host name `login -h` was given is
+    /// the originator's word for something else, and is left out.
+    #[test]
+    fn a_remote_host_name_is_not_an_address() {
+        let peer = sid_of("S-1-5-18");
+        for host in ["build.example", "", "::1x"] {
+            let start = LogonStart {
+                remote_host: Some(host.into()),
+                ..start_supporting(vec![])
+            };
+            assert_eq!(Attempt::new(&peer, &start).record.get("source.address"), None);
+        }
+        let start = LogonStart {
+            remote_host: Some("2001:db8::1".into()),
+            ..start_supporting(vec![])
+        };
+        assert_eq!(
+            Attempt::new(&peer, &start).record.get("source.address"),
+            Some(&audit::Value::Str("2001:db8::1".into()))
+        );
+    }
+
+    /// A conversation that ends with no terminal — the client or the source
+    /// went away — is still an attempt, and says so.
+    #[test]
+    fn an_attempt_with_no_terminal_was_abandoned() {
+        let start = start_supporting(vec![CredentialType::Password]);
+        Attempt::new(&sid_of("S-1-5-18"), &start).finish();
+        assert_eq!(
+            one_attempt().get("outcome.reason"),
+            Some(&audit::Value::Str("abandoned".into()))
+        );
     }
 
     /// PSI obligation 26: membership scope never applies to a `primary_group`
