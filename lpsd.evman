@@ -1,0 +1,255 @@
+--- field object.account.sid
+type: bin.sid
+
+The SID of the account a record is about: a principal a principal source
+holds, whose credential was checked or changed, or which was created,
+deleted or modified. The SID, never the name: an account can be renamed,
+and a record that named it would then describe someone else.
+
+Not `object.token.sid`, which is the user of a token. A token speaks for
+an account, but an account changed while nobody is signed in has no token
+to name it by.
+
+--- field object.group.sid
+type: bin.sid
+
+The SID of the group a record is about: one a principal source created or
+deleted, or whose membership it changed. It may be a group of the source's
+own domain or a well-known one such as `BUILTIN\Administrators`, which a
+local source records memberships of.
+
+--- event lpsd.credential.verified
+tier: standard
+gating: none — every credential lpsd checks for a logon is recorded
+cardinality: once per logon lpsd decides; probing which SSH keys an account would accept writes none
+
+The record that lpsd checked a credential for a logon authd relayed to it,
+and what it found. It says what the wire must not: authd and the
+originator are told only "authentication failed" whether the account does
+not exist or the credential was wrong, and `outcome.reason` here tells
+them apart for whoever may read the audit trail.
+
+The account is named by SID when it exists. The name the caller typed is
+never recorded, so a failure against a name lpsd does not hold carries no
+account at all; `authd.logon.attempted` is the same logon as the authority
+saw it.
+
+Standard rather than essential because a machine exposed to a network can
+be asked to check credentials far more often than it signs anyone in.
+
+field: subject.token.sid                    required
+  lpsd itself, the principal that checked the credential: the user SID of
+  lpsd's own token, which is its service account.
+field: object.account.sid                   optional
+  The account the credential was checked for. Absent when lpsd holds no
+  account by the name it was asked about.
+field: operation.name                       required
+  values: password | ssh-key | none
+  closed: false
+  What was checked. `none` is an account whose policy is that it signs in
+  with no credential, asserted without asking for one.
+field: outcome.success                      required
+  True when lpsd told authd who the principal is.
+field: outcome.reason                       when outcome.success == false
+  values: no-such-account | wrong-credential | disabled | not-permitted
+  closed: false
+  `not-permitted` is an account whose credential policy does not allow
+  the kind of credential offered, or a key the account does not hold.
+
+--- event lpsd.credential.changed
+tier: essential
+gating: none — every change of an account's own credential is recorded, and every refusal once the account is known
+cardinality: once per change conversation that reaches the account
+
+The record that a principal changed their own password, or added or
+removed one of their own SSH keys, through authd (PSPU §2.21, §2.23), or
+tried to and was refused. A change an administrator makes with `lps` is
+`lpsd.account.modified`.
+
+Essential because a changed credential is how an account changes hands,
+and it is rare.
+
+field: subject.token.sid                    required
+  The principal that asked, as authd vouched for them from their token.
+  The same SID as `object.account.sid`: only one's own credential can be
+  changed this way.
+field: object.account.sid                   required
+field: operation.name                       required
+  values: password | ssh-key-added | ssh-key-removed
+  closed: false
+field: outcome.success                      required
+  True once the change is durable.
+field: outcome.reason                       when outcome.success == false
+  values: no-such-account | disabled | no-credential | wrong-credential | superseded | rejected | conversation-limit | not-saved
+  closed: false
+  `no-credential` is an account with no password to prove itself with;
+  `superseded` a password that changed between the rounds of the
+  conversation; `rejected` a new password or key the store refused;
+  `conversation-limit` too many unusable new passwords; `not-saved` a
+  change the store could not make durable, so it was not applied.
+
+--- event lpsd.account.created
+tier: essential
+gating: none — every request to create an account is recorded
+cardinality: once per request
+
+The record that an administrator created a local account with `lps`, or
+tried to. The first account on a new machine is created this way too, by
+the boot-time service that provisions it.
+
+Essential because a new account is a new way in, and it is rare.
+
+field: subject.token.sid                    required
+  The administrator: the user SID of the token that asked.
+field: object.account.sid                   when outcome.success == true
+  The new account.
+field: outcome.success                      required
+  True once the account is durable.
+field: outcome.reason                       when outcome.success == false
+  values: not-found | exists | invalid | internal | not-saved
+  closed: false
+  The failure `lps` was told: `not-found` names a group that does not
+  exist, `exists` an account name already in use, `invalid` a value the
+  store refuses, `not-saved` a change that could not be made durable.
+
+--- event lpsd.account.deleted
+tier: essential
+gating: none — every request to delete an account is recorded
+cardinality: once per request
+
+The record that an administrator deleted a local account with `lps`, or
+tried to.
+
+Essential because deleting an account is irreversible and rare: its SID is
+never issued again, and every descriptor naming it names nobody.
+
+field: subject.token.sid                    required
+  The administrator.
+field: object.account.sid                   optional
+  The account. Absent when no account had the name asked for.
+field: outcome.success                      required
+field: outcome.reason                       when outcome.success == false
+  values: not-found | invalid | internal | not-saved
+  closed: false
+  `invalid` is a deletion the store refuses, such as of the last
+  administrator.
+
+--- event lpsd.account.modified
+tier: essential
+gating: none — every administrative change to an account, and every change of one's own display name, is recorded; a request that changes nothing is not
+cardinality: once per request that changes something or fails
+
+The record that an account was changed: by an administrator with `lps`,
+or by the principal themselves where the self socket allows it. Which
+change it was is `operation.name`.
+
+A request that would leave the account as it was, such as enabling an
+enabled account, changes nothing and writes no record.
+
+Essential because an account's settings decide who can sign in and as
+what, and they change rarely.
+
+field: subject.token.sid                    required
+  The principal that asked: an administrator, or the account itself for
+  `set-display-name`.
+field: object.account.sid                   optional
+  The account changed. Absent when no account had the name asked for.
+field: object.group.sid                     optional
+  For `set-primary-group`, the group made the account's primary group.
+field: operation.name                       required
+  values: set-enabled | set-password | set-profile | set-display-name | set-primary-group | set-claim | remove-claim | rename | set-logon-types | key-add | key-remove | set-credential-policy
+  closed: false
+  The change, as `lps` names its command. `set-display-name` is the
+  principal's own, through the self socket.
+field: outcome.success                      required
+field: outcome.reason                       when outcome.success == false
+  values: not-found | exists | invalid | internal | denied | not-saved
+  closed: false
+  `denied` is a disabled account changing its own display name.
+
+--- event lpsd.group.created
+tier: essential
+gating: none — every request to create a group is recorded
+cardinality: once per request
+
+The record that an administrator created a local group with `lps`, or
+tried to.
+
+Essential because groups are what descriptors grant to, and they are
+created rarely.
+
+field: subject.token.sid                    required
+  The administrator.
+field: object.group.sid                     when outcome.success == true
+  The new group.
+field: outcome.success                      required
+field: outcome.reason                       when outcome.success == false
+  values: exists | invalid | internal | not-saved
+  closed: false
+
+--- event lpsd.group.deleted
+tier: essential
+gating: none — every request to delete a group is recorded
+cardinality: once per request
+
+The record that an administrator deleted a local group with `lps`, or
+tried to.
+
+Essential because deleting a group removes every grant made to it, and it
+is rare.
+
+field: subject.token.sid                    required
+  The administrator.
+field: object.group.sid                     optional
+  The group. Absent when no group had the name asked for.
+field: outcome.success                      required
+field: outcome.reason                       when outcome.success == false
+  values: not-found | invalid | internal | not-saved
+  closed: false
+
+--- event lpsd.group.member.added
+tier: essential
+gating: none — every request to add a membership is recorded; one that already held is not
+cardinality: once per request that changes something or fails
+
+The record that an administrator added an account to a group with `lps`,
+or tried to. The group may be a well-known one: adding an account to
+`BUILTIN\Administrators` is recorded here.
+
+Essential because a membership is a grant of everything granted to the
+group, and memberships change rarely.
+
+field: subject.token.sid                    required
+  The administrator.
+field: object.account.sid                   optional
+  The account. Absent when no account had the name asked for.
+field: object.group.sid                     optional
+  The group. Absent when no group had the name asked for.
+field: outcome.success                      required
+field: outcome.reason                       when outcome.success == false
+  values: not-found | invalid | internal | not-saved
+  closed: false
+
+--- event lpsd.group.member.removed
+tier: essential
+gating: none — every request to remove a membership is recorded; one that did not hold is not
+cardinality: once per request that changes something or fails
+
+The record that an administrator removed an account from a group with
+`lps`, or tried to.
+
+Essential for the reason `lpsd.group.member.added` is: a membership is a
+grant, and taking one away is as much an access change as giving it.
+
+field: subject.token.sid                    required
+  The administrator.
+field: object.account.sid                   optional
+  The account. Absent when no account had the name asked for.
+field: object.group.sid                     optional
+  The group. Absent when no group had the name asked for.
+field: outcome.success                      required
+field: outcome.reason                       when outcome.success == false
+  values: not-found | invalid | internal | not-saved
+  closed: false
+  `invalid` includes removing the last administrator from
+  `BUILTIN\Administrators`.

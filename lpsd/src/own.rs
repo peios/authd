@@ -40,6 +40,7 @@ use libauthd::lps::{self, Failed, Failure};
 use libauthd::{LPSD_RUN_DIR, LPSD_SELF_SOCKET_PATH, frame};
 use peios::security::{Sid, SidRef};
 
+use crate::audit;
 use crate::log;
 use crate::store::{Store, StoreError};
 
@@ -441,24 +442,43 @@ fn set_display_name(
     display_name: &str,
     save: &mut dyn FnMut(&Store) -> Result<(), StoreError>,
 ) -> Result<Vec<u8>, libauthd::WireError> {
+    // `lpsd.account.modified`, the principal both subject and object: only
+    // their own account can be named here.
+    let record = |account: Option<&SidRef>, failed: Option<&str>| {
+        let mut record = audit::Record::new();
+        record.sid("subject.token.sid", peer);
+        if let Some(account) = account {
+            record.sid("object.account.sid", account);
+        }
+        record
+            .str("operation.name", "set-display-name")
+            .outcome(failed);
+        audit::essential("lpsd.account.modified", &record);
+    };
+
     let Some(own) = store.own_account(peer) else {
+        record(None, Some("not-found"));
         return failed(Failure::NotFound, NOT_HELD);
     };
     // A session that outlived its account's disabling is not a way to change
     // the account.
     if !own.enabled {
+        record(Some(own.sid.as_ref()), Some("denied"));
         return failed(Failure::Denied, "This account is disabled.");
     }
     let snapshot = store.clone();
     match store.set_display_name(&own.name, display_name) {
         Err(error) => {
             *store = snapshot;
+            record(Some(own.sid.as_ref()), Some("invalid"));
             failed(Failure::Invalid, &error.to_string())
         }
+        // Already so: nothing changed, and nothing is recorded.
         Ok(false) => lps::encode_done(),
         Ok(true) => match save(store) {
             Ok(()) => {
                 log::info(format_args!("self: {} set their display name", own.name));
+                record(Some(own.sid.as_ref()), None);
                 lps::encode_done()
             }
             Err(error) => {
@@ -467,6 +487,7 @@ fn set_display_name(
                     "self: could not save {}'s display name: {error}; rolled back",
                     own.name
                 ));
+                record(Some(own.sid.as_ref()), Some("not-saved"));
                 failed(
                     Failure::Internal,
                     &format!("The change could not be saved and was not applied: {error}"),
@@ -569,6 +590,20 @@ mod tests {
         assert_eq!(saved, 1);
         assert_eq!(store.record("alice").unwrap().display_name, "Alice", "trimmed, as SetProfile");
         assert_eq!(store.record("bob").unwrap().display_name, "");
+
+        // One record, for the change that happened; the principal both asked
+        // and is the account changed.
+        let written = audit::take();
+        assert_eq!(written.len(), 1, "{written:?}");
+        let (event_type, record) = &written[0];
+        assert_eq!(event_type, "lpsd.account.modified");
+        let alice = audit::Value::Bin(alice.as_ref().as_bytes().to_vec());
+        assert_eq!(record.get("subject.token.sid"), Some(&alice));
+        assert_eq!(record.get("object.account.sid"), Some(&alice));
+        assert_eq!(
+            record.get("operation.name"),
+            Some(&audit::Value::Str("set-display-name".into()))
+        );
     }
 
     #[test]

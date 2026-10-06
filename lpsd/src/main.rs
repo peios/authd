@@ -58,6 +58,7 @@
 //! ever blocking, because everyone can reach it.
 
 mod admin;
+mod audit;
 mod codec;
 mod fs;
 mod log;
@@ -84,7 +85,7 @@ use libauthd::wire::{
     CredentialRequest, CredentialResponse, CredentialType, Denial, EnrollAction, IdentifierType,
     Message, MessageSeverity, Prompt,
 };
-use peios::security::SidRef;
+use peios::security::{Sid, SidRef};
 
 /// What lpsd calls itself when registering.
 ///
@@ -142,6 +143,8 @@ struct Enroll {
     /// Who, from the SID authd vouched for. Acted on by RID, so a rename
     /// between the rounds cannot redirect it.
     rid: u32,
+    /// The SID authd vouched for, for the audit record.
+    sid: Sid,
     name: String,
     action: EnrollAction,
     /// The key line to add, or the fingerprint of the key to remove — from the
@@ -154,6 +157,8 @@ struct Change {
     /// Who, as the store resolved them from the SID authd vouched for — never
     /// from anything in a response.
     rid: u32,
+    /// The SID authd vouched for, for the audit record.
+    sid: Sid,
     name: String,
     stage: Stage,
 }
@@ -756,12 +761,25 @@ fn begin(
     // disabled principals follow the decoy password path — see
     // `Store::credential_requirement`.
     match store.credential_requirement(&request.start.identifier) {
-        store::CredentialRequirement::Unavailable => refuse(
-            stream,
-            conversation,
-            Denial::AuthenticationFailed,
-            "Authentication failed.",
-        ),
+        // An account whose policy allows no password, asked to sign in with
+        // one. Recorded as a check that the account's policy refused, since to
+        // the audit trail that is what it was.
+        store::CredentialRequirement::Unavailable => {
+            record_check(
+                "password",
+                store
+                    .account_sid(&request.start.identifier)
+                    .as_ref()
+                    .map(Sid::as_ref),
+                Err(store::Unverified::NotPermitted),
+            );
+            refuse(
+                stream,
+                conversation,
+                Denial::AuthenticationFailed,
+                "Authentication failed.",
+            )
+        }
         // Nothing to collect. Assert straight away: the relay carries an
         // assertion on the first inbound perfectly well (PGSS Logon §4.1 —
         // "a client that supports nothing … an authority MUST either complete
@@ -780,6 +798,7 @@ fn begin(
                 "asserting {} without a credential",
                 identity.name
             ));
+            record_check("none", Some(identity.sid.as_ref()), Ok(()));
             assert_identity(stream, conversation, &identity, unix_id_count, None)
         }
 
@@ -954,26 +973,33 @@ fn answer(
                     },
                 );
                 ask_key(stream, conversation, next_ref, if accepted { 1 } else { 2 })
-            } else if let Some(identity) = store.authenticate_key(&binding, &offer, generation) {
-                log::info(format_args!(
-                    "SSH key authenticated {} key={}",
-                    identity.name,
-                    ssh::fingerprint(&offer.key).unwrap_or_default()
-                ));
-                assert_identity(
-                    stream,
-                    conversation,
-                    &identity,
-                    unix_id_count,
-                    Some(CredentialType::SshPublicKey),
-                )
             } else {
-                refuse(
-                    stream,
-                    conversation,
-                    Denial::AuthenticationFailed,
-                    "Authentication failed.",
-                )
+                // A signed offer is the check itself; an unsigned one above
+                // only asks whether a key would do, and is not recorded.
+                let verification = store.verify_key(&binding, &offer, generation);
+                record_verified("ssh-key", &verification);
+                match verification.result {
+                    Ok(identity) => {
+                        log::info(format_args!(
+                            "SSH key authenticated {} key={}",
+                            identity.name,
+                            ssh::fingerprint(&offer.key).unwrap_or_default()
+                        ));
+                        assert_identity(
+                            stream,
+                            conversation,
+                            &identity,
+                            unix_id_count,
+                            Some(CredentialType::SshPublicKey),
+                        )
+                    }
+                    Err(_) => refuse(
+                        stream,
+                        conversation,
+                        Denial::AuthenticationFailed,
+                        "Authentication failed.",
+                    ),
+                }
             }
         }
         Pending::Logon { identifier } => answer_logon(
@@ -1009,6 +1035,37 @@ fn answered(response: &CredentialResponse, credential_ref: u32) -> &[u8] {
         .map_or(&[], |answer| answer.data.expose())
 }
 
+/// Record a credential check as `lpsd.credential.verified`.
+fn record_verified(operation: &'static str, verification: &store::Verification) {
+    record_check(
+        operation,
+        verification.account.as_ref().map(Sid::as_ref),
+        verification.result.as_ref().map(|_| ()).map_err(|why| *why),
+    );
+}
+
+/// Record a credential check: what kind, whose account if there was one, and
+/// what it found. lpsd itself is the subject — it is what did the checking.
+fn record_check(
+    operation: &'static str,
+    account: Option<&SidRef>,
+    outcome: Result<(), store::Unverified>,
+) {
+    audit::standard("lpsd.credential.verified", || {
+        let mut record = audit::Record::new();
+        if let Some(own) = audit::own_sid() {
+            record.sid("subject.token.sid", own);
+        }
+        if let Some(account) = account {
+            record.sid("object.account.sid", account);
+        }
+        record
+            .str("operation.name", operation)
+            .outcome(outcome.err().map(store::Unverified::reason));
+        record
+    });
+}
+
 /// Verify a logon's password and reach a terminal state.
 fn answer_logon(
     stream: &UnixStream,
@@ -1020,8 +1077,10 @@ fn answer_logon(
 ) -> io::Result<()> {
     let secret = answered(response, PASSWORD_REF);
 
-    match store.authenticate(identifier, secret) {
-        Some(identity) => {
+    let verification = store.verify_password(identifier, secret);
+    record_verified("password", &verification);
+    match verification.result {
+        Ok(identity) => {
             log::info(format_args!(
                 "authenticated {} as {} in {} group(s)",
                 identity.name,
@@ -1036,11 +1095,11 @@ fn answer_logon(
                 Some(CredentialType::Password),
             )
         }
-        None => {
+        Err(_) => {
             // One log line for both "no such principal" and "wrong password".
-            // The distinction is a username oracle, and while it may eventually
-            // be worth recording in an audit trail an administrator can read,
-            // it must never reach the caller.
+            // The distinction is a username oracle: it is recorded in the
+            // audit trail an administrator can read (`record_verified` above),
+            // and it must never reach the caller.
             log::warn(format_args!(
                 "authentication failed for {}",
                 String::from_utf8_lossy(identifier)
@@ -1111,13 +1170,15 @@ fn begin_change(
             log::info(format_args!(
                 "refused a password change for {principal}: {refused:?}"
             ));
+            record_changed(principal, "password", Err(change_refusal(&refused)));
             return refuse_change(stream, conversation, &refused);
         }
     };
 
     // Checked once the principal is known, as on a logon, so the refusal says
     // what is actually wrong. Every client that can change a password at all
-    // can render one; this is for the one that cannot.
+    // can render one; this is for the one that cannot. Not recorded: nothing
+    // was asked of the account, only of the client.
     if !request
         .start
         .supported_credential_types
@@ -1136,6 +1197,7 @@ fn begin_change(
         conversation,
         Pending::Change(Change {
             rid: target.rid,
+            sid: principal.to_sid(),
             name: target.name,
             stage: Stage::Current,
         }),
@@ -1161,7 +1223,12 @@ fn answer_change(
     response: &CredentialResponse,
     save: &dyn Fn(&Store) -> Result<(), StoreError>,
 ) -> io::Result<()> {
-    let Change { rid, name, stage } = change;
+    let Change {
+        rid,
+        sid,
+        name,
+        stage,
+    } = change;
     match stage {
         Stage::Current => match store.prove_current(rid, answered(response, PASSWORD_REF)) {
             Ok(proof) => {
@@ -1169,6 +1236,7 @@ fn answer_change(
                     conversation,
                     Pending::Change(Change {
                         rid,
+                        sid,
                         name,
                         stage: Stage::New { proof, attempts: 0 },
                     }),
@@ -1179,6 +1247,7 @@ fn answer_change(
                 log::warn(format_args!(
                     "password change for {name} refused: {refused:?}"
                 ));
+                record_changed(&sid, "password", Err(change_refusal(&refused)));
                 refuse_change(stream, conversation, &refused)
             }
         },
@@ -1203,6 +1272,7 @@ fn answer_change(
                     log::info(format_args!(
                         "password change for {name} abandoned after {attempts} attempts"
                     ));
+                    record_changed(&sid, "password", Err("conversation-limit"));
                     return refuse(
                         stream,
                         conversation,
@@ -1214,6 +1284,7 @@ fn answer_change(
                     conversation,
                     Pending::Change(Change {
                         rid,
+                        sid,
                         name,
                         stage: Stage::New { proof, attempts },
                     }),
@@ -1221,7 +1292,16 @@ fn answer_change(
                 return ask_for_new(stream, conversation, Some(problem));
             }
 
-            commit_change(stream, store, conversation, rid, &name, &proof, new, save)
+            commit_change(
+                stream,
+                store,
+                conversation,
+                (rid, &sid),
+                &name,
+                &proof,
+                new,
+                save,
+            )
         }
     }
 }
@@ -1240,7 +1320,7 @@ fn commit_change(
     stream: &UnixStream,
     store: &mut Store,
     conversation: u64,
-    rid: u32,
+    (rid, sid): (u32, &SidRef),
     name: &str,
     proof: &store::Proof,
     new: &[u8],
@@ -1251,6 +1331,7 @@ fn commit_change(
         log::warn(format_args!(
             "password change for {name} refused: {refused:?}"
         ));
+        record_changed(sid, "password", Err(change_refusal(&refused)));
         return refuse_change(stream, conversation, &refused);
     }
     if let Err(error) = save(store) {
@@ -1258,6 +1339,7 @@ fn commit_change(
         log::error(format_args!(
             "could not save a password change for {name}: {error}; it was not applied"
         ));
+        record_changed(sid, "password", Err("not-saved"));
         return refuse(
             stream,
             conversation,
@@ -1267,9 +1349,43 @@ fn commit_change(
     }
 
     log::info(format_args!("{name} changed their own password"));
+    record_changed(sid, "password", Ok(()));
     let message = psi::encode_credential_changed(conversation)
         .map_err(|_| io::Error::other("could not encode a credential change"))?;
     send_message(stream, &message)
+}
+
+/// Record a change of a principal's own credential as `lpsd.credential.changed`.
+/// The principal is both subject and object: only one's own credential can be
+/// changed this way, and the SID is the one authd vouched for.
+fn record_changed(principal: &SidRef, operation: &'static str, outcome: Result<(), &str>) {
+    let mut record = audit::Record::new();
+    record
+        .sid("subject.token.sid", principal)
+        .sid("object.account.sid", principal)
+        .str("operation.name", operation)
+        .outcome(outcome.err());
+    audit::essential("lpsd.credential.changed", &record);
+}
+
+/// What a refused change of one's own credential is recorded as.
+fn change_refusal(refused: &store::ChangeRefused) -> &'static str {
+    match refused {
+        store::ChangeRefused::NoSuchPrincipal => "no-such-account",
+        store::ChangeRefused::Disabled => "disabled",
+        store::ChangeRefused::NoCredential => "no-credential",
+        store::ChangeRefused::WrongPassword => "wrong-credential",
+        store::ChangeRefused::Superseded => "superseded",
+        store::ChangeRefused::Rejected(_) => "rejected",
+    }
+}
+
+/// The `operation.name` of an enrolment.
+fn enroll_operation(action: EnrollAction) -> &'static str {
+    match action {
+        EnrollAction::Add => "ssh-key-added",
+        EnrollAction::Remove => "ssh-key-removed",
+    }
 }
 
 /// Ask for a new password and its confirmation, saying what was wrong with the
@@ -1424,6 +1540,11 @@ fn begin_enroll(
             log::info(format_args!(
                 "refused an SSH key change for {principal}: {refused:?}"
             ));
+            record_changed(
+                principal,
+                enroll_operation(request.start.action),
+                Err(change_refusal(&refused)),
+            );
             return refuse_enroll(stream, conversation, &refused);
         }
     };
@@ -1455,6 +1576,7 @@ fn begin_enroll(
             "refused an SSH key change for {}: {problem}",
             target.name
         ));
+        record_changed(principal, enroll_operation(start.action), Err("rejected"));
         return refuse(
             stream,
             conversation,
@@ -1471,6 +1593,7 @@ fn begin_enroll(
         conversation,
         Pending::Enroll(Enroll {
             rid: target.rid,
+            sid: principal.to_sid(),
             name: target.name,
             action: start.action,
             material: start.material,
@@ -1534,6 +1657,11 @@ fn answer_enroll(
             "SSH key change for {} refused: {refused:?}",
             enroll.name
         ));
+        record_changed(
+            &enroll.sid,
+            enroll_operation(enroll.action),
+            Err(change_refusal(&refused)),
+        );
         return refuse_enroll(stream, conversation, &refused);
     }
     commit_enroll(stream, store, conversation, &enroll, save)
@@ -1550,7 +1678,9 @@ fn commit_enroll(
 ) -> io::Result<()> {
     // `prove_current` has just found the RID, so a missing name is a store
     // that changed under the conversation — refused as the change refuses it.
+    let operation = enroll_operation(enroll.action);
     let Some(name) = store.name_of(enroll.rid) else {
+        record_changed(&enroll.sid, operation, Err("no-such-account"));
         return refuse_enroll(stream, conversation, &store::ChangeRefused::NoSuchPrincipal);
     };
 
@@ -1560,6 +1690,7 @@ fn commit_enroll(
         log::info(format_args!(
             "SSH key change for {name} refused: {problem}"
         ));
+        record_changed(&enroll.sid, operation, Err("rejected"));
         // The key went between the rounds (`remove_key`'s `NotFound`), or the
         // store now refuses what it accepted then: either way, the material.
         let (denial, reason) = match problem {
@@ -1582,6 +1713,7 @@ fn commit_enroll(
         log::error(format_args!(
             "could not save an SSH key change for {name}: {error}; it was not applied"
         ));
+        record_changed(&enroll.sid, operation, Err("not-saved"));
         return refuse(
             stream,
             conversation,
@@ -1594,6 +1726,7 @@ fn commit_enroll(
     // change is acknowledged, so nothing the authority holds about this store
     // outlives it (PSPU §2.17).
     notify_changed(stream);
+    record_changed(&enroll.sid, operation, Ok(()));
 
     // By fingerprint, never the whole line: the log wants which key, not the
     // key.
@@ -1948,6 +2081,113 @@ mod tests {
         );
     }
 
+    /// The records of one test, by type, failing on any other type.
+    fn written(event_type: &str) -> Vec<audit::Record> {
+        audit::take()
+            .into_iter()
+            .map(|(written, record)| {
+                assert_eq!(written, event_type);
+                record
+            })
+            .collect()
+    }
+
+    /// A change is recorded once it is durable, naming the principal by SID as
+    /// both who asked and whose credential it was; a refused one says why.
+    #[test]
+    fn a_change_is_recorded_and_so_is_a_refusal() {
+        let mut h = Harness::with("jack", Some(b"old"));
+        let jack = audit::Value::Bin(h.sid_of("jack"));
+        audit::take();
+
+        h.open("jack");
+        h.reply(&[(PASSWORD_REF, b"old")], &saved);
+        h.reply(&[(NEW_PASSWORD_REF, b"new"), (AGAIN_REF, b"new")], &saved);
+        let records = written("lpsd.credential.changed");
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].get("subject.token.sid"), Some(&jack));
+        assert_eq!(records[0].get("object.account.sid"), Some(&jack));
+        assert_eq!(
+            records[0].get("operation.name"),
+            Some(&audit::Value::Str("password".into()))
+        );
+        assert_eq!(records[0].get("outcome.success"), Some(&audit::Value::Bool(true)));
+
+        h.open("jack");
+        h.reply(&[(PASSWORD_REF, b"guess")], &saved);
+        let records = written("lpsd.credential.changed");
+        assert_eq!(records.len(), 1);
+        assert_eq!(
+            records[0].get("outcome.reason"),
+            Some(&audit::Value::Str("wrong-credential".into()))
+        );
+
+        h.open("jack");
+        h.reply(&[(PASSWORD_REF, b"new")], &saved);
+        h.reply(&[(NEW_PASSWORD_REF, b"newer"), (AGAIN_REF, b"newer")], &unsaveable);
+        let records = written("lpsd.credential.changed");
+        assert_eq!(
+            records[0].get("outcome.reason"),
+            Some(&audit::Value::Str("not-saved".into()))
+        );
+    }
+
+    /// The audit trail is told what the wire is not: whether the account
+    /// existed, and if it did, which one. A name lpsd does not hold is never
+    /// recorded.
+    #[test]
+    fn a_checked_password_says_what_the_wire_hides() {
+        let h = Harness::with("jack", Some(b"right"));
+        audit::take();
+        let response = |password: &[u8]| CredentialResponse {
+            answers: vec![Answer {
+                credential_ref: PASSWORD_REF,
+                data: Secret::from_slice(password),
+            }],
+        };
+
+        for (name, password) in [(&b"jack"[..], &b"wrong"[..]), (b"nobody", b"right")] {
+            answer_logon(
+                &h.lpsd,
+                &h.store,
+                CONVERSATION,
+                name,
+                &response(password),
+                1_000_000,
+            )
+            .expect("served");
+            assert!(matches!(h.sent(), Sent::Refused(Denial::AuthenticationFailed)));
+        }
+
+        let records = written("lpsd.credential.verified");
+        assert_eq!(records.len(), 2);
+        assert_eq!(
+            records[0].get("object.account.sid"),
+            Some(&audit::Value::Bin(h.sid_of("jack")))
+        );
+        assert_eq!(
+            records[0].get("outcome.reason"),
+            Some(&audit::Value::Str("wrong-credential".into()))
+        );
+        assert_eq!(
+            records[0].get("operation.name"),
+            Some(&audit::Value::Str("password".into()))
+        );
+        assert_eq!(records[1].get("object.account.sid"), None);
+        assert_eq!(
+            records[1].get("outcome.reason"),
+            Some(&audit::Value::Str("no-such-account".into()))
+        );
+        assert!(
+            !records[1]
+                .encode()
+                .unwrap()
+                .windows(6)
+                .any(|window| window == b"nobody"),
+            "the name reached the record"
+        );
+    }
+
     #[test]
     fn a_wrong_current_password_ends_the_change() {
         let mut h = Harness::with("jack", Some(b"old"));
@@ -2144,6 +2384,14 @@ mod tests {
         let key = &h.store.keys("jack").unwrap()[0];
         assert_eq!(key.label, "laptop", "the key's comment becomes its label");
         assert!(h.pending.is_empty());
+
+        let records = written("lpsd.credential.changed");
+        assert_eq!(records.len(), 1);
+        assert_eq!(
+            records[0].get("operation.name"),
+            Some(&audit::Value::Str("ssh-key-added".into()))
+        );
+        assert_eq!(records[0].get("outcome.success"), Some(&audit::Value::Bool(true)));
     }
 
     #[test]
