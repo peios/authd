@@ -2,9 +2,9 @@
 [package]
 name        = "dev.peios.authd-nss"
 description = "Peios NSS principal-resolution module"
-# The crate closure the module links; build.main's collect-rust-licences
-# --check holds this to what those crates declare.
-license     = "(Apache-2.0 OR MIT) AND MIT"
+# The Rust crate closure plus the statically linked GCC unwinder; checked
+# by build.main against the collected crate expression and runtime licence.
+license     = "(Apache-2.0 OR MIT) AND MIT AND (GPL-3.0-or-later WITH GCC-exception-3.1)"
 
 
 

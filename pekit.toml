@@ -91,9 +91,9 @@ cargo build --release --locked --offline \
 cargo build --release --locked --offline -p nss_peios --target-dir "$PEKIT_OUT/target"
 
 # Each binary links its own crate closure, so each package ships that
-# closure's notices and declares its conjunction of licences; --check holds
-# every package definition to it (PEI-1163). The debug sources cover all five
-# closures. peios-rs carries no package-local notice; ship the reviewed
+# closure's notices and declares its conjunction of licences; the expression
+# check below holds every package definition to it (PEI-1163). The debug
+# sources cover all five closures. peios-rs carries no package-local notice; ship the reviewed
 # notice of that same pinned source.
 LICENSE_ROOT=$PEKIT_OUT/licenses
 collect_licences() {
@@ -107,7 +107,18 @@ collect_licences() {
     /usr/libexec/peios-packaging/collect-rust-licences \
       --licence-root "$LICENSE_ROOT/$out" $root_args \
       --notice "git+https://github.com/peios/peios-rs.git=third-party/peios-rs-LICENSE" \
-      --check "packages.pekit/$definition.package.pekit.toml"
+      --expression-out "$LICENSE_ROOT/$out/crate-expression.txt"
+    # The NSS cdylib also includes GCC's static unwinder, outside Cargo's graph.
+    python3 - "$LICENSE_ROOT/$out/crate-expression.txt" "$out" \
+      "packages.pekit/$definition.package.pekit.toml" <<'PY_LICENSE'
+import pathlib, sys, tomllib
+expected = pathlib.Path(sys.argv[1]).read_text().strip()
+if sys.argv[2] == "nss":
+    expected += " AND (GPL-3.0-or-later WITH GCC-exception-3.1)"
+declared = tomllib.loads(pathlib.Path(sys.argv[3]).read_text())["package"]["license"]
+if declared != expected:
+    raise SystemExit(f"{sys.argv[3]}: license {declared!r}, expected {expected!r}")
+PY_LICENSE
   done
   test -s "$LICENSE_ROOT/$out/crate-licenses.tsv"
 }
@@ -121,6 +132,9 @@ collect_licences login login \
   dev.peios.authd-login dev.peios.authd-login-debuginfo
 collect_licences nss nss_peios \
   dev.peios.authd-nss dev.peios.authd-nss-debuginfo
+mkdir -p "$LICENSE_ROOT/nss/libgcc"
+cp third-party/libgcc-COPYING3 third-party/libgcc-COPYING.RUNTIME \
+  "$LICENSE_ROOT/nss/libgcc/"
 collect_licences debugsource "authd lpsd lps login nss_peios" \
   dev.peios.authd-debugsource
 
@@ -311,6 +325,23 @@ do
     fi
   done
 done
+
+# NSS is loaded into unrelated processes: no additional dynamic runtime,
+# and no exported compiler-runtime symbols that could interpose on the caller.
+python3 - "$PEKIT_OUT/usr/lib/x86_64-linux-peios/libnss_peios.so.2" <<'PY_NSS'
+import re, subprocess, sys
+elf = sys.argv[1]
+dynamic = subprocess.check_output(["readelf", "-dW", elf], text=True)
+needed = set(re.findall(r"\(NEEDED\).*\[(.*?)\]", dynamic))
+if needed != {"libc.so.6", "ld-linux-x86-64.so.2"}:
+    raise SystemExit(f"{elf}: unexpected NSS dependencies {sorted(needed)}")
+symbols = subprocess.check_output(["readelf", "--dyn-syms", "--wide", elf], text=True)
+for line in symbols.splitlines():
+    fields = line.split()
+    if len(fields) >= 8 and fields[4] in {"GLOBAL", "WEAK"} and fields[6] != "UND":
+        if not fields[7].startswith("_nss_peios_"):
+            raise SystemExit(f"{elf}: unexpected NSS export {fields[7]}")
+PY_NSS
 
 # Installed-payload smoke: public client CLI, prohibited login bypass, NSS ABI,
 # seed syntax, and live-account script syntax all come from staged files.
