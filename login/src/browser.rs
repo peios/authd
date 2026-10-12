@@ -50,7 +50,8 @@ fn listen() -> SocketAddr {
         let bytes = value.data.split(|&byte| byte == 0).next()?;
         std::str::from_utf8(bytes).ok()?.trim().parse().ok()
     })();
-    configured.unwrap_or_else(|| SocketAddr::from(([0, 0, 0, 0], 7780)))
+    // gxwid's own fallback when Listen is absent or malformed (gxwi.regman).
+    configured.unwrap_or_else(|| SocketAddr::from(([127, 0, 0, 1], 7780)))
 }
 
 fn browser_addresses(listen: SocketAddr, mut addresses: Vec<IpAddr>) -> Vec<IpAddr> {
