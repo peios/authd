@@ -38,6 +38,9 @@ Prepare a managed console: restore canonical input, echo and standard control
 characters while preserving serial speed, and wait until first-boot setup has
 retired both of its service definitions before accepting credentials. Registry
 errors fail closed. This option grants no authentication authority.
+When GXWI is installed, show its configured browser address and the public
+certificate's SHA-256 fingerprint before authentication. Unavailable browser
+information does not prevent login. The information is read once per invocation.
 .TP
 .B \-p
 Preserve the inherited environment instead of constructing a fresh login
