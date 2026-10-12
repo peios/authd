@@ -26,6 +26,7 @@
 //! `exec` also replaces the address space, so the credential material this
 //! process handled does not survive into the user's shell.
 
+mod browser;
 mod console;
 
 use std::os::fd::OwnedFd;
@@ -203,6 +204,7 @@ fn run(options: Options) -> Result<(), String> {
     become_session_leader();
     if options.console {
         console::prepare()?;
+        browser::announce();
     }
 
     let remote = options.remote_host.as_deref();
