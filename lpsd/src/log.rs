@@ -1,4 +1,4 @@
-//! Diagnostics on stderr, which peinit captures into the service's log.
+//! Information on stdout, warnings/errors on stderr; peinit captures both.
 //!
 //! No logging framework. lpsd holds every local credential verifier on the
 //! system, so a log crate is a dependency, a formatter, and a set of allocation
@@ -16,7 +16,11 @@ use std::io::Write;
 fn emit(level: &str, args: Arguments<'_>) {
     // Deliberately ignoring write errors: there is nowhere useful to report a
     // failure to report, and lpsd must not die because its log went away.
-    let _ = writeln!(std::io::stderr(), "lpsd: {level}: {args}");
+    if level == "info" {
+        let _ = writeln!(std::io::stdout(), "lpsd: {level}: {args}");
+    } else {
+        let _ = writeln!(std::io::stderr(), "lpsd: {level}: {args}");
+    }
 }
 
 pub fn info(args: Arguments<'_>) {
