@@ -305,7 +305,12 @@ fn run(registry: &Registry, stream: &UnixStream, deadline: Instant) -> io::Resul
     // record is written here rather than at each terminal below.
     let mut attempt = Attempt::new(&peer, &start);
     let result = logon(registry, stream, &peer, originator, &start, deadline, &mut attempt);
+    let shadow_owner = attempt.shadow_owner.take();
     attempt.finish();
+    // The normal audit record, like the success reply, precedes advisory I/O.
+    if let Some(source) = shadow_owner {
+        crate::resolve::warn_shadowed(registry, &source, &start.identifier);
+    }
     result
 }
 
@@ -319,6 +324,8 @@ struct Attempt {
     /// `None` until a terminal: a conversation that never reaches one was
     /// abandoned, by the client or the source going away.
     outcome: Option<Result<(), &'static str>>,
+    /// Retain the successful registration for the post-reply, post-audit check.
+    shadow_owner: Option<Arc<crate::source::Source>>,
 }
 
 impl Attempt {
@@ -341,6 +348,7 @@ impl Attempt {
         Self {
             record,
             outcome: None,
+            shadow_owner: None,
         }
     }
 
@@ -481,7 +489,17 @@ fn logon(
         deadline,
         Purpose::Logon,
     )? {
-        Ok(Ended::Asserted(assertion)) => grant(stream, start, &conversation, &assertion, attempt),
+        Ok(Ended::Asserted(assertion)) => {
+            grant(stream, start, &conversation, &assertion, attempt)?;
+            // grant can return Ok after sending a denial. Only a delivered
+            // success permits this advisory query, and the client already has
+            // its token before any later source is asked. PGSS §2.15 forbids a
+            // failed shadowing check from failing an otherwise valid logon.
+            if attempt.outcome == Some(Ok(())) {
+                attempt.shadow_owner = Some(Arc::clone(&source));
+            }
+            Ok(())
+        }
         // `relay` ends a logon in an assertion or in a denial it has already
         // sent. Answered anyway rather than trusted, so that a mistake there
         // costs a denial and never a connection closed with nothing said.
