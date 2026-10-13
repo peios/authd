@@ -1,4 +1,4 @@
-//! Diagnostics on stderr, which peinit captures into the service's log.
+//! Information on stdout, warnings/errors on stderr; peinit captures both.
 //!
 //! No logging framework. authd is a TCB process and a log crate is a
 //! dependency, a formatter, and a set of allocation behaviours inside it — for
@@ -16,7 +16,11 @@ use std::io::Write;
 fn emit(level: &str, args: Arguments<'_>) {
     // Deliberately ignoring write errors: there is nowhere useful to report a
     // failure to report, and authd must not die because its log went away.
-    let _ = writeln!(std::io::stderr(), "authd: {level}: {args}");
+    if level == "info" {
+        let _ = writeln!(std::io::stdout(), "authd: {level}: {args}");
+    } else {
+        let _ = writeln!(std::io::stderr(), "authd: {level}: {args}");
+    }
 }
 
 pub fn info(args: Arguments<'_>) {
