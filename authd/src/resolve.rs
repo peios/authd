@@ -45,6 +45,9 @@ use crate::log;
 use crate::source::{Inbound, Registry, Slot, Source};
 use crate::well_known;
 
+#[cfg(test)]
+mod shadow_tests;
+
 /// How long a source has to answer a lookup.
 ///
 /// Shorter than a logon's budget, and deliberately: nothing is waiting on a
@@ -276,6 +279,70 @@ pub fn route(registry: &Registry, identifier: &[u8]) -> Route {
     match fallback {
         Some(source) => Route::Blind(source),
         None => Route::NoSources,
+    }
+}
+
+/// PGSS §2.15's advisory shadowing check, after a logon grant was delivered.
+/// Queries carry a name only, never the credential or the assertion. A failed
+/// check cannot change the grant; a single-source deployment sends no query.
+pub fn warn_shadowed(registry: &Registry, owner: &Arc<Source>, identifier: &[u8]) {
+    let Ok(name) = std::str::from_utf8(identifier) else {
+        return;
+    };
+    check_shadowing(
+        registry,
+        owner,
+        name,
+        std::time::Instant::now() + QUERY_TIMEOUT,
+        |other| {
+            // Debug spelling escapes control characters in source/name text.
+            log::warn(format_args!(
+                "logon name shadowed: name={name:?} owner={:?} also-claimed-by={other:?}",
+                owner.name()
+            ));
+        },
+    );
+}
+
+fn check_shadowing(
+    registry: &Registry,
+    owner: &Arc<Source>,
+    name: &str,
+    deadline: std::time::Instant,
+    mut report: impl FnMut(&str),
+) {
+    if !name_is_usable(name) {
+        return;
+    }
+    let slots = registry.slots();
+    // Match the registration, not just its name. If it disappeared or was
+    // replaced during authentication, its position is no longer established.
+    let Some(position) = slots.iter().position(|slot| {
+        matches!(slot, Slot::Live(source) if Arc::ptr_eq(source, owner))
+    }) else {
+        return;
+    };
+    for slot in &slots[position + 1..] {
+        if std::time::Instant::now() >= deadline {
+            break;
+        }
+        let Slot::Live(source) = slot else {
+            continue;
+        };
+        // Unlike routing, a missing/refusing source is inconclusive rather
+        // than fatal. Continue to later sources within the same lookup budget.
+        if matches!(
+            ask(
+                source,
+                psi::Key::Name(name.to_owned()),
+                Kind::Principal,
+                Fields::empty(),
+                deadline,
+            ),
+            Reply::Found(_)
+        ) {
+            report(source.name());
+        }
     }
 }
 
