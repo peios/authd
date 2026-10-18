@@ -24,6 +24,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "auth-abi"
+version = "0.0.24"
+
+[[package]]
 name = "auth-core"
 version = "0.0.24"
 dependencies = [
@@ -384,6 +388,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "libauth"
+version = "0.0.24"
+dependencies = [
+ "auth-abi",
+ "auth-core",
+ "libc",
+]
+
+[[package]]
 name = "libc"
 version = "0.2.189"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -577,6 +590,14 @@ dependencies = [
  "bitflags",
  "libc",
  "peios-sys",
+]
+
+[[package]]
+name = "peios-auth"
+version = "0.0.24"
+dependencies = [
+ "auth-abi",
+ "auth-core",
 ]
 
 [[package]]

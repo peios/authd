@@ -1,0 +1,16 @@
+[package]
+name = "libauth"
+version = "0.0.24"
+edition = "2024"
+license = "MIT"
+publish = false
+build = "build.rs"
+
+[lib]
+name = "auth"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+auth-core = { path = "../auth-core" }
+libc = "0.2"
+auth-abi = { path = "../auth-abi" }

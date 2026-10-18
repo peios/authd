@@ -1146,6 +1146,14 @@ pub fn encode_failed(failed: &Failed) -> Result<Vec<u8>, WireError> {
     w.finish()
 }
 
+/// Decode a refusal while preserving failure codes introduced by newer servers.
+/// Applications can display the reason without treating an unknown code as a
+/// malformed response or retrying an action the server explicitly refused.
+pub fn decode_failed_code(buf: &[u8]) -> Result<(u32, String), WireError> {
+    let mut body = open_body(buf, MSG_FAILED)?;
+    Ok((body.u32()?, body.string(MAX_REASON_BYTES)?.to_owned()))
+}
+
 pub fn decode_failed(buf: &[u8]) -> Result<Failed, WireError> {
     let mut b = open_body(buf, MSG_FAILED)?;
     Ok(Failed {

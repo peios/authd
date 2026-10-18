@@ -1,0 +1,12 @@
+[package]
+name = "peios-auth"
+version = "0.0.24"
+edition = "2024"
+license = "MIT"
+publish = false
+
+[dependencies]
+auth-abi = { path = "../auth-abi" }
+
+[dev-dependencies]
+auth-core = { path = "../auth-core" }

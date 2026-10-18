@@ -1,0 +1,13 @@
+[package]
+name = "dev.peios.libauth-devel"
+description = "Peios authentication client headers and link metadata"
+license = "MIT"
+
+[dependencies]
+"dev.peios.libauth" = "= {{release}}"
+
+[files]
+"@source:LICENSE" = "usr/share/licenses/dev.peios.libauth-devel/LICENSE"
+":usr/include/peios/auth*.h" = "usr/include/peios"
+":usr/lib/x86_64-linux-peios/libauth.so" = "usr/lib/x86_64-linux-peios/libauth.so"
+":usr/lib/x86_64-linux-peios/pkgconfig/auth.pc" = "usr/lib/x86_64-linux-peios/pkgconfig/auth.pc"

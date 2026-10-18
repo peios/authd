@@ -1,0 +1,12 @@
+[package]
+name = "dev.peios.libauth-debuginfo"
+description = "Peios authentication client debugging symbols"
+license = "(Apache-2.0 OR MIT) AND MIT"
+
+[dependencies]
+"dev.peios.libauth" = "= {{release}}"
+
+[files]
+"@source:LICENSE" = "usr/share/licenses/dev.peios.libauth-debuginfo/LICENSE"
+":licenses/libauth/**" = "usr/share/licenses/dev.peios.libauth-debuginfo/third-party"
+":debug/libauth/usr/lib/debug/**" = "usr/lib/debug"

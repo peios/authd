@@ -89,6 +89,10 @@ cargo build --release --locked --offline \
   --bin authd --bin lpsd --bin lps --bin login \
   --target-dir "$PEKIT_OUT/target"
 cargo build --release --locked --offline -p nss_peios --target-dir "$PEKIT_OUT/target"
+cargo build --release --locked --offline -p libauth --target-dir "$PEKIT_OUT/target"
+export PEIOS_AUTH_LIB_DIR="$PEKIT_OUT/target/release"
+cargo build --release --locked --offline -p peios-auth --target-dir "$PEKIT_OUT/target"
+sh tools/install-auth-sdk.sh "$PEKIT_OUT/target/release" "$PEKIT_OUT"
 
 # Each binary links its own crate closure, so each package ships that
 # closure's notices and declares its conjunction of licences; the expression
@@ -135,7 +139,9 @@ collect_licences nss nss_peios \
 mkdir -p "$LICENSE_ROOT/nss/libgcc"
 cp third-party/libgcc-COPYING3 third-party/libgcc-COPYING.RUNTIME \
   "$LICENSE_ROOT/nss/libgcc/"
-collect_licences debugsource "authd lpsd lps login nss_peios" \
+collect_licences libauth libauth \
+  dev.peios.libauth dev.peios.libauth-debuginfo
+collect_licences debugsource "authd lpsd lps login nss_peios libauth" \
   dev.peios.authd-debugsource
 
 mkdir -p "$PEKIT_OUT/usr/sbin" "$PEKIT_OUT/usr/bin" "$PEKIT_OUT/var/state/lpsd"
@@ -215,6 +221,7 @@ split_debug lpsd "$PEKIT_OUT/usr/sbin/lpsd"
 split_debug lps "$PEKIT_OUT/usr/bin/lps"
 split_debug login "$PEKIT_OUT/usr/bin/login"
 split_debug nss "$PEKIT_OUT/usr/lib/x86_64-linux-peios/libnss_peios.so.2"
+split_debug libauth "$PEKIT_OUT/usr/lib/x86_64-linux-peios/libauth.so.1"
 
 DEBUG_ROOT="$PEKIT_OUT/usr/src/debug/dev.peios.authd"
 mkdir -p "$DEBUG_ROOT"
@@ -276,7 +283,10 @@ export BINDGEN_EXTRA_CLANG_ARGS="-isystem $(gcc -print-file-name=include) ${BIND
 # The tests run with the same control-flow protection as build.main (PEI-1155).
 export RUSTC_BOOTSTRAP=1
 export RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }-Zcf-protection=full"
+export PEIOS_AUTH_LIB_DIR="$PEKIT_MAIN_OUT/usr/lib/x86_64-linux-peios"
+export LD_LIBRARY_PATH="$PEIOS_AUTH_LIB_DIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 cargo test --release --workspace --locked --offline --target-dir "$PEKIT_OUT/target"
+python3 tools/check-auth-abi.py "$PEIOS_AUTH_LIB_DIR"
 
 # Validate the exact staged package output produced by build.main.
 SRC=$(pwd -P)
@@ -287,7 +297,8 @@ for record in \
   "lpsd:$PEKIT_OUT/usr/sbin/lpsd:exe" \
   "lps:$PEKIT_OUT/usr/bin/lps:exe" \
   "login:$PEKIT_OUT/usr/bin/login:exe" \
-  "nss:$PEKIT_OUT/usr/lib/x86_64-linux-peios/libnss_peios.so.2:dso"
+  "nss:$PEKIT_OUT/usr/lib/x86_64-linux-peios/libnss_peios.so.2:dso" \
+  "libauth:$PEKIT_OUT/usr/lib/x86_64-linux-peios/libauth.so.1:dso"
 do
   component=${record%%:*}
   remain=${record#*:}
@@ -310,7 +321,9 @@ do
   if [ "$kind" = exe ]; then
     readelf -dW "$elf" | grep -Eq 'FLAGS_1.*PIE'
   else
-    readelf -dW "$elf" | grep -Fq 'Library soname: [libnss_peios.so.2]'
+    soname=libauth.so.1
+    if [ "$component" = nss ]; then soname=libnss_peios.so.2; fi
+    readelf -dW "$elf" | grep -F "[$soname]" >/dev/null
   fi
 
   build_id=$(readelf -n "$elf" | sed -n 's/^[[:space:]]*Build ID: //p' | head -1)

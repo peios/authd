@@ -3,3 +3,8 @@
 
 # pekit build and package output.
 /out
+
+# Python tooling and local documentation output.
+__pycache__/
+/docs/learn/dist/
+.trail-cache/

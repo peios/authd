@@ -1,10 +1,12 @@
 [workspace]
 resolver = "2"
-members = ["auth-core", "auth-policy", "terminal-input", "session-preferences", "authd", "lpsd", "lps", "login", "nss"]
+members = ["auth-core", "auth-policy", "terminal-input", "session-preferences", "authd", "lpsd", "lps", "login", "nss", "libauth", "auth-abi", "peios-auth"]
 
 # The daemons remain separate processes and trust domains: authd issues tokens,
 # lpsd verifies local credentials, and login collects credentials and starts a
 # session. auth-core shares codecs and transport, with application-side helpers
 # behind the optional client feature. Daemon dependencies do not request it.
 # auth-policy reads grants; its write feature is reserved for administrators.
+# libauth exports the C client ABI; peios-auth wraps that shared library.
+# auth-abi holds the shared C layouts, not another protocol implementation.
 # terminal-input and session-preferences are Rust-only utilities.

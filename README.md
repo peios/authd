@@ -13,7 +13,12 @@ Closest prior art is Windows' LSA.
 | `lps` | `/usr/bin/lps` | Administers `lpsd`'s store over `/run/lpsd/admin.sock`. A client with no state and no privilege of its own. |
 | `login` | `/usr/bin/login` | A PGSS Logon client. Collects a credential, receives a token, installs it, execs a shell. |
 | `nss` | `/usr/lib/x86_64-linux-peios/libnss_peios.so.2` | The NSS client through which POSIX programs resolve Peios principals. |
-| `auth-core` | — | The wire formats: PGSS Logon, PSI, and LPS. |
+| `auth-core` | — | Wire formats and transport; existing client helpers under the `client` feature. |
+| `auth-policy` | — | Machine policy evaluation and optional administrative writes. |
+| `session-preferences` | — | Locale settings shared by session originators. |
+| `libauth` | `libauth.so.1` | Public C authentication client API with `peios_auth_*` symbols. |
+| `peios-auth` | — | Safe Rust bindings that link to `libauth.so.1`. |
+| `auth-abi` | — | Shared C layout definitions used by the library and Rust bindings. |
 | `terminal-input` | — | Terminal handling for credential collection. |
 
 ## The shape
@@ -32,22 +37,36 @@ Three ideas carry most of the design.
 - **PSI** (PSD-013) — how principal sources federate identity to the authority. Not a conformance requirement; specified so third parties can write sources. `/run/psi.sock`.
 - **LPS** — `lpsd`'s administrative protocol, spoken by `lps` and Principals Manager. `/run/lpsd/admin.sock`. Its framing also carries the self socket, `/run/lpsd/self.sock`, on which any principal reads their own account and sets their display name (PSPU §10.11).
 
-## Rust crate layout
-
-Rust-only libraries use descriptive crate names. The protocol and client
-crates are combined as `auth-core`; application client helpers require its
-`client` feature. Policy evaluation lives in `auth-policy`, terminal helpers
-in `terminal-input`, and locale preferences in `session-preferences`.
-Consumers adopting this revision must update their dependency names and
-imports. Independently pinned revisions retain their existing names.
-
 ## Building
 
-Needs `libpeios` and the PKM uapi headers via `pkg-config`:
+The shared authentication client builds on Linux without a Peios kernel SDK:
 
 ```sh
-cargo test
+cargo build -p libauth --locked
+sh tools/install-auth-sdk.sh target/debug /tmp/auth-sdk /usr/lib
+export PEIOS_AUTH_LIB_DIR=/tmp/auth-sdk/usr/lib
+export LD_LIBRARY_PATH="$PEIOS_AUTH_LIB_DIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+cargo test -p libauth -p peios-auth --locked
+python3 tools/check-auth-abi.py "$PEIOS_AUTH_LIB_DIR"
 ```
+
+The full workspace also needs a compatible `libpeios` SDK and kernel UAPI
+headers, discoverable through `pkg-config` or the SDK's explicit environment
+overrides. With those installed and the library staged as above, run
+`cargo test --workspace --locked`. Socket tests require local Unix sockets.
+
+Regenerate the C/Rust layouts and export declarations with
+`python3 tools/generate-auth-abi.py` and
+`python3 tools/generate-auth-exports.py`. Format new API sources with
+`rustfmt --config-path tools/rustfmt.toml libauth/src/lib.rs
+peios-auth/src/lib.rs auth-abi/src/lib.rs`.
+
+Crate names changed at the newtree cutover: `libauthd` and
+`libauthd-client` are now `auth-core` (client modules require its `client`
+feature); `libauthd-policy` is `auth-policy`, `libtty` is `terminal-input`,
+and `libsession` is `session-preferences`. Independently pinned consumers
+must update their manifests and imports when adopting this revision.
+These source-level changes do not change the socket protocols.
 
 Packaged with pekit; `pekit.toml` carries the build and the registry seeds it offers (`registry.d/`). Seeds are *offered*, not applied — an image opts in via `[registry] autoapply`, so installing a package never silently grants it the right to assert identity.
 
@@ -57,11 +76,16 @@ The five runtime trust domains are independently installable as
 administrator bootstrap used by disposable live images is a sixth, noarch
 package, `dev.peios.authd-live-account`; it is deliberately absent from the
 production lpsd package. Each ELF component has matching debuginfo, while the
-family shares one debugsource and corresponding-source package.
+family shares one debugsource and corresponding-source package. The client
+SDK adds `dev.peios.libauth`, `dev.peios.libauth-devel`, and
+`dev.peios.libauth-debuginfo`.
 
 ## Documentation
 
-User-facing documentation lives in the Peios `learn/` tree, not here — see *Managing local principals*, *Privileges*, and *Logon sessions*.
+Authentication client guidance lives in [docs/learn](docs/learn). Build it
+with `trail build docs/learn --strict`. The public C interface contract is in
+[auth.h](libauth/include/peios/auth.h). Broader account and privilege guidance
+lives in the Peios Learn tree.
 
 ## SSH credentials
 

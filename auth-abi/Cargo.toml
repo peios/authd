@@ -1,0 +1,6 @@
+[package]
+name = "auth-abi"
+version = "0.0.24"
+edition = "2024"
+license = "MIT"
+publish = false
