@@ -66,10 +66,12 @@ binutils. Socket tests require local Unix sockets. See
 for SDK preparation, individual targets, and dependency updates.
 
 Cargo manifests remain available for Rust tooling and consumers. Bazel builds
-and tests both development and native release artifacts. The Pekit recipe
-uses `--config=peios` with the installed Peios Rust toolchain and offline
-vendored dependencies, then applies package splitting, debug-source checks,
-and signing. The default Linux configuration produces development outputs.
+and tests both development and native release artifacts. `./bazel build //:packages`
+creates the complete PPK blob and manifest store in `bazel-bin/packages.store`.
+Native builds use `--config=peios` with the installed Peios Rust toolchain.
+The default Linux configuration produces development packages. Both paths
+stage licences and debug files and validate package payloads before assembly.
+Signing and publication are separate release operations.
 
 Regenerate the C/Rust layouts and export declarations with
 `python3 tools/generate-auth-abi.py` and
@@ -84,7 +86,10 @@ and `libsession` is `session-preferences`. Independently pinned consumers
 must update their manifests and imports when adopting this revision.
 These source-level changes do not change the socket protocols.
 
-Packaged with pekit; `pekit.toml` carries the build and the registry seeds it offers (`registry.d/`). Seeds are *offered*, not applied — an image opts in via `[registry] autoapply`, so installing a package never silently grants it the right to assert identity.
+Bazel package definitions live in `packages/definitions/`. Registry seeds in
+`registry.d/` are offered as inert files: image policy explicitly selects which
+seeds to apply. Installing the package must not silently grant authority to
+assert identity. The optional passwordless live account remains a separate package.
 
 The five runtime trust domains are independently installable as
 `dev.peios.authd`, `dev.peios.authd-lpsd`, `dev.peios.authd-lps`,

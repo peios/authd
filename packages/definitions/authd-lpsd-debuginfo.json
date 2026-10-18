@@ -1,0 +1,19 @@
+{
+    "package": {
+        "architecture": "x86_64",
+        "license": "((MIT OR Apache-2.0) AND Unicode-3.0) AND Apache-2.0 AND (Apache-2.0 OR BSD-2-Clause OR MIT) AND (Apache-2.0 OR MIT) AND BSD-3-Clause AND ISC AND MIT AND (MIT OR Unlicense)",
+        "license_class": "free",
+        "homepage": "https://github.com/peios/authd",
+        "name": "dev.peios.authd-lpsd-debuginfo",
+        "description": "Peios local principal source daemon debugging symbols",
+        "version": "0.0.24-1"
+    },
+    "dependencies": {
+        "dev.peios.authd-lpsd": "= 0.0.24-1"
+    },
+    "files": {
+        "source:LICENSE": "usr/share/licenses/dev.peios.authd-lpsd-debuginfo/LICENSE",
+        "stage:licenses/lpsd/**": "usr/share/licenses/dev.peios.authd-lpsd-debuginfo/third-party",
+        "stage:debug/lpsd/usr/lib/debug/**": "usr/lib/debug"
+    }
+}

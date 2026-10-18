@@ -9,9 +9,8 @@ build:peios --extra_toolchains=@peios_rust//:toolchain
 build:peios --compilation_mode=opt
 build:peios --strip=never
 build:peios --define=peios_native=true
-# Pekit provides the outer, offline sandbox; nested Linux namespaces are unnecessary.
+# Native builds run inside the caller-provided isolated Peios userspace.
 build:peios --spawn_strategy=local
 build:peios --genrule_strategy=local
-test:peios --test_env=LD_LIBRARY_PATH
 # Package workers can mount the same source tree at different paths.
 build:peios --symlink_prefix=/

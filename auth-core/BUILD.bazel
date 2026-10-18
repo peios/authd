@@ -11,8 +11,11 @@ exports_files([
 
 filegroup(
     name = "sources",
-    srcs = glob(["src/**/*.rs"]) + glob(
-        ["tests/**/*.rs"],
+    srcs = glob(
+        [
+            "src/**",
+            "tests/**",
+        ],
         allow_empty = True,
     ),
 )

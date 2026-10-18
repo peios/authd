@@ -1,0 +1,28 @@
+{
+    "side_effects": [
+        "man-db"
+    ],
+    "package": {
+        "architecture": "x86_64",
+        "license": "((MIT OR Apache-2.0) AND Unicode-3.0) AND Apache-2.0 AND (Apache-2.0 OR MIT) AND BSD-3-Clause AND ISC AND MIT AND (MIT OR Unlicense)",
+        "license_class": "free",
+        "homepage": "https://github.com/peios/authd",
+        "name": "dev.peios.authd",
+        "description": "Peios authentication authority - the PGSS Logon authority",
+        "version": "0.0.24-1"
+    },
+    "files": {
+        "source:LICENSE": "usr/share/licenses/dev.peios.authd/LICENSE",
+        "stage:licenses/authd/**": "usr/share/licenses/dev.peios.authd/third-party",
+        "stage:usr/sbin/authd": "usr/sbin/authd",
+        "stage:usr/share/man/man8/authd.8.gz": "usr/share/man/man8/authd.8.gz",
+        "stage:usr/share/regim/authd-policy.reg": "usr/share/regim/authd-policy.reg",
+        "stage:usr/share/regim/authd-service.reg": "usr/share/regim/authd-service.reg",
+        "source:authd.regman": "usr/share/regman/authd.regman",
+        "source:authd.evman": "usr/share/evman/authd.evman"
+    },
+    "dependencies": {},
+    "signing": {
+        "usr/sbin/authd": "tcb.priv"
+    }
+}

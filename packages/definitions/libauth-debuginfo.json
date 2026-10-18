@@ -1,0 +1,19 @@
+{
+    "package": {
+        "architecture": "x86_64",
+        "license": "(Apache-2.0 OR MIT) AND MIT",
+        "license_class": "free",
+        "homepage": "https://github.com/peios/authd",
+        "name": "dev.peios.libauth-debuginfo",
+        "description": "Peios authentication client debugging symbols",
+        "version": "0.0.24-1"
+    },
+    "dependencies": {
+        "dev.peios.libauth": "= 0.0.24-1"
+    },
+    "files": {
+        "source:LICENSE": "usr/share/licenses/dev.peios.libauth-debuginfo/LICENSE",
+        "stage:licenses/libauth/**": "usr/share/licenses/dev.peios.libauth-debuginfo/third-party",
+        "stage:debug/libauth/usr/lib/debug/**": "usr/lib/debug"
+    }
+}

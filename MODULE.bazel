@@ -10,6 +10,15 @@ bazel_dep(name = "platforms", version = "1.1.0")
 rust = use_extension("@rules_rust//rust:extensions.bzl", "rust")
 rust.toolchain(
     edition = "2024",
+    extra_rustc_flags = [
+        "-Cdebuginfo=2",
+        "-Cstrip=none",
+        "--remap-path-prefix=$${output_base}=/usr/src/debug/dev.peios.authd/.build",
+        "--remap-path-prefix=$${pwd}=/usr/src/debug/dev.peios.authd",
+        "--remap-path-prefix=$${exec_root}=/usr/src/debug/dev.peios.authd",
+        "--remap-path-prefix=external=/usr/src/debug/dev.peios.authd/external",
+        "--remap-path-prefix=.=/usr/src/debug/dev.peios.authd",
+    ],
     extra_target_triples = [],
     versions = ["1.96.0"],
 )
@@ -35,6 +44,7 @@ crate.annotation(
     link_deps = ["@peios_sdk//:peios"],
     patch_args = ["-p1"],
     patches = ["//build:peios-sys.patch"],
+    repositories = ["crates"],
 )
 crate.from_cargo(
     name = "crates",
@@ -64,4 +74,26 @@ single_version_override(
     patch_strip = 1,
     patches = ["//build:rules-rust-system-libraries.patch"],
     version = "0.74.0",
+)
+
+# Use the same canonical writer snapshot and dependency lock as the kernel.
+crate.from_cargo(
+    name = "ppk_crates",
+    cargo_lockfile = "//vendor/ppk:Cargo.lock",
+    manifests = ["//vendor/ppk:Cargo.toml"],
+    skip_cargo_lockfile_overwrite = True,
+    supported_platform_triples = ["x86_64-unknown-linux-gnu"],
+)
+use_repo(crate, "ppk_crates")
+
+crate.annotation(
+    compile_data_glob = [
+        "Cargo.toml",
+        "LICENSE*",
+        "LICENCE*",
+        "COPYING*",
+        "NOTICE*",
+        "UNLICENSE*",
+    ],
+    crate = "*",
 )

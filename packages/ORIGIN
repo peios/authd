@@ -1,0 +1,3 @@
+assembly.py, package.py, check_blobs.rs and their tests were adapted from
+peios/kernel peios/packages at c966b9319253 (local migration baseline).
+The canonical PPK writer has its own pinned provenance in vendor/ppk/ORIGIN.

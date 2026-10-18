@@ -1,0 +1,21 @@
+{
+    "package": {
+        "architecture": "noarch",
+        "license": "MIT",
+        "license_class": "free",
+        "homepage": "https://github.com/peios/authd",
+        "name": "dev.peios.authd-live-account",
+        "description": "Passwordless Peios live-image development account bootstrap",
+        "version": "0.0.24-1"
+    },
+    "dependencies": {
+        "dev.peios.authd-lpsd": "= 0.0.24-1",
+        "dev.peios.authd-lps": "= 0.0.24-1",
+        "sh": "*"
+    },
+    "files": {
+        "source:LICENSE": "usr/share/licenses/dev.peios.authd-live-account/LICENSE",
+        "stage:usr/share/regim/lpsd-first-account.reg": "usr/share/regim/lpsd-first-account.reg",
+        "stage:usr/libexec/lpsd/first-account": "usr/libexec/lpsd/first-account"
+    }
+}

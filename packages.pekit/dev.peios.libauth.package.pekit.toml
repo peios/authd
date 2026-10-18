@@ -1,9 +1,0 @@
-[package]
-name = "dev.peios.libauth"
-description = "Peios authentication client shared library"
-license = "(Apache-2.0 OR MIT) AND MIT"
-
-[files]
-"@source:LICENSE" = "usr/share/licenses/dev.peios.libauth/LICENSE"
-":usr/lib/x86_64-linux-peios/libauth.so.1" = "usr/lib/x86_64-linux-peios/libauth.so.1"
-":licenses/libauth/**" = "usr/share/licenses/dev.peios.libauth/third-party"

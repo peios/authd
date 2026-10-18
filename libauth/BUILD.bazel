@@ -12,10 +12,13 @@ exports_files([
 
 filegroup(
     name = "sources",
-    srcs = glob(["src/**/*.rs"]) + glob(
-        ["tests/**/*.rs"],
+    srcs = glob(
+        [
+            "src/**",
+            "tests/**",
+        ],
         allow_empty = True,
-    ),
+    ) + ["build.rs"],
 )
 
 rust_library(
@@ -73,10 +76,12 @@ cc_import(
     interface_library = ":shared",
     shared_library = select({
         "//build:native": None,
+        "//build:packaged": None,
         "//conditions:default": ":soname",
     }),
     system_provided = select({
         "//build:native": True,
+        "//build:packaged": True,
         "//conditions:default": False,
     }),
 )

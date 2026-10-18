@@ -1,3 +1,3 @@
-"""Source-family version, checked against Cargo and PEKIT_VERSION at release time."""
+"""Source-family version, checked against Cargo manifests and package definitions during staging."""
 
 VERSION = "0.0.24"

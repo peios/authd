@@ -5,3 +5,15 @@ exports_files([
     "check-auth-abi.py",
     "install-auth-sdk.sh",
 ])
+
+filegroup(
+    name = "sources",
+    srcs = glob(
+        ["**"],
+        exclude = [
+            "**/__pycache__/**",
+            "**/*.pyc",
+        ],
+    ),
+    visibility = ["//visibility:public"],
+)

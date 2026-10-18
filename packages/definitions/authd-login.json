@@ -1,0 +1,24 @@
+{
+    "side_effects": [
+        "man-db"
+    ],
+    "package": {
+        "architecture": "x86_64",
+        "license": "((MIT OR Apache-2.0) AND Unicode-3.0) AND Apache-2.0 AND (Apache-2.0 OR MIT) AND BSD-3-Clause AND ISC AND MIT AND (MIT OR Unlicense)",
+        "license_class": "free",
+        "homepage": "https://github.com/peios/authd",
+        "name": "dev.peios.authd-login",
+        "description": "Peios terminal logon originator",
+        "version": "0.0.24-1"
+    },
+    "dependencies": {
+        "sh": "*"
+    },
+    "files": {
+        "source:LICENSE": "usr/share/licenses/dev.peios.authd-login/LICENSE",
+        "stage:licenses/login/**": "usr/share/licenses/dev.peios.authd-login/third-party",
+        "stage:usr/bin/login": "usr/bin/login",
+        "stage:usr/share/man/man1/login.1.gz": "usr/share/man/man1/login.1.gz",
+        "stage:usr/share/regim/login-console.reg": "usr/share/regim/login-console.reg"
+    }
+}

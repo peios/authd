@@ -1,4 +1,5 @@
 load("//build:checks.bzl", "host_test")
+load("//packages:package.bzl", "package_store")
 
 package(default_visibility = ["//visibility:public"])
 
@@ -102,10 +103,12 @@ filegroup(
         "//lps:BUILD.bazel",
         "//lpsd:BUILD.bazel",
         "//nss:BUILD.bazel",
+        "//packages:build-files",
         "//peios-auth:BUILD.bazel",
         "//session-preferences:BUILD.bazel",
         "//terminal-input:BUILD.bazel",
         "//tools:BUILD.bazel",
+        "//vendor/ppk:BUILD.bazel",
     ],
 )
 
@@ -147,4 +150,93 @@ host_test(
         "external",
         "no-remote",
     ],
+)
+
+filegroup(
+    name = "package-data",
+    srcs = [
+        "Cargo.lock",
+        "Cargo.toml",
+        "LICENSE",
+    ] + glob([
+        "*.regman",
+        "*.evman",
+        "man/*",
+        "registry.d/*.reg",
+        "libexec/*",
+        "third-party/*",
+    ]) + [
+        "//auth-abi:sources",
+        "//libauth:exports.txt",
+        "//libauth:headers",
+        "//packages:definitions",
+        "//tools:check-auth-abi.py",
+    ] + ["//" + name + ":Cargo.toml" for name in [
+        "auth-abi",
+        "auth-core",
+        "auth-policy",
+        "authd",
+        "libauth",
+        "login",
+        "lps",
+        "lpsd",
+        "nss",
+        "peios-auth",
+        "session-preferences",
+        "terminal-input",
+    ]],
+)
+
+filegroup(
+    name = "package-sources",
+    srcs = glob(
+        ["**"],
+        exclude = [
+            "**/.*/**",
+            "**/.*",
+            ".git",
+            ".git/**",
+            "bazel-*",
+            "bazel-*/**",
+            ".trail-cache/**",
+            "target/**",
+            "out/**",
+            ".ci-sdk/**",
+            "**/__pycache__/**",
+            "**/*.pyc",
+            "docs/learn/dist/**",
+        ],
+    ) + glob([".github/**"]) + [
+        ".bazelignore",
+        ".bazelrc",
+        ".bazelversion",
+        ".gitattributes",
+        ".gitignore",
+        ":rust-sources",
+        "//build:sources",
+        "//libauth:headers",
+        "//packages:sources",
+        "//tools:sources",
+        "//vendor/ppk:sources",
+    ] + ["//" + name + ":BUILD.bazel" for name in [
+        "auth-abi",
+        "auth-core",
+        "auth-policy",
+        "authd",
+        "libauth",
+        "login",
+        "lps",
+        "lpsd",
+        "nss",
+        "peios-auth",
+        "session-preferences",
+        "terminal-input",
+    ]] + [
+        ":package-data",
+    ],
+)
+
+package_store(
+    name = "packages",
+    packages = ["//packages:all"],
 )

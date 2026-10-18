@@ -1,7 +1,7 @@
 # Cargo build output.
 /target
 
-# pekit build and package output.
+# Local staging output.
 /out
 
 # Python tooling and local documentation output.
