@@ -420,7 +420,7 @@ fn parse_values(type_code: u32, values: &[&str]) -> Result<Values, Failed> {
 
 /// Parse an even-length hexadecimal string.
 fn hex(text: &str) -> Option<Vec<u8>> {
-    if !text.len().is_multiple_of(2) {
+    if !text.is_ascii() || !text.len().is_multiple_of(2) {
         return None;
     }
     (0..text.len())
@@ -586,6 +586,19 @@ mod tests {
         assert_eq!(hex(""), Some(Vec::new()));
         assert_eq!(hex("abc"), None, "an odd length is ambiguous");
         assert_eq!(hex("zz"), None);
+    }
+
+    #[test]
+    fn non_ascii_octet_claims_are_usage_errors() {
+        // An even byte count does not imply a UTF-8 boundary at each byte pair.
+        // In particular, slicing "€x" at byte two used to panic.
+        for value in ["€x", "💡", "é", "aéa"] {
+            assert_eq!(hex(value), None);
+            assert!(matches!(
+                parse_values(claim::TYPE_OCTET, &[value]),
+                Err(Failed::Usage(_))
+            ));
+        }
     }
 
     #[test]

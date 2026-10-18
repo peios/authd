@@ -51,6 +51,10 @@ Claims are copied into a token when it is issued. Changing a stored claim does
 not change tokens that already exist. Test the intended access rule with a
 fresh session after a claim change.
 
+Octet claim values use pairs of ASCII hexadecimal digits. Invalid text,
+including non-ASCII characters, produces a usage error without changing the
+account.
+
 The complete claim types and command syntax belong to `lps(1)`. The machine's
 privilege grants are described separately in [Granting
 Access](~peios/authentication-policy/granting-access).
