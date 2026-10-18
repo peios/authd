@@ -1,12 +1,9 @@
----
-title: Building Authentication
-type: how-to
-description: Build and test the authentication programs and client SDK with
-  Bazel on Linux.
----
+# Building Authentication
 
-Use Bazel to build the authentication daemons, command-line clients, NSS
-module, and shared authentication client. The supported development host is
+Use Bazel to build the authentication daemons, command-line clients, name
+service switch
+(NSS) module, and shared authentication client. The supported development host
+is
 x86-64 Linux with glibc.
 
 ## Before you start
@@ -23,7 +20,8 @@ Socket tests use temporary Unix sockets and do not contact system services.
 
 ## Build the client SDK
 
-The client library does not require the Peios kernel SDK:
+The client software development kit (SDK) does not require the Peios
+kernel SDK:
 
 ```sh
 ./bazel build //:sdk
@@ -37,8 +35,9 @@ When using that staging directory, point `pkg-config` at its metadata and
 set `PKG_CONFIG_SYSROOT_DIR` to the staging root. Runtime callers also need
 its `usr/lib` directory on their library search path.
 
-The ABI test compares C and Rust layouts, checks the public exports and
-SONAME, and compiles and runs a C client. The Rust client tests load the
+The application binary interface (ABI) test compares C and Rust layouts,
+checks the public exports and shared object name (SONAME), and compiles and
+runs a C client. The Rust client tests load the
 shared library through Bazel's runtime dependency graph.
 
 ## Prepare a Peios SDK
@@ -65,16 +64,20 @@ export PEIOS_SDK=/tmp/authd-dev-sdk
 ```
 
 Use a new output directory each time. The helper builds the separate
-`libpeios` component through its current Cargo interface and copies its
-headers together with the supplied kernel UAPI. It does not change the
+`libpeios` component through its Cargo interface and copies its
+headers together with the supplied kernel userspace API (UAPI). It does not
+change the
 source checkouts. Bazel then consumes the SDK library and headers as
 explicit inputs. Changing those inputs invalidates dependent actions.
 
-CI selects exact source revisions in `.github/workflows/check.yml`. The
+Continuous integration (CI) selects exact source revisions in
+`.github/workflows/check.yml`. The
 SDK is a host development build; running Peios-specific operations still
 requires a compatible Peios kernel.
 
 ## Build and test everything
+
+With the SDK configured, build the artifacts and run the tests:
 
 ```sh
 ./bazel build //:artifacts
@@ -136,15 +139,19 @@ Run `./bazel build //:packages` to build the complete package set. The output
 is `bazel-bin/packages.store`, containing deduplicated, compressed blobs under
 `blobs/sha256/` and canonical manifests under
 `manifests/<name>/<version>/<arch>/manifest.toml`. The writer is the same
-pinned PPK implementation used by the kernel. Its manifest format is
+pinned package-store writer used by the kernel. Its manifest format is
 unchanged.
 
 Build one package with a target such as `//packages:authd`,
 `//packages:libauth-devel`, or `//packages:authd-source`. Each target produces
 its own `.ppk` directory. The source package includes only declared repository
-inputs. Runtime packages share one staging action, which builds the six ELF
-artifacts, collects the declared crate closures' license notices, splits debug
-information, and stages manuals and registry seeds.
+inputs. Runtime packages share one staging action, which builds the six
+executable and linkable format (ELF) artifacts, collects the declared crate
+closures' license notices, splits debug
+information, and stages manuals and registry seeds. Manual sources live in
+`docs/man/`; event and registry manifests live in `docs/*.evman` and
+`docs/*.regman`. Packaging installs them in their respective directories under
+`/usr/share/`.
 
 The package family contains the authority, principal source, administration
 and `login` clients, NSS library, C client library and development headers,
@@ -156,7 +163,8 @@ images unless their policy deliberately requests it.
 The default configuration produces packages for the Linux development ABI.
 Package binaries link to installed library SONAMEs without Bazel runtime
 search paths; development tests outside packaging retain their runfiles
-library paths. Package staging checks ABI layouts and exports, CLI behavior,
+library paths. Package staging checks ABI layouts and exports, command-line
+behavior,
 registry privileges, manual pages, SONAMEs, split debug files, and path
 leakage.
 
@@ -164,7 +172,7 @@ leakage.
 and whether the artifacts use the development or native Peios ABI. It also
 preserves package descriptions, licenses, dependencies, service-state security
 descriptors, side effects, and required signing tiers. These fields are policy
-metadata alongside the current canonical manifests; the manifest format does
+metadata alongside the canonical manifests; the manifest format does
 not yet encode them. A release installer must apply that policy explicitly.
 The store is unsigned and is not marked release-ready.
 
@@ -182,9 +190,12 @@ export PEIOS_RUSTC=/usr/bin/rustc
 ```
 
 This configuration requires the packaged Peios Rust compiler and standard
-library, version 1.98.1 or newer, and applies CET and distribution linker
-hardening. It never substitutes the downloaded development compiler. Native
-package staging additionally requires CET IBT/SHSTK and RELR on every ELF.
+library, version 1.98.1 or newer, and applies control-flow enforcement
+technology
+(CET) and distribution linker hardening. It never substitutes the downloaded
+development compiler. Native
+package staging requires indirect branch tracking, shadow stacks, and
+packed relative relocations (RELR) on every ELF artifact.
 The build environment needs a C compiler, binutils, Python 3.11 or newer,
 Bash, gzip, tar, pkg-config, libclang, the Peios SDK and kernel headers.
 
@@ -196,7 +207,8 @@ tools/offline-build acquire /absolute/path/authd-inputs
 ```
 
 Mount that snapshot read-only in the prepared native environment, declare
-its installed SDK as above, and provide a separate writable work directory:
+its installed SDK with `PEIOS_SDK`, and provide a separate writable work
+directory:
 
 ```sh
 tools/offline-build build /absolute/path/authd-inputs /absolute/path/authd-work
@@ -214,3 +226,50 @@ Signing, publication, image policy application, and authentication/token
 qualification on a running Peios kernel are separate release steps. In
 particular, the authority requires the `tcb.priv` signing tier recorded in
 its package metadata.
+
+## Regenerate the client interface
+
+Install clang-format 18.1.8 and the Rust 1.96.0 formatter. The generators
+use the repository's C and Rust formatting settings. After changing the
+public C interface, regenerate its shared layouts and export declarations:
+
+```sh
+rustup run 1.96.0 python3 tools/generate-auth-abi.py
+rustup run 1.96.0 python3 tools/generate-auth-exports.py
+```
+
+Format the client sources with the repository settings:
+
+```sh
+rustup run 1.96.0 rustfmt --config-path tools/rustfmt.toml libauth/src/lib.rs \
+    peios-auth/src/lib.rs auth-abi/src/lib.rs
+```
+
+Run `./bazel test //:abi-test` after regenerating the files. Review the
+public header, generated files, and export changes together.
+
+## Source compatibility
+
+Consumers adopting the renamed workspace crates need these dependencies:
+
+| Previous crate | Replacement |
+|---|---|
+| `libauthd` | `auth-core` |
+| `libauthd-client` | `auth-core` with the `client` feature |
+| `libauthd-policy` | `auth-policy` |
+| `libtty` | `terminal-input` |
+| `libsession` | `session-preferences` |
+
+Update the consumer's Cargo manifests and Rust imports together. The
+crate renames do not change the socket protocols.
+
+The Peios Generic System Standards (PGSS) Logon and principal source
+interface (PSI) headers use version 1. Their credential-method and Secure
+Shell (SSH) fields are required even though the header
+version is unchanged. Rebuild wire-protocol consumers together when adopting
+those fields; matching header versions alone do not establish compatibility.
+Applications using the public client library follow its ABI contract.
+
+For on-disk account compatibility and recovery, read `lpsd(8)` before
+replacing the daemon. An unreadable store is not permission to create a new
+one.

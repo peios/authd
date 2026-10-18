@@ -1,4 +1,4 @@
-.TH LPS 1 "October 2026" "authd" "User Commands"
+.TH LPS 1 2026-10-18 "Peios authd 0.0.24"
 .SH NAME
 lps \- administer the Peios local principal store
 .SH SYNOPSIS
@@ -132,7 +132,11 @@ Remove a claim.
 creates a principal that authenticates with no credential.  It is intended for
 explicit disposable-image bootstrap policy, not normal production accounts.
 .PP
-The machine always keeps an enabled administrator who can sign in.
+The last-administrator guard counts enabled accounts with administrator
+membership. It does not verify that another counted account has usable
+credentials, permitted logon types, or a reachable sign-in route.
+Keep a verified administrator session while changing access.
+.PP
 .BR remove ,
 .BR disable ,
 .B group remove

@@ -159,9 +159,9 @@ filegroup(
         "Cargo.toml",
         "LICENSE",
     ] + glob([
-        "*.regman",
-        "*.evman",
-        "man/*",
+        "docs/*.regman",
+        "docs/*.evman",
+        "docs/man/*",
         "registry.d/*.reg",
         "libexec/*",
         "third-party/*",

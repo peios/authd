@@ -65,7 +65,7 @@ def source_files(inputs: list[Path]) -> list[Path]:
 
 def stage_data(sources: list[Path], output: Path, version: str) -> None:
     for source in sources:
-        if source.parent == Path("man"):
+        if source.parent == Path("docs/man"):
             section = source.suffix[1:]
             target = output / f"usr/share/man/man{section}/{source.name}.gz"
             target.parent.mkdir(parents=True, exist_ok=True)

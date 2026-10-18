@@ -1,23 +1,24 @@
 --- event authd.logon.attempted
 tier: essential
-gating: none — every logon that reaches a principal source's question, or is refused before one, is recorded
-cardinality: once per `LogonStart` authd reads; a connection that opens with anything else writes none
+gating: decoded logon requests reaching authority handling
+cardinality: once per decoded `LogonStart` handled; a connection that opens with anything else writes none
 
-The record that something asked authd to sign a principal in, and whether
-it did. Written once per logon conversation, when it ends: with a token
-minted and handed over, or with the denial authd sent the originator.
-Success and failure are one type, so "every failed logon" is one query.
+A client requested a logon, and the conversation ended.
 
-**The principal's name is never recorded.** On a failure authd does not
-know who was signing in: a principal source answers "authentication
-failed" alike for a name it does not hold and for a wrong credential, and
-the name the originator sent is the caller's input, not an identity. The
-source's own record, such as `lpsd.credential.verified`, says what the
-wire hides. On a success the principal is `subject.token.sid`.
+The event records the outcome after a decoded logon request completes.
+Malformed opening messages and connections that fail before a request is
+identified do not produce this event. A successful credential check is
+separate evidence; see `lpsd.credential.verified`.
 
-Essential because a logon is the most important thing an operating system
-records about who uses it, and a machine signs people in rarely enough for
-every attempt to be kept.
+The supplied account name is never recorded. On failure it is unverified
+input, and the authority does not distinguish an unknown account from a
+wrong credential. On success, `subject.token.sid` identifies the granted
+principal. A minted token that could not be delivered produces an
+`undelivered` outcome with its session identifier.
+
+This essential event records the authority's logon decision and delivery
+outcome. It does not prove that the client installed the token or started
+a usable session.
 
 field: source.token.sid                     required
   The originator: the principal of the process on the other end of
@@ -32,15 +33,15 @@ field: object.session.auth-package          optional
   The principal source authd asked to verify the credential. Absent when
   the logon was refused before a source was chosen.
 field: subject.token.sid                    when outcome.success == true
-  The principal signed in: the user SID of the token minted.
+  The principal signed in: the user security identifier (SID) of the token.
 field: object.session.id                    optional
   The logon session created for the sign-on. Every record of what the
   principal does in it carries the same value as `subject.token.auth-id`.
   Present whenever a token was minted: on a success, and on an
   `undelivered` failure.
 field: object.token.id                      optional
-  The token minted for the originator, present exactly when
-  `object.session.id` is.
+  The minted token identifier, when the token statistics query succeeds.
+  A session identifier can be present without this field.
 field: outcome.success                      required
   True only when the token reached the originator.
 field: outcome.reason                       when outcome.success == false
@@ -56,21 +57,21 @@ field: outcome.reason                       when outcome.success == false
 
 --- event authd.service.attested
 tier: standard
-gating: none — every service attestation that names a service is recorded
+gating: none — every decoded service-attestation request is recorded
 cardinality: once per `ServiceAttest` authd reads
 
-The record that the service manager asked authd for a service's token,
-with no credential behind it, and whether authd minted one. The service
-manager is PID 1 running as SYSTEM, and authd takes the service name on its
-word, because the process the token is for does not exist yet (PGSS Logon
-§2.19).
+A client requested a service token.
 
-Standard rather than essential because every service with an identity
-other than SYSTEM is attested on every start, so a machine writes these
-in proportion to its service restarts.
+Only the service manager, process ID (PID) 1 running as SYSTEM, can attest
+service identities. Requests from other peers are refused and recorded.
+An empty service name is also recorded as a refusal, without
+`object.service.name`. See PGSS Logon §2.19.
+
+The event distinguishes token creation from successful delivery. It uses
+the standard tier because non-SYSTEM services request tokens on each start.
 
 field: subject.token.sid                    required
-  The principal that asked: the user SID of the peer's token, SYSTEM for
+  The caller: the user security identifier (SID) of the peer token, SYSTEM for
   the service manager.
 field: object.service.name                  optional
   The service the token is for, as the service manager named it. Absent
@@ -84,7 +85,8 @@ field: object.session.id                    optional
   The logon session created for the service, present exactly when
   `object.token.sid` is.
 field: object.token.id                      optional
-  The token minted, present exactly when `object.token.sid` is.
+  The minted token identifier, when the token statistics query succeeds.
+  It can be absent even when `object.token.sid` is present.
 field: object.token.privileges              optional
   The privileges local policy granted the token, all of them enabled.
   Present exactly when `object.token.sid` is.
@@ -103,19 +105,21 @@ tier: essential
 gating: none — every session end authd carries out is recorded; a refused request and a query are not
 cardinality: once per `SessionEnd` authd acts on
 
-The record that authd ended a logon session at someone's request, by
-ending every process whose primary token belongs to it (PGSS Logon
-§2.22). The kernel destroys the session when the last reference drops,
-and records that as `kacs.session.destroyed`; this record adds who asked,
-which the kernel cannot know.
+The authority attempted to end a logon session at a client's request.
 
-A refusal is not recorded here. Who may end another principal's session is
-decided by an access check against the `SessionEndSecurity` descriptor,
-which KACS records as `kacs.audit.access.checked` with `object.kind`
-`authd-session-end` when the descriptor's SACL asks it to.
+The operation stops processes whose primary tokens belong to the session.
+The result can report remaining processes. Even a successful result does
+not prove that every token reference has been released. The kernel records
+`kacs.session.destroyed` when the session's last reference is released;
+this event records who requested the operation. See PGSS Logon §2.22.
 
-Essential because ending somebody's session is rare and is an
-administrative act on another principal.
+Permission queries and refused requests do not produce this event. The
+access check for ending another account's session can produce
+`kacs.audit.access.checked` with `object.kind` set to `authd-session-end`,
+if the descriptor's system access control list (SACL) requests auditing.
+
+This essential event records a session-management action that can stop
+another account's work.
 
 field: subject.token.sid                    required
   The principal that asked: themselves, signing out, or someone the
@@ -125,9 +129,10 @@ field: object.session.user.sid              required
   Whose session it was.
 field: object.session.logon-type            required
 field: outcome.success                      required
-  True when no process was left holding the session.
+  True when the final process scan reported no remaining session processes.
+  This does not prove that no external token references remain.
 field: outcome.reason                       when outcome.success == false
   values: processes-remaining
   closed: false
-  Some processes survived every round, or could not be examined. The
-  session lives on until they exit.
+  Some processes survived every round, or could not be examined.
+  Session destruction depends on release of every token reference.

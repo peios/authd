@@ -1,6 +1,6 @@
 //! The events authd writes: what it did, for the audit trail.
 //!
-//! Three types, defined in `authd.evman` at the repository root, which is the
+//! Three types, defined in `docs/authd.evman`, which is the
 //! catalogue's word on what each field means:
 //!
 //! - `authd.logon.attempted` (essential), from [`crate::conversation`];

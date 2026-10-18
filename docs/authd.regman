@@ -1,0 +1,493 @@
+--- machine\generic\authn\policy
+canonical: Machine\Generic\Authn\Policy
+
+Machine policy for the privileges, integrity, owner, and default access rules
+of issued tokens.
+
+Each subkey names a principal. Token grants combine the applicable user and
+group records; one record alone does not describe all of a principal's
+access. Resource descriptors and existing tokens also affect access.
+
+The key belongs under `Generic` because another authentication authority
+can implement the same policy. Source registration belongs separately under
+`Machine\Software\Authd\Sources`.
+
+If this key exists, its records are the complete source of privilege grants.
+The compiled privilege floor is not merged into them. If the key is absent,
+the floor grants `SeChangeNotifyPrivilege` to `Everyone` and nothing else.
+That fallback alone does not guarantee successful sign-in or remove access
+granted by group membership and resource descriptors.
+
+An unreadable key grants no fallback privileges. Treating it as absent would
+restore a grant that machine policy might have removed. authd logs the
+failure. authd reads at most 256 principal records and warns about extras.
+
+Without an explicit descriptor, the key inherits from its parent. The
+shipped Machine hive policy grants SYSTEM and Administrators full access,
+and Authenticated Users read access. Check the effective descriptor before
+relying on these defaults.
+
+--- machine\generic\authn\policy deniedprivileges
+canonical: Machine\Generic\Authn\Policy DeniedPrivileges
+type: REG_MULTI_SZ
+default: (none)
+valid: privilege names; an unknown name is dropped with a warning
+applies: live (at the next logon)
+
+Privileges excluded from the grants computed for a token.
+
+The authority combines privileges from applicable principal records, then
+removes this set. This lets an administrator exclude a privilege without
+editing every record that grants it. The value does not remove privileges
+from tokens already issued.
+
+The value belongs on the parent policy key, separate from principal records.
+
+--- machine\generic\authn\policy logonsocketdescriptor
+canonical: Machine\Generic\Authn\Policy LogonSocketDescriptor
+type: REG_SZ
+default: O:SYG:SYD:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;0x100082;;;AU)
+valid: SDDL; a malformed value falls back to the built-in
+applies: restart
+
+Security descriptor controlling connections to `/run/logon.sock`.
+
+The value uses security descriptor definition language (SDDL). The default
+grants SYSTEM and Administrators full access and Authenticated Users connect
+access. That permits signed-in accounts to request self-service credential
+changes and session ending, subject to each operation's authorization.
+
+Connecting does not grant logon origination. For a non-SYSTEM originator,
+`Machine\Generic\Authn\Policy\<principal> LogonTypes` must also permit the
+requested type for the peer token's user security identifier (SID). If the
+socket already admits that peer, only the originator grant needs changing.
+SYSTEM can originate every supported logon type without a policy record.
+
+A replacement descriptor that omits an account can prevent its self-service
+operations. authd reads this value at startup and applies it when binding
+the socket; editing the registry does not restamp a running socket.
+
+This value does not configure `/run/psi.sock` or `/run/ident.sock`. Their
+descriptors are fixed by authd. All three sockets use protected descriptors
+to prevent inherited access from changing the intended grants.
+
+--- machine\generic\authn\policy sessionendsecurity
+canonical: Machine\Generic\Authn\Policy SessionEndSecurity
+type: REG_SZ
+default: O:SYG:SYD:(A;;0x1;;;SY)(A;;0x1;;;BA)
+valid: SDDL; a malformed value lets nobody end another's session
+applies: live
+
+Security descriptor authorizing requests to end another account's session.
+
+The value uses security descriptor definition language (SDDL). authd checks
+the caller's token for access right `0x1`; every generic right maps to it.
+The default grants SYSTEM and Administrators that access.
+
+Through `/run/logon.sock`, an authorized client asks authd to end a session.
+authd sends `SIGTERM` to processes whose primary tokens belong to it, then
+`SIGKILL` after a grace period. Scans are bounded, and processes can remain.
+The kernel destroys the session when its last token reference is released.
+See PGSS Logon §2.22 and the event `authd.session.ended`.
+
+An issued-domain account can end its own eligible personal session without
+this access check. No caller can use this operation to end SYSTEM's session
+(999), Anonymous's session (998), or a service session. Stop services through
+the service manager.
+
+A present value that is unreadable, empty, incorrectly typed, or invalid
+SDDL denies requests to end another account's session. authd logs the
+problem instead of restoring the default grant. The value is read for each
+check, so an edit affects the next applicable request.
+
+--- machine\generic\authn\policy\<principal>
+canonical: Machine\Generic\Authn\Policy\<principal>
+
+Policy grants associated with one principal's security identifier (SID).
+
+The key name is a bare well-known name or literal SID. Well-known names
+include `Everyone`, `Administrators`, `Users`, `SYSTEM`, `Local Service`,
+`Network Service`, `Authenticated Users`, `Guests`, `Anonymous`, `Local`,
+`Domain Admins`, and the logon-type groups. Matching is case-insensitive.
+`BUILTIN\Administrators` cannot be one subkey name because the backslash
+separates registry keys. Use `Administrators` or its literal SID.
+
+Local account and group names are not resolved here. Use their literal
+SIDs. authd warns and ignores a key name that identifies no known principal.
+
+Token policy considers the user and applicable group SIDs, including groups
+derived from the logon type. Values combine independently:
+
+- `Privileges` combines the grants from applicable records.
+- `Integrity` uses the user's value, or the highest stated group value.
+- `Owner` and `DefaultDacl` use the user's value, or an unambiguous group
+  value. Conflicting group choices fall back to their defaults.
+- `LogonTypes` authorizes origination using only the requesting peer's user
+  SID. It does not combine group grants.
+
+An absent value leaves that part of the decision to the other applicable
+records and documented defaults. A service-specific SID can receive token
+policy grants. For origination, that SID must be the peer's user SID; merely
+carrying it as a group does not match `LogonTypes`.
+
+Avoid duplicate records for one SID. Privilege grants can combine, but
+single-value decisions can depend on record enumeration order. authd warns
+about duplicates; combine them into one record.
+
+--- machine\generic\authn\policy\<principal> privileges
+canonical: Machine\Generic\Authn\Policy\<principal> Privileges
+type: REG_MULTI_SZ
+default: (absent — this record grants no privileges)
+valid: Se...Privilege names; unknown names dropped with a warning
+applies: live (at the next logon)
+
+Privileges granted and turned on in a token matching this principal.
+
+The authority combines grants from applicable records, then subtracts
+`Machine\Generic\Authn\Policy DeniedPrivileges`. An empty list grants
+nothing; an absent value contributes no privilege grant from this record.
+
+Use full, case-sensitive privilege names such as `SeBackupPrivilege`.
+An unknown name is dropped with a warning without rejecting other names.
+Check diagnostics after editing the value to detect misspelled grants.
+
+`SeCreateTokenPrivilege`, `SeTcbPrivilege`, and
+`SeAssignPrimaryTokenPrivilege` belong to the trusted computing base (TCB).
+Do not grant them to ordinary accounts. They authorize operations that can
+bypass ordinary authentication and process-identity boundaries.
+
+--- machine\generic\authn\policy\<principal> integrity
+canonical: Machine\Generic\Authn\Policy\<principal> Integrity
+type: REG_SZ or REG_DWORD
+default: Medium (compiled in unconditionally)
+valid: Untrusted, Low, Medium, High, System — or any DWORD
+applies: live (at the next logon)
+
+Integrity level selected for a token matching this principal.
+
+Use a named level or a numeric `REG_DWORD`. Names match case-insensitively;
+the kernel compares levels numerically. An unrecognized name is ignored
+with a warning, leaving other applicable records or the default to apply.
+
+The default is Medium, including when the whole policy key exists. The
+user's own value takes precedence over group values. Otherwise, the highest
+stated group level applies. A group therefore cannot impose a minimum on a
+user whose own record selects a lower level.
+
+--- machine\generic\authn\policy\<principal> owner
+canonical: Machine\Generic\Authn\Policy\<principal> Owner
+type: REG_SZ
+default: (absent — the principal owns what they create)
+valid: a well-known name or a SID; unresolvable warns and is ignored
+applies: live (at the next logon)
+
+Default owner for objects created with a token matching this principal.
+
+The value names a principal rather than an index into a token. The selected
+SID must be carried by the token; otherwise authd warns and uses the token's
+user as owner. The value does not transfer ownership of existing objects.
+
+The user's record takes precedence. Otherwise, a group record can select
+an owner. If applicable groups select different owners, authd warns and
+falls back to the user. Multiple groups selecting the same owner agree.
+
+--- machine\generic\authn\policy\<principal> defaultdacl
+canonical: Machine\Generic\Authn\Policy\<principal> DefaultDacl
+type: REG_SZ
+default: (absent — this record supplies no default DACL)
+valid: SDDL; a malformed value warns and is ignored
+applies: live (at the next logon)
+
+Default discretionary access control list (DACL) for newly created objects.
+
+This list supplies access rules when an object has no parent inheritance or
+other explicit descriptor supplying them. It uses security descriptor
+definition language (SDDL), which lets administrators inspect the grants.
+
+The kernel copies the token's default DACL without substituting
+`CREATOR OWNER`. Use `OWNER RIGHTS` (`S-1-3-4`) to grant the actual owner.
+The shipped policy places `D:(A;;GA;;;S-1-3-4)(A;;GA;;;SY)(A;;GA;;;BA)` on
+`Everyone`.
+
+An absent or malformed value contributes no default DACL from this record.
+If no applicable record supplies one, the token has no default DACL. An
+object created without another descriptor or parent inheritance can then
+receive a null DACL, which grants unrestricted access. Check diagnostics
+after editing this value.
+
+The user's value takes precedence. Otherwise, groups can supply an agreed
+value; conflicting group choices fall back to no default DACL.
+
+--- machine\generic\authn\policy\<principal> logontypes
+canonical: Machine\Generic\Authn\Policy\<principal> LogonTypes
+type: REG_MULTI_SZ
+default: (absent — this principal cannot originate logons)
+valid: seven supported logon-type names; unknown names dropped with a warning
+applies: live (at the next logon)
+
+Logon types the peer can request on another account's behalf.
+
+The supported names are `Interactive`, `Network`, `Batch`, `Service`,
+`NetworkCleartext`, `NewCredentials`, and `RemoteInteractive`. Names are
+case-sensitive. Unknown names are dropped with a warning.
+
+This value controls the requesting process, not the account being signed
+in. The source separately states which logon types the target account
+permits. Both restrictions apply.
+
+The record matches the socket peer token's user security identifier (SID)
+only. Group memberships do not contribute. A service SID works here when
+it is the user SID of a virtual service account, not merely a service group
+on another account's token.
+
+SYSTEM can originate every supported logon type without a record. For
+other callers, a missing record, absent value, or empty list grants no
+origination. Connection permission is separately controlled by
+`Machine\Generic\Authn\Policy LogonSocketDescriptor`.
+
+--- machine\software\authd
+canonical: Machine\Software\Authd
+
+Configuration specific to the authd authentication authority.
+
+The `Sources` subkey controls principal-source registration. General token
+and originator policy belongs under `Machine\Generic\Authn\Policy`.
+
+--- machine\software\authd\sources
+canonical: Machine\Software\Authd\Sources
+
+Principal sources permitted to register with authd.
+
+Each subkey names a service. authd derives its service security identifier
+(SID) and checks that the connecting peer token carries it. A process's
+claimed source name does not establish its identity.
+
+An empty or absent key permits no source registration. authd considers at
+most 64 entries and warns about extras. A missing registration prevents the
+source from answering identity and authentication requests.
+
+The allowlist is read at startup and during source registration. Accepted
+connections retain their configuration. Editing or deleting a key does not
+immediately revoke an existing connection; plan a source reconnection when
+changing its registration policy.
+
+Without an explicit descriptor, this key inherits from its parent. The
+shipped Machine hive policy grants SYSTEM and Administrators full access,
+and Authenticated Users read access. Write access controls which services
+can assert identity to authd.
+
+--- machine\software\authd\sources\<source>
+canonical: Machine\Software\Authd\Sources\<source>
+
+Registration policy for the service named by this subkey.
+
+The subkey permits registration. Its values configure the accepted domain,
+numeric range, search order, and foreign-membership grant. These are not
+all restrictions: a numeric range and foreign memberships grant authority.
+
+authd derives the service security identifier (SID) from the key name and
+checks the connecting token. An unusable name is ignored with a warning.
+Values are optional; their individual records describe absence and invalid
+values. The shipped `lpsd` seed sets `MayAssertForeignMemberships`,
+`UnixIDBase`, and `UnixIDCount`.
+
+--- machine\software\authd\sources\<source> searchorder
+canonical: Machine\Software\Authd\Sources\<source> SearchOrder
+type: REG_DWORD
+default: 1000
+valid: any; lower is consulted first
+applies: live (at the next source registration)
+
+Source priority when resolving an unqualified name.
+
+Lower values are consulted first. Equal values are ordered by source name,
+so registration timing does not choose which principal a bare name means.
+An earlier unavailable source prevents falling through to a different
+principal in a later source.
+
+A non-`REG_DWORD` value produces a warning and uses 1000. The accepted
+priority belongs to the registered connection; reconnect the source to
+change it.
+
+--- machine\software\authd\sources\<source> domain
+canonical: Machine\Software\Authd\Sources\<source> Domain
+type: REG_SZ
+default: (absent — unpinned, which is not unrestricted)
+valid: a SID; malformed means this source cannot register
+applies: live (at the next source registration)
+
+Expected domain security identifier (SID) for source registration.
+
+A source declares its domain during registration. authd confines its
+identity assertions to that domain. This value compares the declaration
+with an administrator's expected SID; the declaration alone is not proof
+that the source owns a domain.
+
+Without a pin, authd still requires the `S-1-5-21-A-B-C` domain shape and
+rejects a domain held by another registered source. It also remembers each
+source's first declared domain for the lifetime of the authd process.
+Reconnecting cannot change that remembered domain. The in-memory check does
+not survive an authd restart; a registry pin persists.
+
+A malformed pin prevents registration instead of being treated as absent.
+authd never writes this value. A connected source keeps the configuration
+accepted at registration; an edit does not revoke its connection.
+
+--- machine\software\authd\sources\<source> unixidbase
+canonical: Machine\Software\Authd\Sources\<source> UnixIDBase
+type: REG_DWORD
+default: (absent — no range, so principals project to nobody)
+valid: 1000000 or above; below that is refused
+applies: live (at the next source registration)
+
+Base added to source-relative Unix identifiers.
+
+For example, a base of 1,000,000 plus relative identifier 1000 produces
+Unix identifier 1,001,000. lpsd starts account and group allocation at 1000.
+It stores relative identifiers, so changing the base does not rewrite those
+records. The registration acknowledgment tells the source its accepted
+base and count; authd performs the projection for tokens and identity
+results.
+
+Values below 1,000,000 are unusable because that band is reserved for the
+authority's well-known, service, and confinement identities. Configure
+disjoint ranges for different sources. Bounds prevent an asserted relative
+identifier from escaping its configured range; they do not correct an
+administrator's overlapping range assignments.
+
+An absent, malformed, or unusable range gives source principals the fallback
+number 65,534 (`nobody`). It does not assign a guessed range. Inspect source
+diagnostics and the effective identifiers after changing registration.
+
+--- machine\software\authd\sources\<source> unixidcount
+canonical: Machine\Software\Authd\Sources\<source> UnixIDCount
+type: REG_DWORD
+default: 1000000
+valid: 1 or more; base + count must not overflow
+applies: live (at the next source registration)
+
+Size of the numeric range assigned to a principal source.
+
+A relative identifier must be greater than zero and less than this count.
+The authority adds `UnixIDBase` only after validating those bounds. A count
+of 1 therefore contains no usable relative principal identifier.
+
+A non-`REG_DWORD` count produces a warning and uses 1,000,000. A zero count
+or overflowing base-plus-count makes the whole range unusable, giving
+principals the fallback number 65,534. Configure disjoint ranges for
+separate sources; the bounds do not detect overlapping assignments.
+
+--- machine\software\authd\sources\<source> mayassertforeignmemberships
+canonical: Machine\Software\Authd\Sources\<source> MayAssertForeignMemberships
+type: REG_DWORD
+default: 0
+valid: non-zero to set; absent or 0 is off
+applies: live (at the next source registration)
+
+Permission to assert group memberships outside the authenticated domain.
+
+Without this grant, a source can assert memberships only in the same domain
+as the principal it authenticated. The local source uses the grant to
+assert local policy memberships, including built-in groups.
+
+This permission does not allow authentication of an identity outside the
+source's own domain. Grant it only to a source trusted to assert those
+memberships. Otherwise a source could place its users into administrative
+groups on this machine.
+
+An absent value, zero, or a non-`REG_DWORD` leaves the permission off. A
+registered source retains its accepted grant until its connection ends.
+
+--- machine\system\locale
+canonical: Machine\System\Locale
+
+Machine-wide language and formatting preferences for personal sessions.
+
+A locale selects language and conventions for dates, numbers, currency,
+and sorting. Language packs supply installed locales; `C.UTF-8` is the
+fallback. Session clients read this key when constructing `LANG` and
+category-specific `LC_*` environment values.
+
+Values under `Users\<SID>\Locale` override matching machine values. An
+invalid or unavailable user value leaves the valid machine value in place.
+Changing `LANG` does not clear separately stated category values. Existing
+process environments do not change when the registry is edited.
+
+The resolver reads only `LANG` and the documented categories. It ignores
+`LC_ALL`, `LANGUAGE`, and `LOCPATH` values in this key. Services do not
+receive these preferences automatically.
+
+Without an explicit descriptor, the key inherits from its parent. The
+shipped Machine hive policy grants SYSTEM and Administrators full access,
+and Authenticated Users read access.
+
+--- machine\system\locale lang
+canonical: Machine\System\Locale LANG
+type: REG_SZ
+default: C.UTF-8
+valid: an installed locale name, such as en_GB.UTF-8
+applies: live (when a session starts)
+
+Default locale for the machine's personal sessions.
+
+Valid category-specific values under this key override `LANG` for their
+categories. A valid user `LANG` replaces the machine `LANG`, but does not
+clear machine category overrides. Invalid or unavailable values leave the
+resolver's `C.UTF-8` fallback in place.
+
+--- machine\system\locale lc_<category>
+canonical: Machine\System\Locale LC_<category>
+type: REG_SZ
+default: (absent — LANG applies)
+valid: an installed locale name; the categories are LC_CTYPE, LC_NUMERIC, LC_TIME, LC_COLLATE, LC_MONETARY, LC_MESSAGES, LC_PAPER, LC_NAME, LC_ADDRESS, LC_TELEPHONE, LC_MEASUREMENT and LC_IDENTIFICATION
+applies: live (when a session starts)
+
+Machine locale override for one formatting or language category.
+
+For example, `LC_TIME` set to `en_GB.UTF-8` selects British date formatting
+while `LANG` set to `en_US.UTF-8` selects the general language. A valid user
+value for the same category replaces it. A user `LANG` alone does not.
+
+The documented categories exclude `LC_ALL`, `LANGUAGE`, and `LOCPATH`.
+Those values are not read from registry locale preferences.
+
+--- users\<sid>\locale
+canonical: Users\<SID>\Locale
+
+Language and formatting preferences for one account's personal sessions.
+
+The key uses the same values as `Machine\System\Locale`. A valid installed
+locale replaces the matching machine value. An absent or unusable category
+value leaves the machine category in force, if one exists; otherwise the
+selected `LANG` applies.
+
+authd prepares `Users\<SID>` for the account at sign-in. The intended user
+registry descriptor permits the account and administrators to change these
+preferences. A change affects later session environments, not processes
+already running.
+
+--- users\<sid>\locale lang
+canonical: Users\<SID>\Locale LANG
+type: REG_SZ
+default: (absent — the machine's applies)
+valid: an installed locale name, such as en_GB.UTF-8
+applies: live (when a session starts)
+
+General locale selected by this account for its personal sessions.
+
+A valid installed locale overrides the machine `LANG`. An absent or
+unusable value leaves the machine's general locale, or `C.UTF-8` if none is
+usable. Separately stated machine or user category values still apply.
+
+--- users\<sid>\locale lc_<category>
+canonical: Users\<SID>\Locale LC_<category>
+type: REG_SZ
+default: (absent — machine category, or selected LANG, applies)
+valid: an installed locale name; the categories are those of Machine\System\Locale
+applies: live (when a session starts)
+
+Account-specific locale for one formatting or language category.
+
+A valid installed locale overrides the same machine category. An absent or
+unusable value leaves that machine category in place. If neither layer has
+a usable category value, the selected user or machine `LANG` applies.

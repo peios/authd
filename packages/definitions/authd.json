@@ -18,8 +18,8 @@
         "stage:usr/share/man/man8/authd.8.gz": "usr/share/man/man8/authd.8.gz",
         "stage:usr/share/regim/authd-policy.reg": "usr/share/regim/authd-policy.reg",
         "stage:usr/share/regim/authd-service.reg": "usr/share/regim/authd-service.reg",
-        "source:authd.regman": "usr/share/regman/authd.regman",
-        "source:authd.evman": "usr/share/evman/authd.evman"
+        "source:docs/authd.regman": "usr/share/regman/authd.regman",
+        "source:docs/authd.evman": "usr/share/evman/authd.evman"
     },
     "dependencies": {},
     "signing": {

@@ -1,8 +1,8 @@
-sitename = "Authentication Documentation"
-title = "Authentication Documentation"
-description = "Using the Peios authentication client library."
+sitename = "Peios Learn"
+title = "Accounts and Sign In"
+description = "Managing local accounts and integrating authentication clients."
 footer = "Peios Learn"
-featured = ["authd"]
+featured = ["peios"]
 
 [lint]
 rules = [
@@ -13,9 +13,9 @@ rules = [
 ]
 line_length = 78
 proper_nouns = [
-  "Migration Assistant", "Acta", "Bazel", "PostgreSQL", "Svelte", "SvelteKit", "Vite", "OAuth", "MCP", "JSON", "CLI", "API", "HTTP", "HTTPS", "WebAuthn", "Web Push", "Docker", "Caddy", "Go", "GitHub", "Linux", "pgBackRest", "Argon2id", "TypeScript", "JavaScript", "UTC", "SQL", "UUID", "WAL", "NFC", "CSRF", "MFA", "HTML", "CSS", "PKCE", "VAPID", "Ed25519", "SHA", "Peios", "GXWI", "Registry Editor", "Linux", "Windows", "Microsoft",
-  "Microsoft Open Specifications", "Core Style", "Word List",
-  "regman", "evman", "netd", "peinit", "authd",
+  "Peios", "Linux", "Bazel", "Rust", "Cargo", "SSH", "POSIX", "Argon2id",
+  "NSS", "SID", "SIDs", "API", "ABI", "SDK", "SYSTEM", "GXWI",
+  "regman", "evman", "peinit", "authd", "lpsd",
 ]
 
 [[lint.words]]

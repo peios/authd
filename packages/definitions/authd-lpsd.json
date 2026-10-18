@@ -18,7 +18,7 @@
         "stage:usr/share/man/man8/lpsd.8.gz": "usr/share/man/man8/lpsd.8.gz",
         "stage:usr/share/regim/lpsd-service.reg": "usr/share/regim/lpsd-service.reg",
         "stage:usr/share/regim/lpsd-authd-registration.reg": "usr/share/regim/lpsd-authd-registration.reg",
-        "source:lpsd.evman": "usr/share/evman/lpsd.evman",
+        "source:docs/lpsd.evman": "usr/share/evman/lpsd.evman",
         "stage:var/state/lpsd": "var/state/lpsd"
     },
     "sd_overrides": {

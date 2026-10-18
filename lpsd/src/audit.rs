@@ -1,7 +1,7 @@
 //! The events lpsd writes: what it checked and what it changed, for the audit
 //! trail.
 //!
-//! The types are defined in `lpsd.evman` at the repository root, which is the
+//! The types are defined in `docs/lpsd.evman`, which is the
 //! catalogue's word on what each field means:
 //!
 //! - `lpsd.credential.verified` (standard): a credential checked for a logon;

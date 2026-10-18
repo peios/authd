@@ -1,4 +1,4 @@
-.TH LPSD 8 "September 2026" "authd" "System Administration"
+.TH LPSD 8 2026-10-18 "Peios authd 0.0.24"
 .SH NAME
 lpsd \- Peios local principal source daemon
 .SH SYNOPSIS
@@ -40,9 +40,20 @@ with no password to prove (key-only, no credential, or no password set) is
 refused and must ask an administrator.  Adding a key does not change the
 credential policy.
 .PP
-This unpublished development layout is replaced in place. Old or corrupt stores
-are refused. Development stores must be explicitly reprovisioned; lpsd never
-silently resets a store which exists but cannot be read.
+This version reads store formats 4 and 5 and writes format 5.
+Format 4 gains empty group descriptions and is rewritten on the next change.
+Unsupported formats and corrupt stores are refused.
+Do not delete an unreadable store to repair startup; preserve it for recovery.
+A replacement store creates different identities.
+.PP
+The lpsd virtual service account owns the store.
+Its protected descriptor grants access to that account and SYSTEM;
+Administrators receive no direct grant.
+.PP
+A failed save does not always prove that the on-disk store is unchanged.
+If synchronizing the directory fails after replacement, changed data can
+be present with uncertain crash durability.
+Stop administrative changes and investigate the storage failure.
 .SH FILES
 .TP
 .I /var/state/lpsd

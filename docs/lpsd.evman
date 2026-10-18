@@ -1,41 +1,41 @@
 --- field object.account.sid
 type: bin.sid
 
-The SID of the account a record is about: a principal a principal source
-holds, whose credential was checked or changed, or which was created,
-deleted or modified. The SID, never the name: an account can be renamed,
-and a record that named it would then describe someone else.
+The security identifier (SID) of the account an event concerns.
 
-Not `object.token.sid`, which is the user of a token. A token speaks for
-an account, but an account changed while nobody is signed in has no token
-to name it by.
+The field names a stored principal whose credentials or account were
+checked or changed. It records the SID rather than the mutable account
+name. An account can exist without a live token; `object.token.sid`
+instead names the user represented by a particular token.
 
 --- field object.group.sid
 type: bin.sid
 
-The SID of the group a record is about: one a principal source created or
-deleted, or whose membership it changed. It may be a group of the source's
-own domain or a well-known one such as `BUILTIN\Administrators`, which a
-local source records memberships of.
+The security identifier (SID) of the group an event concerns.
+
+The field names a created or deleted group, or the group involved in a
+membership change. It can identify a group in the source's own domain or
+a well-known group such as `BUILTIN\Administrators`.
 
 --- event lpsd.credential.verified
 tier: standard
 gating: none — every credential lpsd checks for a logon is recorded
 cardinality: once per logon lpsd decides; probing which SSH keys an account would accept writes none
 
-The record that lpsd checked a credential for a logon authd relayed to it,
-and what it found. It says what the wire must not: authd and the
-originator are told only "authentication failed" whether the account does
-not exist or the credential was wrong, and `outcome.reason` here tells
-them apart for whoever may read the audit trail.
+The local source checked a credential for a logon relayed by authd.
 
-The account is named by SID when it exists. The name the caller typed is
-never recorded, so a failure against a name lpsd does not hold carries no
-account at all; `authd.logon.attempted` is the same logon as the authority
-saw it.
+The event distinguishes an unknown account from an incorrect credential
+for authorized audit readers. The authentication reply does not disclose
+that distinction. Account names supplied by clients are never recorded;
+an existing account is identified by its security identifier (SID).
 
-Standard rather than essential because a machine exposed to a network can
-be asked to check credentials far more often than it signs anyone in.
+A key-eligibility probe does not produce this event. Credential-free
+logons are recorded with `operation.name` set to `none`. A successful
+source check alone does not prove that a token reached the client; inspect
+`authd.logon.attempted` for the authority's result.
+
+This standard event records credential checks, which can occur more often
+than successful sign-ins on a network-facing machine.
 
 field: subject.token.sid                    required
   lpsd itself, the principal that checked the credential: the user SID of
@@ -61,18 +61,20 @@ tier: essential
 gating: none — every change of an account's own credential is recorded, and every refusal once the account is known
 cardinality: once per change conversation that reaches the account
 
-The record that a principal changed their own password, or added or
-removed one of their own SSH keys, through authd (PSPU §2.21, §2.23), or
-tried to and was refused. A change an administrator makes with `lps` is
-`lpsd.account.modified`.
+An account attempted to change its own password or enrolled public keys.
 
-Essential because a changed credential is how an account changes hands,
-and it is rare.
+The conversation goes through authd, which identifies the caller and
+relays proof to the local source. Success is recorded after the store save;
+refusals are recorded once the affected account is known. An administrator's
+credential changes instead produce `lpsd.account.modified`.
+
+This essential event records changes to authentication material. See PSPU
+§2.21 and §2.23 for the corresponding conversations.
 
 field: subject.token.sid                    required
   The principal that asked, as authd vouched for them from their token.
-  The same SID as `object.account.sid`: only one's own credential can be
-  changed this way.
+  The same security identifier (SID) as `object.account.sid`: callers can
+  change only their own credentials through this interface.
 field: object.account.sid                   required
 field: operation.name                       required
   values: password | ssh-key-added | ssh-key-removed
@@ -86,21 +88,27 @@ field: outcome.reason                       when outcome.success == false
   `superseded` a password that changed between the rounds of the
   conversation; `rejected` a new password or key the store refused;
   `conversation-limit` too many unusable new passwords; `not-saved` a
-  change the store could not make durable, so it was not applied.
+  change whose save failed. A failure after replacement can leave changed
+  on-disk state; this reason does not prove that the change was unapplied.
 
 --- event lpsd.account.created
 tier: essential
-gating: none — every request to create an account is recorded
+gating: authorized requests reaching dispatch; unchanged successful requests produce no event
 cardinality: once per request
 
-The record that an administrator created a local account with `lps`, or
-tried to. The first account on a new machine is created this way too, by
-the boot-time service that provisions it.
+An administrator requested creation of a local account.
 
-Essential because a new account is a new way in, and it is rare.
+The request is recorded after authorization and dispatch, whether creation
+succeeds or fails. The first-account provisioning service uses the same
+administrative interface. Rejected connections and malformed requests that
+do not reach dispatch are not represented by this event.
+
+This essential event records creation of a persistent identity and its
+initial authentication configuration.
 
 field: subject.token.sid                    required
-  The administrator: the user SID of the token that asked.
+  The administrator: the user security identifier (SID) of the requesting
+  token.
 field: object.account.sid                   when outcome.success == true
   The new account.
 field: outcome.success                      required
@@ -114,14 +122,18 @@ field: outcome.reason                       when outcome.success == false
 
 --- event lpsd.account.deleted
 tier: essential
-gating: none — every request to delete an account is recorded
+gating: authorized requests reaching dispatch; unchanged successful requests produce no event
 cardinality: once per request
 
-The record that an administrator deleted a local account with `lps`, or
-tried to.
+An administrator requested deletion of a local account.
 
-Essential because deleting an account is irreversible and rare: its SID is
-never issued again, and every descriptor naming it names nobody.
+Authorized requests that reach dispatch are recorded, including refusals.
+The account's security identifier (SID) is retained in the record when the
+account existed, even after deletion.
+
+This essential event records removal of an identity that cannot be restored
+by recreating its name. Deletion does not rewrite resource descriptors,
+remove the home directory, or revoke already-issued tokens.
 
 field: subject.token.sid                    required
   The administrator.
@@ -136,18 +148,19 @@ field: outcome.reason                       when outcome.success == false
 
 --- event lpsd.account.modified
 tier: essential
-gating: none — every administrative change to an account, and every change of one's own display name, is recorded; a request that changes nothing is not
+gating: administrative dispatch and self-service display-name requests; unchanged successful requests produce no event
 cardinality: once per request that changes something or fails
 
-The record that an account was changed: by an administrator with `lps`,
-or by the principal themselves where the self socket allows it. Which
-change it was is `operation.name`.
+An administrator or account holder requested an account change.
 
-A request that would leave the account as it was, such as enabling an
-enabled account, changes nothing and writes no record.
+Administrative changes use the admin socket. An account holder can change
+their own display name through the self-service socket. `operation.name`
+identifies the requested change. Authorization failures before
+administrative dispatch are not recorded here.
 
-Essential because an account's settings decide who can sign in and as
-what, and they change rarely.
+A request that makes no change, such as turning on an already-active
+account, produces no event. Dispatched failures are recorded. This essential
+event records changes to identity attributes and authentication policy.
 
 field: subject.token.sid                    required
   The principal that asked: an administrator, or the account itself for
@@ -169,14 +182,14 @@ field: outcome.reason                       when outcome.success == false
 
 --- event lpsd.group.created
 tier: essential
-gating: none — every request to create a group is recorded
+gating: authorized requests reaching dispatch; unchanged successful requests produce no event
 cardinality: once per request
 
-The record that an administrator created a local group with `lps`, or
-tried to.
+An administrator requested creation of a local group.
 
-Essential because groups are what descriptors grant to, and they are
-created rarely.
+Authorized requests that reach dispatch are recorded, including refusals.
+The group's security identifier (SID) appears only when creation succeeds.
+This essential event records a new identity that access rules can name.
 
 field: subject.token.sid                    required
   The administrator.
@@ -189,14 +202,19 @@ field: outcome.reason                       when outcome.success == false
 
 --- event lpsd.group.deleted
 tier: essential
-gating: none — every request to delete a group is recorded
+gating: authorized requests reaching dispatch; unchanged successful requests produce no event
 cardinality: once per request
 
-The record that an administrator deleted a local group with `lps`, or
-tried to.
+An administrator requested deletion of a local group.
 
-Essential because deleting a group removes every grant made to it, and it
-is rare.
+Authorized requests that reach dispatch are recorded, including refusals.
+The group's security identifier (SID) is retained when the group existed.
+The store refuses deletion while an account still belongs to the group or
+uses it as its primary group.
+
+This essential event records removal of a group identity. Deletion does not
+rewrite resource descriptors or remove the SID from already-issued tokens.
+Recreating the same name allocates a different SID.
 
 field: subject.token.sid                    required
   The administrator.
@@ -209,15 +227,17 @@ field: outcome.reason                       when outcome.success == false
 
 --- event lpsd.group.member.added
 tier: essential
-gating: none — every request to add a membership is recorded; one that already held is not
+gating: authorized requests reaching dispatch; unchanged successful requests produce no event
 cardinality: once per request that changes something or fails
 
-The record that an administrator added an account to a group with `lps`,
-or tried to. The group may be a well-known one: adding an account to
-`BUILTIN\Administrators` is recorded here.
+An administrator requested an account's membership in a group.
 
-Essential because a membership is a grant of everything granted to the
-group, and memberships change rarely.
+Authorized requests that reach dispatch are recorded, including refusals.
+An already-existing membership produces no event. A group can be a local
+identity or a well-known group such as `BUILTIN\Administrators`.
+
+This essential event records a membership that affects later token creation.
+It does not add the group to tokens already issued.
 
 field: subject.token.sid                    required
   The administrator.
@@ -232,14 +252,15 @@ field: outcome.reason                       when outcome.success == false
 
 --- event lpsd.group.member.removed
 tier: essential
-gating: none — every request to remove a membership is recorded; one that did not hold is not
+gating: authorized requests reaching dispatch; unchanged successful requests produce no event
 cardinality: once per request that changes something or fails
 
-The record that an administrator removed an account from a group with
-`lps`, or tried to.
+An administrator requested removal of an account's group membership.
 
-Essential for the reason `lpsd.group.member.added` is: a membership is a
-grant, and taking one away is as much an access change as giving it.
+Authorized requests that reach dispatch are recorded, including refusals.
+A membership that did not exist produces no event. This essential event
+records an access-policy change; removing the membership does not revoke
+already-issued tokens that contain the group.
 
 field: subject.token.sid                    required
   The administrator.
