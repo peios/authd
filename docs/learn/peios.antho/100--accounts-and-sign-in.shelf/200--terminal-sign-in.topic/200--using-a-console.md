@@ -36,6 +36,10 @@ A managed console can select an account before presenting a prompt:
 - **`--try-no-password`:** an attempt that offers no credential collection;
   an account needing credentials falls back to the ordinary prompt.
 
+The preliminary account lookup uses read and write timeouts. If the client
+cannot set those timeouts, it treats the lookup as unavailable and continues
+without claiming that the account exists or is absent.
+
 These options do not bypass authentication. `authd` and the principal source
 still decide whether to grant a token. The `-f` authentication bypass is not
 supported.

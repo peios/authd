@@ -513,11 +513,11 @@ enum Existence {
 /// home directory this program will not use would invite the authority to
 /// withhold a field and turn a two-state answer into three.
 fn existence(name: &str) -> Existence {
-    let Ok(socket) = UnixStream::connect(auth_core::IDENT_SOCKET_PATH) else {
+    let Ok(socket) =
+        UnixStream::connect(auth_core::IDENT_SOCKET_PATH).and_then(configure_ident_socket)
+    else {
         return Existence::Unknown;
     };
-    let _ = socket.set_read_timeout(Some(IDENT_TIMEOUT));
-    let _ = socket.set_write_timeout(Some(IDENT_TIMEOUT));
 
     let tag = 1;
     let Ok(request) = ident::encode_lookup(&ident::Lookup {
@@ -550,6 +550,15 @@ fn existence(name: &str) -> Existence {
             Existence::Unknown
         }
     }
+}
+
+/// Bound both halves of an optional identity lookup before sending any request.
+/// A configuration failure closes the owned socket rather than leaving an
+/// unbounded read or write on the sign-in path.
+fn configure_ident_socket(socket: UnixStream) -> std::io::Result<UnixStream> {
+    socket.set_read_timeout(Some(IDENT_TIMEOUT))?;
+    socket.set_write_timeout(Some(IDENT_TIMEOUT))?;
+    Ok(socket)
 }
 
 /// Take the terminal as our controlling tty.
@@ -712,11 +721,32 @@ fn exec_shell(username: &str, profile: &Profile, preserve_environment: bool) -> 
 
 #[cfg(test)]
 mod tests {
+    use std::os::fd::OwnedFd;
+    use std::os::unix::net::UnixStream;
+
     use auth_core::wire::Denial;
 
     use super::{
-        Identify, Options, absolute_or_default, parse_from, retryable, term_for_device, term_for_name,
+        IDENT_TIMEOUT, Identify, Options, absolute_or_default, configure_ident_socket, parse_from,
+        retryable, term_for_device, term_for_name,
     };
+
+    #[test]
+    fn identity_lookup_configures_both_timeouts() {
+        let (socket, _peer) = UnixStream::pair().unwrap();
+        let socket = configure_ident_socket(socket).unwrap();
+        assert_eq!(socket.read_timeout().unwrap(), Some(IDENT_TIMEOUT));
+        assert_eq!(socket.write_timeout().unwrap(), Some(IDENT_TIMEOUT));
+    }
+
+    #[test]
+    fn identity_lookup_rejects_failed_timeout_configuration() {
+        // OwnedFd conversion is safe and transfers ownership without assuming
+        // the descriptor is a socket. setsockopt must reject this real fd.
+        let descriptor: OwnedFd = std::fs::File::open("/dev/null").unwrap().into();
+        let error = configure_ident_socket(UnixStream::from(descriptor)).unwrap_err();
+        assert_eq!(error.raw_os_error(), Some(libc::ENOTSOCK));
+    }
 
     // TERM follows the terminal, not the seed: the same login-console
     // definition serves a display and a serial line (PEI-716).
