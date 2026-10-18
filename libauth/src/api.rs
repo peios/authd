@@ -1,15 +1,37 @@
 //! C entry points. Pointer validity and exclusive access are caller contracts
 //! documented in auth.h. Input buffers are copied before an entry point returns;
 //! output views borrow their operation and expire when it is mutated or freed.
-#![allow(non_camel_case_types)]
 use std::os::fd::IntoRawFd;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use auth_abi::*;
+use auth_abi::{
+    Answer, Bytes, ClientOptions, EndedView, EnumerateRequest, ErrorView, GrantView, Key,
+    LogonRequest, LookupRequest, MessageView, PollInfo, PromptView, ServiceRequest,
+};
 use auth_core::{Secret, ident, lps, wire};
 use crate::engine::{Kind, Operation, Output, State};
 
+// These discriminants are fixed by the public constants in peios/auth.h.
+const ABI_VERSION: u32 = 1;
+const SUPPORT_PASSWORD: u32 = 1;
+const SUPPORT_SSH_PUBLIC_KEY: u32 = 2;
+const SUPPORTED_CREDENTIALS: u32 = SUPPORT_PASSWORD | SUPPORT_SSH_PUBLIC_KEY;
+const KEY_NAME: u32 = 1;
+const KEY_SID: u32 = 2;
+const KEY_UNIX_ID: u32 = 3;
+const STATE_WAIT: i32 = 0;
+const STATE_PROMPT: i32 = 1;
+const STATE_COMPLETE: i32 = 2;
+const STATE_DENIED: i32 = 3;
+const STATE_FAILED: i32 = 4;
+const STATE_CANCELLED: i32 = 5;
+const DEFAULT_REPLY_TIMEOUT: Duration = Duration::from_secs(90);
+const MAX_REPLY_TIMEOUT_MS: u64 = 86_400_000;
+// Each operation has its own connection and submits one identity request.
+const IDENTITY_REQUEST_TAG: u32 = 1;
+
+/// Owned client configuration, allocated and released through the C ABI.
 pub struct Client {
     logon: PathBuf,
     identity: PathBuf,
@@ -24,7 +46,12 @@ pub(crate) fn bytes(value: &[u8]) -> Bytes {
     }
 }
 
-// SAFETY: callers uphold auth.h's readable-buffer and alignment contracts.
+/// Borrow an input span for immediate validation and copying.
+///
+/// # Safety
+///
+/// A nonempty span must identify readable bytes in one live allocation for the
+/// returned lifetime. The caller must prevent mutation during that borrow.
 unsafe fn input<'a>(value: Bytes) -> Option<&'a [u8]> {
     if value.len > wire::FRAMING.max_message_bytes {
         return None;
@@ -35,15 +62,29 @@ unsafe fn input<'a>(value: Bytes) -> Option<&'a [u8]> {
     if value.data.is_null() {
         return None;
     }
+    // SAFETY: the caller guarantees the nonempty span's readable lifetime.
     Some(unsafe { std::slice::from_raw_parts(value.data, value.len) })
 }
+/// Copy validated UTF-8 text from a caller-owned span.
+///
+/// # Safety
+///
+/// The span must satisfy input's readable-buffer contract through this call.
 unsafe fn text(value: Bytes) -> Option<String> {
+    // SAFETY: the input contract is forwarded; the borrowed text is copied below.
     let text = std::str::from_utf8(unsafe { input(value)? }).ok()?;
     if text.contains('\0') {
         return None;
     }
     Some(text.to_owned())
 }
+/// Borrow a size-prefixed ABI request after checking its declared layout size.
+///
+/// # Safety
+///
+/// A nonnull value must be aligned for T and expose a readable leading usize.
+/// If that size admits T, the whole T must be initialized and readable for the
+/// returned lifetime, with no mutation while borrowed. T must start with size.
 unsafe fn sized<'a, T>(value: *const T) -> Option<&'a T> {
     if value.is_null() {
         return None;
@@ -53,8 +94,15 @@ unsafe fn sized<'a, T>(value: *const T) -> Option<&'a T> {
     if unsafe { value.cast::<usize>().read() } < size_of::<T>() {
         return None;
     }
+    // SAFETY: the size check and caller contract establish a live initialized T.
     unsafe { value.as_ref() }
 }
+/// Initialize an ABI output, leaving it untouched when the pointer is null.
+///
+/// # Safety
+///
+/// A nonnull out must be aligned, writable for T, and disjoint from live input
+/// borrows. No concurrently accessed object can alias this output.
 pub(crate) unsafe fn write<T>(out: *mut T, value: T) -> i32 {
     if out.is_null() {
         return -1;
@@ -66,26 +114,32 @@ pub(crate) unsafe fn write<T>(out: *mut T, value: T) -> i32 {
     0
 }
 fn capabilities(mask: u32) -> Option<Vec<wire::CredentialType>> {
-    if mask & !3 != 0 || mask == 0 {
+    if mask & !SUPPORTED_CREDENTIALS != 0 || mask == 0 {
         return None;
     }
     let mut types = Vec::new();
-    if mask & 1 != 0 {
+    if mask & SUPPORT_PASSWORD != 0 {
         types.push(wire::CredentialType::Password);
     }
-    if mask & 2 != 0 {
+    if mask & SUPPORT_SSH_PUBLIC_KEY != 0 {
         types.push(wire::CredentialType::SshPublicKey);
     }
     Some(types)
 }
+/// Copy an ABI identity key into the protocol representation.
+///
+/// # Safety
+///
+/// The selected value span must be readable and stable through this call.
 unsafe fn key(value: &Key) -> Option<ident::Key> {
     if value.size < size_of::<Key>() {
         return None;
     }
+    // SAFETY: the selected span follows the caller's input-buffer contract.
     Some(match value.kind {
-        1 => ident::Key::Name(unsafe { text(value.value)? }),
-        2 => ident::Key::Sid(unsafe { input(value.value)? }.to_vec()),
-        3 => ident::Key::UnixId(value.unix_id),
+        KEY_NAME => ident::Key::Name(unsafe { text(value.value)? }),
+        KEY_SID => ident::Key::Sid(unsafe { input(value.value)? }.to_vec()),
+        KEY_UNIX_ID => ident::Key::UnixId(value.unix_id),
         _ => return None,
     })
 }
@@ -117,19 +171,29 @@ macro_rules! pointer_result {
     };
 }
 
+/// Return the public C ABI version.
 #[unsafe(no_mangle)]
 pub extern "C" fn peios_auth_abi_version() -> u32 {
-    1
+    ABI_VERSION
 }
 
+/// Copy client configuration, or return null for invalid options.
+///
+/// # Safety
+///
+/// Options must be null or a live, aligned size-prefixed ClientOptions object.
+/// All nonempty option spans must be readable through this call. The caller
+/// owns the returned handle and must release it with client_destroy.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn peios_auth_client_create(options: *const ClientOptions) -> *mut Client {
+    // SAFETY: this entry point's contract keeps the client, request objects, and
+    // nested input spans valid until their owned copies have been constructed.
     pointer_result!({
         let mut client = Client {
             logon: auth_core::LOGON_SOCKET_PATH.into(),
             identity: auth_core::IDENT_SOCKET_PATH.into(),
             own: auth_core::LPSD_SELF_SOCKET_PATH.into(),
-            timeout: Duration::from_secs(90),
+            timeout: DEFAULT_REPLY_TIMEOUT,
         };
         if !options.is_null() {
             let options = unsafe { sized(options)? };
@@ -143,7 +207,7 @@ pub unsafe extern "C" fn peios_auth_client_create(options: *const ClientOptions)
                 }
             }
             if options.reply_timeout_ms != 0 {
-                if options.reply_timeout_ms > 86_400_000 {
+                if options.reply_timeout_ms > MAX_REPLY_TIMEOUT_MS {
                     return None;
                 }
                 client.timeout = Duration::from_millis(options.reply_timeout_ms);
@@ -153,6 +217,12 @@ pub unsafe extern "C" fn peios_auth_client_create(options: *const ClientOptions)
     })
 }
 
+/// Release client configuration. Existing operations remain independently owned.
+///
+/// # Safety
+///
+/// Client must be null or a live handle returned by client_create. No call
+/// can access it concurrently, and it must never be used or destroyed again.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn peios_auth_client_destroy(client: *mut Client) {
     if !client.is_null() {
@@ -163,11 +233,22 @@ pub unsafe extern "C" fn peios_auth_client_destroy(client: *mut Client) {
     }
 }
 
+/// Begin a logon conversation with copied request data.
+///
+/// # Safety
+///
+/// Client must be null or a live library handle without concurrent access.
+/// Every request pointer must be aligned and readable for its declared
+/// size; all nested spans and pointers must remain readable through the
+/// call. Inputs are copied. The caller owns the returned operation and
+/// must eventually release it with operation_destroy.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn peios_auth_logon_begin(
     client: *const Client,
     request: *const LogonRequest,
 ) -> *mut Operation {
+    // SAFETY: this entry point's contract keeps the client, request objects, and
+    // nested input spans valid until their owned copies have been constructed.
     pointer_result!({
         let client = unsafe { client.as_ref()? };
         let request = unsafe { sized(request)? };
@@ -225,11 +306,22 @@ pub unsafe extern "C" fn peios_auth_logon_begin(
     })
 }
 
+/// Begin service attestation with copied identity and service names.
+///
+/// # Safety
+///
+/// Client must be null or a live library handle without concurrent access.
+/// Every request pointer must be aligned and readable for its declared
+/// size; all nested spans and pointers must remain readable through the
+/// call. Inputs are copied. The caller owns the returned operation and
+/// must eventually release it with operation_destroy.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn peios_auth_service_attest_begin(
     client: *const Client,
     request: *const ServiceRequest,
 ) -> *mut Operation {
+    // SAFETY: this entry point's contract keeps the client, request objects, and
+    // nested input spans valid until their owned copies have been constructed.
     pointer_result!({
         let request = unsafe { sized(request)? };
         begin(
@@ -244,11 +336,22 @@ pub unsafe extern "C" fn peios_auth_service_attest_begin(
     })
 }
 
+/// Begin a credential conversation to change the calling account's password.
+///
+/// # Safety
+///
+/// Client must be null or a live library handle without concurrent access.
+/// Every request pointer must be aligned and readable for its declared
+/// size; all nested spans and pointers must remain readable through the
+/// call. Inputs are copied. The caller owns the returned operation and
+/// must eventually release it with operation_destroy.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn peios_auth_password_change_begin(
     client: *const Client,
     supported_credentials: u32,
 ) -> *mut Operation {
+    // SAFETY: this entry point's contract keeps the client, request objects, and
+    // nested input spans valid until their owned copies have been constructed.
     pointer_result!({
         let supported = capabilities(supported_credentials)?;
         begin(
@@ -261,6 +364,12 @@ pub unsafe extern "C" fn peios_auth_password_change_begin(
         )
     })
 }
+/// Copy a key-enrollment request into an independently owned operation.
+///
+/// # Safety
+///
+/// Client must be null or a live, exclusively accessed library handle. Material
+/// must be a readable, stable span through this call, as required by auth.h.
 unsafe fn enroll(
     client: *const Client,
     material: Bytes,
@@ -268,6 +377,7 @@ unsafe fn enroll(
     action: wire::EnrollAction,
 ) -> Option<*mut Operation> {
     let supported = capabilities(supported_credentials)?;
+    // SAFETY: the helper contract keeps the client and material live while copied.
     begin(
         unsafe { client.as_ref()? },
         Kind::Change,
@@ -280,12 +390,22 @@ unsafe fn enroll(
         supported,
     )
 }
+/// Begin enrollment of an SSH public key for the calling account.
+///
+/// # Safety
+///
+/// Client must be null or a live library handle without concurrent access.
+/// Every request pointer must be aligned and readable for its declared
+/// size; all nested spans and pointers must remain readable through the
+/// call. Inputs are copied. The caller owns the returned operation and
+/// must eventually release it with operation_destroy.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn peios_auth_key_add_begin(
     client: *const Client,
     public_key: Bytes,
     supported_credentials: u32,
 ) -> *mut Operation {
+    // SAFETY: the entry point contract supplies a live client and readable span.
     unsafe {
         enroll(
             client,
@@ -296,12 +416,22 @@ pub unsafe extern "C" fn peios_auth_key_add_begin(
     }
     .unwrap_or(std::ptr::null_mut())
 }
+/// Begin removal of the calling account's key by SHA256 fingerprint.
+///
+/// # Safety
+///
+/// Client must be null or a live library handle without concurrent access.
+/// Every request pointer must be aligned and readable for its declared
+/// size; all nested spans and pointers must remain readable through the
+/// call. Inputs are copied. The caller owns the returned operation and
+/// must eventually release it with operation_destroy.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn peios_auth_key_remove_begin(
     client: *const Client,
     fingerprint: Bytes,
     supported_credentials: u32,
 ) -> *mut Operation {
+    // SAFETY: the entry point contract supplies a live client and readable span.
     unsafe {
         enroll(
             client,
@@ -313,18 +443,29 @@ pub unsafe extern "C" fn peios_auth_key_remove_begin(
     .unwrap_or(std::ptr::null_mut())
 }
 
+/// Begin one identity lookup.
+///
+/// # Safety
+///
+/// Client must be null or a live library handle without concurrent access.
+/// Every request pointer must be aligned and readable for its declared
+/// size; all nested spans and pointers must remain readable through the
+/// call. Inputs are copied. The caller owns the returned operation and
+/// must eventually release it with operation_destroy.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn peios_auth_identity_lookup_begin(
     client: *const Client,
     request: *const LookupRequest,
 ) -> *mut Operation {
+    // SAFETY: this entry point's contract keeps the client, request objects, and
+    // nested input spans valid until their owned copies have been constructed.
     pointer_result!({
         let request = unsafe { sized(request)? };
         begin(
             unsafe { client.as_ref()? },
             Kind::Lookup,
             ident::encode_lookup(&ident::Lookup {
-                tag: 1,
+                tag: IDENTITY_REQUEST_TAG,
                 key: unsafe { key(&request.key)? },
                 kind: kind(request.kind)?,
                 fields: ident::Fields(request.fields),
@@ -333,18 +474,29 @@ pub unsafe extern "C" fn peios_auth_identity_lookup_begin(
         )
     })
 }
+/// Begin one identity enumeration page, preserving its opaque cursor.
+///
+/// # Safety
+///
+/// Client must be null or a live library handle without concurrent access.
+/// Every request pointer must be aligned and readable for its declared
+/// size; all nested spans and pointers must remain readable through the
+/// call. Inputs are copied. The caller owns the returned operation and
+/// must eventually release it with operation_destroy.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn peios_auth_identity_enumerate_begin(
     client: *const Client,
     request: *const EnumerateRequest,
 ) -> *mut Operation {
+    // SAFETY: this entry point's contract keeps the client, request objects, and
+    // nested input spans valid until their owned copies have been constructed.
     pointer_result!({
         let request = unsafe { sized(request)? };
         begin(
             unsafe { client.as_ref()? },
             Kind::Enumerate,
             ident::encode_enumerate(&ident::Enumerate {
-                tag: 1,
+                tag: IDENTITY_REQUEST_TAG,
                 kind: kind(request.kind)?,
                 fields: ident::Fields(request.fields),
                 of: if request.group.is_null() {
@@ -358,8 +510,19 @@ pub unsafe extern "C" fn peios_auth_identity_enumerate_begin(
         )
     })
 }
+/// Begin reading the calling account's profile.
+///
+/// # Safety
+///
+/// Client must be null or a live library handle without concurrent access.
+/// Every request pointer must be aligned and readable for its declared
+/// size; all nested spans and pointers must remain readable through the
+/// call. Inputs are copied. The caller owns the returned operation and
+/// must eventually release it with operation_destroy.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn peios_auth_account_self_begin(client: *const Client) -> *mut Operation {
+    // SAFETY: this entry point's contract keeps the client, request objects, and
+    // nested input spans valid until their owned copies have been constructed.
     pointer_result!({
         begin(
             unsafe { client.as_ref()? },
@@ -369,11 +532,22 @@ pub unsafe extern "C" fn peios_auth_account_self_begin(client: *const Client) ->
         )
     })
 }
+/// Begin changing the calling account's display name.
+///
+/// # Safety
+///
+/// Client must be null or a live library handle without concurrent access.
+/// Every request pointer must be aligned and readable for its declared
+/// size; all nested spans and pointers must remain readable through the
+/// call. Inputs are copied. The caller owns the returned operation and
+/// must eventually release it with operation_destroy.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn peios_auth_display_name_set_begin(
     client: *const Client,
     name: Bytes,
 ) -> *mut Operation {
+    // SAFETY: this entry point's contract keeps the client, request objects, and
+    // nested input spans valid until their owned copies have been constructed.
     pointer_result!({
         begin(
             unsafe { client.as_ref()? },
@@ -385,11 +559,22 @@ pub unsafe extern "C" fn peios_auth_display_name_set_begin(
         )
     })
 }
+/// Query permission to end a session without terminating it.
+///
+/// # Safety
+///
+/// Client must be null or a live library handle without concurrent access.
+/// Every request pointer must be aligned and readable for its declared
+/// size; all nested spans and pointers must remain readable through the
+/// call. Inputs are copied. The caller owns the returned operation and
+/// must eventually release it with operation_destroy.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn peios_auth_session_end_query_begin(
     client: *const Client,
     session_id: u64,
 ) -> *mut Operation {
+    // SAFETY: this entry point's contract keeps the client, request objects, and
+    // nested input spans valid until their owned copies have been constructed.
     pointer_result!({
         begin(
             unsafe { client.as_ref()? },
@@ -401,11 +586,22 @@ pub unsafe extern "C" fn peios_auth_session_end_query_begin(
         )
     })
 }
+/// Request termination of a session; authorization is checked by the authority.
+///
+/// # Safety
+///
+/// Client must be null or a live library handle without concurrent access.
+/// Every request pointer must be aligned and readable for its declared
+/// size; all nested spans and pointers must remain readable through the
+/// call. Inputs are copied. The caller owns the returned operation and
+/// must eventually release it with operation_destroy.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn peios_auth_session_end_begin(
     client: *const Client,
     session_id: u64,
 ) -> *mut Operation {
+    // SAFETY: this entry point's contract keeps the client, request objects, and
+    // nested input spans valid until their owned copies have been constructed.
     pointer_result!({
         begin(
             unsafe { client.as_ref()? },
@@ -420,32 +616,51 @@ pub unsafe extern "C" fn peios_auth_session_end_begin(
 
 fn state(operation: &Operation) -> i32 {
     match operation.state {
-        State::Pending => 0,
-        State::Prompt(_) => 1,
-        State::Complete(_) => 2,
-        State::Denied(_) => 3,
-        State::Failed(_) => 4,
-        State::Cancelled(_) => 5,
+        State::Pending => STATE_WAIT,
+        State::Prompt(_) => STATE_PROMPT,
+        State::Complete(_) => STATE_COMPLETE,
+        State::Denied(_) => STATE_DENIED,
+        State::Failed(_) => STATE_FAILED,
+        State::Cancelled(_) => STATE_CANCELLED,
     }
 }
+/// Advance an operation without blocking and return its ABI state.
+///
+/// # Safety
+///
+/// Operation must be null or a live handle returned by this library, used
+/// without concurrent access and not reused across fork.
+/// The call has exclusive access and invalidates previously returned views.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn peios_auth_operation_step(operation: *mut Operation) -> i32 {
-    // SAFETY: a live operation is exclusively borrowed for this call.
+    // SAFETY: the caller grants exclusive access to this live handle.
     let Some(operation) = (unsafe { operation.as_mut() }) else {
         return -1;
     };
     operation.step();
     state(operation)
 }
+/// Copy polling requirements; its descriptor remains owned by the operation.
+///
+/// # Safety
+///
+/// Operation must be null or a live handle returned by this library, used
+/// without concurrent access and not reused across fork.
+/// Any output must be aligned and writable for its declared type, with no
+/// overlap with operation-owned storage or other output objects. Returned
+/// spans must not be freed and expire at the next mutation or destruction.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn peios_auth_operation_poll_info(
     operation: *const Operation,
     out: *mut PollInfo,
 ) -> i32 {
+    // SAFETY: the caller keeps the handle live and prevents concurrent mutation.
     let Some(operation) = (unsafe { operation.as_ref() }) else {
         return -1;
     };
     let (fd, events, timeout_ms) = operation.poll_info().unwrap_or((-1, 0, 0));
+    // SAFETY: out is caller-owned writable storage, disjoint from the borrowed
+    // operation. Any returned span stays owned by that operation.
     unsafe {
         write(
             out,
@@ -457,14 +672,22 @@ pub unsafe extern "C" fn peios_auth_operation_poll_info(
         )
     }
 }
+/// Drive an operation until a prompt or terminal state; return -1 on poll failure.
+///
+/// # Safety
+///
+/// Operation must be null or a live handle returned by this library, used
+/// without concurrent access and not reused across fork.
+/// The call has exclusive access and invalidates previously returned views.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn peios_auth_operation_wait(operation: *mut Operation) -> i32 {
+    // SAFETY: the caller grants exclusive access to this live handle.
     let Some(operation) = (unsafe { operation.as_mut() }) else {
         return -1;
     };
     loop {
         operation.step();
-        if state(operation) != 0 {
+        if state(operation) != STATE_WAIT {
             return state(operation);
         }
         let Some((fd, events, timeout_ms)) = operation.poll_info() else {
@@ -483,6 +706,16 @@ pub unsafe extern "C" fn peios_auth_operation_wait(operation: *mut Operation) ->
         }
     }
 }
+/// Copy answers for the active prompt round; caller buffers remain caller-owned.
+///
+/// # Safety
+///
+/// Operation must be null or a live handle returned by this library, used
+/// without concurrent access and not reused across fork.
+/// The call has exclusive access and invalidates previously returned views.
+/// Answers must contain count readable, aligned Answer values (or be null
+/// at count zero). Their nonempty spans must remain readable through the call.
+/// The caller remains responsible for erasing credential buffers after use.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn peios_auth_operation_respond(
     operation: *mut Operation,
@@ -490,6 +723,7 @@ pub unsafe extern "C" fn peios_auth_operation_respond(
     answers: *const Answer,
     count: usize,
 ) -> i32 {
+    // SAFETY: the caller grants exclusive access to this live handle.
     let Some(operation) = (unsafe { operation.as_mut() }) else {
         return -1;
     };
@@ -504,6 +738,7 @@ pub unsafe extern "C" fn peios_auth_operation_respond(
     };
     let mut owned = Vec::new();
     for answer in answers {
+        // SAFETY: every answer span is readable through this call; Secret copies it.
         let Some(data) = (unsafe { input(answer.data) }) else {
             return -1;
         };
@@ -517,12 +752,27 @@ pub unsafe extern "C" fn peios_auth_operation_respond(
         Err(_) => -1,
     }
 }
+/// Stop local communication without undoing a submitted request.
+///
+/// # Safety
+///
+/// Operation must be null or a live handle returned by this library, used
+/// without concurrent access and not reused across fork.
+/// The call has exclusive access and invalidates previously returned views.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn peios_auth_operation_cancel(operation: *mut Operation) {
+    // SAFETY: the caller grants exclusive access to this live handle.
     if let Some(operation) = unsafe { operation.as_mut() } {
         operation.cancel();
     }
 }
+/// Release an operation, its buffers, sockets, and unclaimed token.
+///
+/// # Safety
+///
+/// Operation must be null or a live handle returned by this library, used
+/// without concurrent access and not reused across fork.
+/// Destroy invalidates the handle and all borrowed views permanently.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn peios_auth_operation_destroy(operation: *mut Operation) {
     if !operation.is_null() {
@@ -532,11 +782,21 @@ pub unsafe extern "C" fn peios_auth_operation_destroy(operation: *mut Operation)
         }
     }
 }
+/// Copy the failure view, whose text still borrows the operation.
+///
+/// # Safety
+///
+/// Operation must be null or a live handle returned by this library, used
+/// without concurrent access and not reused across fork.
+/// Any output must be aligned and writable for its declared type, with no
+/// overlap with operation-owned storage or other output objects. Returned
+/// spans must not be freed and expire at the next mutation or destruction.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn peios_auth_operation_error(
     operation: *const Operation,
     out: *mut ErrorView,
 ) -> i32 {
+    // SAFETY: the caller keeps the handle live and prevents concurrent mutation.
     let Some(operation) = (unsafe { operation.as_ref() }) else {
         return -1;
     };
@@ -544,6 +804,8 @@ pub unsafe extern "C" fn peios_auth_operation_error(
         State::Denied(f) | State::Failed(f) | State::Cancelled(f) => f,
         _ => return -1,
     };
+    // SAFETY: out is caller-owned writable storage, disjoint from the borrowed
+    // operation. Any returned span stays owned by that operation.
     unsafe {
         write(
             out,
@@ -556,6 +818,15 @@ pub unsafe extern "C" fn peios_auth_operation_error(
         )
     }
 }
+/// Copy the active round identifier and message/prompt counts.
+///
+/// # Safety
+///
+/// Operation must be null or a live handle returned by this library, used
+/// without concurrent access and not reused across fork.
+/// Any output must be aligned and writable for its declared type, with no
+/// overlap with operation-owned storage or other output objects. Returned
+/// spans must not be freed and expire at the next mutation or destruction.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn peios_auth_operation_round(
     operation: *const Operation,
@@ -563,6 +834,7 @@ pub unsafe extern "C" fn peios_auth_operation_round(
     messages: *mut usize,
     prompts: *mut usize,
 ) -> i32 {
+    // SAFETY: the caller keeps the handle live and prevents concurrent mutation.
     let Some(operation) = (unsafe { operation.as_ref() }) else {
         return -1;
     };
@@ -580,12 +852,22 @@ pub unsafe extern "C" fn peios_auth_operation_round(
     }
     0
 }
+/// Copy one prompt view; its spans still borrow the operation.
+///
+/// # Safety
+///
+/// Operation must be null or a live handle returned by this library, used
+/// without concurrent access and not reused across fork.
+/// Any output must be aligned and writable for its declared type, with no
+/// overlap with operation-owned storage or other output objects. Returned
+/// spans must not be freed and expire at the next mutation or destruction.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn peios_auth_operation_prompt(
     operation: *const Operation,
     index: usize,
     out: *mut PromptView,
 ) -> i32 {
+    // SAFETY: the caller keeps the handle live and prevents concurrent mutation.
     let Some(operation) = (unsafe { operation.as_ref() }) else {
         return -1;
     };
@@ -595,6 +877,8 @@ pub unsafe extern "C" fn peios_auth_operation_prompt(
     let Some(prompt) = request.prompts.get(index) else {
         return -1;
     };
+    // SAFETY: out is caller-owned writable storage, disjoint from the borrowed
+    // operation. Any returned span stays owned by that operation.
     unsafe {
         write(
             out,
@@ -608,12 +892,22 @@ pub unsafe extern "C" fn peios_auth_operation_prompt(
         )
     }
 }
+/// Copy one message view; its text still borrows the operation.
+///
+/// # Safety
+///
+/// Operation must be null or a live handle returned by this library, used
+/// without concurrent access and not reused across fork.
+/// Any output must be aligned and writable for its declared type, with no
+/// overlap with operation-owned storage or other output objects. Returned
+/// spans must not be freed and expire at the next mutation or destruction.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn peios_auth_operation_message(
     operation: *const Operation,
     index: usize,
     out: *mut MessageView,
 ) -> i32 {
+    // SAFETY: the caller keeps the handle live and prevents concurrent mutation.
     let Some(operation) = (unsafe { operation.as_ref() }) else {
         return -1;
     };
@@ -623,6 +917,8 @@ pub unsafe extern "C" fn peios_auth_operation_message(
     let Some(message) = request.messages.get(index) else {
         return -1;
     };
+    // SAFETY: out is caller-owned writable storage, disjoint from the borrowed
+    // operation. Any returned span stays owned by that operation.
     unsafe {
         write(
             out,
@@ -633,17 +929,29 @@ pub unsafe extern "C" fn peios_auth_operation_message(
         )
     }
 }
+/// Copy a successful logon's profile view without transferring its token.
+///
+/// # Safety
+///
+/// Operation must be null or a live handle returned by this library, used
+/// without concurrent access and not reused across fork.
+/// Any output must be aligned and writable for its declared type, with no
+/// overlap with operation-owned storage or other output objects. Returned
+/// spans must not be freed and expire at the next mutation or destruction.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn peios_auth_operation_grant(
     operation: *const Operation,
     out: *mut GrantView,
 ) -> i32 {
+    // SAFETY: the caller keeps the handle live and prevents concurrent mutation.
     let Some(operation) = (unsafe { operation.as_ref() }) else {
         return -1;
     };
     let State::Complete(Output::Grant { grant, .. }) = &operation.state else {
         return -1;
     };
+    // SAFETY: out is caller-owned writable storage, disjoint from the borrowed
+    // operation. Any returned span stays owned by that operation.
     unsafe {
         write(
             out,
@@ -656,8 +964,16 @@ pub unsafe extern "C" fn peios_auth_operation_grant(
         )
     }
 }
+/// Transfer a granted CLOEXEC token descriptor once; the caller must close it.
+///
+/// # Safety
+///
+/// Operation must be null or a live handle returned by this library, used
+/// without concurrent access and not reused across fork.
+/// The call has exclusive access and invalidates previously returned views.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn peios_auth_operation_take_token(operation: *mut Operation) -> i32 {
+    // SAFETY: the caller grants exclusive access to this live handle.
     let Some(operation) = (unsafe { operation.as_mut() }) else {
         return -1;
     };
@@ -666,17 +982,29 @@ pub unsafe extern "C" fn peios_auth_operation_take_token(operation: *mut Operati
     };
     token.take().map(IntoRawFd::into_raw_fd).unwrap_or(-1)
 }
+/// Copy the process counts returned by a completed session termination.
+///
+/// # Safety
+///
+/// Operation must be null or a live handle returned by this library, used
+/// without concurrent access and not reused across fork.
+/// Any output must be aligned and writable for its declared type, with no
+/// overlap with operation-owned storage or other output objects. Returned
+/// spans must not be freed and expire at the next mutation or destruction.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn peios_auth_operation_ended(
     operation: *const Operation,
     out: *mut EndedView,
 ) -> i32 {
+    // SAFETY: the caller keeps the handle live and prevents concurrent mutation.
     let Some(operation) = (unsafe { operation.as_ref() }) else {
         return -1;
     };
     let State::Complete(Output::Ended(ended)) = &operation.state else {
         return -1;
     };
+    // SAFETY: out is caller-owned writable storage, disjoint from the borrowed
+    // operation. Any returned span stays owned by that operation.
     unsafe {
         write(
             out,

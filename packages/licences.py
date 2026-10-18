@@ -8,6 +8,7 @@ NOTICE_PREFIXES = ("LICENSE", "LICENCE", "COPYING", "NOTICE", "UNLICENSE")
 
 
 def normalise(expression: str) -> str:
+    """Normalize whitespace and alternate-license spelling for package metadata."""
     expression = " ".join(expression.replace("/", " OR ").split())
     if "(" not in expression and " AND " not in expression and " WITH " not in expression:
         expression = " OR ".join(sorted(set(expression.split(" OR "))))
@@ -15,6 +16,7 @@ def normalise(expression: str) -> str:
 
 
 def combined(expressions: set[str]) -> str:
+    """Conjoin distinct crate license expressions without changing their grouping."""
     return " AND ".join(
         f"({value})"
         if len(expressions) > 1
@@ -35,10 +37,10 @@ def collect(inputs: list[Path], output: Path) -> str:
     expressions = {"MIT"}  # Every first-party crate is covered by the repository licence.
     rows = ["crate\tversion\tdeclared-license\tsource\n"]
     seen = set()
-    lock = tomllib.loads(Path("Cargo.lock").read_text())["package"]
+    lock = tomllib.loads(Path("Cargo.lock").read_text(encoding="utf-8"))["package"]
     sources = {(p["name"], p["version"]): p.get("source", "workspace/path") for p in lock}
     for manifest in manifests:
-        package = tomllib.loads(manifest.read_text()).get("package")
+        package = tomllib.loads(manifest.read_text(encoding="utf-8")).get("package")
         if not package:
             continue
         identity = (package["name"], package["version"])
@@ -69,7 +71,7 @@ def collect(inputs: list[Path], output: Path) -> str:
         destination.mkdir()
         for notice in notices:
             shutil.copyfile(notice, destination / notice.name)
-    (output / "crate-licenses.tsv").write_text("".join(rows))
+    (output / "crate-licenses.tsv").write_text("".join(rows), encoding="utf-8")
     expression = combined(expressions)
-    (output / "crate-expression.txt").write_text(expression + "\n")
+    (output / "crate-expression.txt").write_text(expression + "\n", encoding="utf-8")
     return expression

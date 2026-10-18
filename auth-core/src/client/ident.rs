@@ -51,15 +51,23 @@ impl Failure {
     /// Whether asking again may get an answer: authd is there, and either
     /// didn't answer in time or a source that could have didn't.
     pub fn transient(&self) -> bool {
-        matches!(self, Failure::Unanswered(_) | Failure::Declined(Outcome::Unavailable))
+        matches!(
+            self,
+            Failure::Unanswered(_) | Failure::Declined(Outcome::Unavailable)
+        )
     }
 }
 
 impl fmt::Display for Failure {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Failure::Unreachable(error) | Failure::Unsent(error) | Failure::Unanswered(error) => write!(f, "{error}"),
-            Failure::Unreadable(why) => write!(f, "authd's answer could not be read ({why}); versions may differ"),
+            Failure::Unreachable(error) | Failure::Unsent(error) | Failure::Unanswered(error) => {
+                write!(f, "{error}")
+            }
+            Failure::Unreadable(why) => write!(
+                f,
+                "authd's answer could not be read ({why}); versions may differ"
+            ),
             Failure::Declined(outcome) => f.write_str(match outcome {
                 Outcome::Unavailable => "a source that could have answered did not",
                 Outcome::Refused => "authd refused the question",
@@ -75,8 +83,12 @@ impl std::error::Error for Failure {}
 impl From<Failure> for io::Error {
     fn from(failure: Failure) -> io::Error {
         match failure {
-            Failure::Unreachable(error) | Failure::Unsent(error) | Failure::Unanswered(error) => error,
-            Failure::Unreadable(_) => io::Error::new(io::ErrorKind::InvalidData, failure.to_string()),
+            Failure::Unreachable(error) | Failure::Unsent(error) | Failure::Unanswered(error) => {
+                error
+            }
+            Failure::Unreadable(_) => {
+                io::Error::new(io::ErrorKind::InvalidData, failure.to_string())
+            }
             Failure::Declined(_) => io::Error::other(failure.to_string()),
         }
     }
@@ -98,7 +110,9 @@ impl Session {
     }
 
     fn ask(&mut self, request: Result<Vec<u8>, crate::WireError>) -> Result<Vec<u8>, Failure> {
-        let request = request.map_err(|error| Failure::Unreadable(format!("the question could not be encoded: {error:?}")))?;
+        let request = request.map_err(|error| {
+            Failure::Unreadable(format!("the question could not be encoded: {error:?}"))
+        })?;
         send_message(&self.stream, &request).map_err(Failure::Unsent)?;
         let received = recv_message(&FRAMING, &self.stream).map_err(Failure::Unanswered)?;
         Ok(received.expose().to_vec())
@@ -106,10 +120,21 @@ impl Session {
 
     /// Who `key` is, with `fields` of them. `Ok(None)` is authd's word that
     /// there is nobody by it, every source having been asked.
-    pub fn lookup(&mut self, key: Key, kind: Kind, fields: Fields) -> Result<Option<Record>, Failure> {
+    pub fn lookup(
+        &mut self,
+        key: Key,
+        kind: Kind,
+        fields: Fields,
+    ) -> Result<Option<Record>, Failure> {
         let tag = self.next_tag();
-        let received = self.ask(ident::encode_lookup(&Lookup { tag, key, kind, fields }))?;
-        let reply = ident::decode_lookup_reply(&received).map_err(|error| Failure::Unreadable(format!("{error:?}")))?;
+        let received = self.ask(ident::encode_lookup(&Lookup {
+            tag,
+            key,
+            kind,
+            fields,
+        }))?;
+        let reply = ident::decode_lookup_reply(&received)
+            .map_err(|error| Failure::Unreadable(format!("{error:?}")))?;
         // One question is outstanding at a time, so an answer to another
         // means the connection is not what it should be.
         if reply.tag != tag {
@@ -117,7 +142,9 @@ impl Session {
         }
         match (reply.outcome, reply.record) {
             (Outcome::Found, Some(record)) => Ok(Some(record)),
-            (Outcome::Found, None) => Err(Failure::Unreadable("it said it found someone, and gave nobody".into())),
+            (Outcome::Found, None) => Err(Failure::Unreadable(
+                "it said it found someone, and gave nobody".into(),
+            )),
             (Outcome::NotFound, _) => Ok(None),
             (outcome, _) => Err(Failure::Declined(outcome)),
         }
@@ -126,10 +153,23 @@ impl Session {
     /// One page of every principal or every group, or with `of` a group's
     /// members, from `cursor` (empty for the first). The walk is over only
     /// when a page's `next` is empty: no failure ever reads as the end.
-    pub fn page(&mut self, kind: Kind, fields: Fields, of: Option<Key>, cursor: &[u8]) -> Result<EnumerateReply, Failure> {
+    pub fn page(
+        &mut self,
+        kind: Kind,
+        fields: Fields,
+        of: Option<Key>,
+        cursor: &[u8],
+    ) -> Result<EnumerateReply, Failure> {
         let tag = self.next_tag();
-        let received = self.ask(ident::encode_enumerate(&Enumerate { tag, kind, fields, of, cursor: cursor.to_vec() }))?;
-        let reply = ident::decode_enumerate_reply(&received).map_err(|error| Failure::Unreadable(format!("{error:?}")))?;
+        let received = self.ask(ident::encode_enumerate(&Enumerate {
+            tag,
+            kind,
+            fields,
+            of,
+            cursor: cursor.to_vec(),
+        }))?;
+        let reply = ident::decode_enumerate_reply(&received)
+            .map_err(|error| Failure::Unreadable(format!("{error:?}")))?;
         if reply.tag != tag {
             return Err(Failure::Unreadable("it answered another question".into()));
         }
@@ -172,7 +212,10 @@ impl Ident {
 
     /// An identity socket at `path`: for tests, and nothing else.
     pub fn at(path: impl AsRef<Path>) -> Ident {
-        Ident { path: path.as_ref().to_path_buf(), timeout: TIMEOUT }
+        Ident {
+            path: path.as_ref().to_path_buf(),
+            timeout: TIMEOUT,
+        }
     }
 
     /// The same socket, giving authd `timeout` to answer each request: short
@@ -185,10 +228,18 @@ impl Ident {
     /// A connection, for a caller with several questions or a walk to take a
     /// page at a time.
     pub fn session(&self) -> Result<Session, Failure> {
-        let stream = UnixStream::connect(&self.path)
-            .map_err(|error| Failure::Unreachable(io::Error::new(error.kind(), format!("cannot reach authd on {}: {error}", self.path.display()))))?;
-        stream.set_read_timeout(Some(self.timeout)).map_err(Failure::Unreachable)?;
-        stream.set_write_timeout(Some(self.timeout)).map_err(Failure::Unreachable)?;
+        let stream = UnixStream::connect(&self.path).map_err(|error| {
+            Failure::Unreachable(io::Error::new(
+                error.kind(),
+                format!("cannot reach authd on {}: {error}", self.path.display()),
+            ))
+        })?;
+        stream
+            .set_read_timeout(Some(self.timeout))
+            .map_err(Failure::Unreachable)?;
+        stream
+            .set_write_timeout(Some(self.timeout))
+            .map_err(Failure::Unreachable)?;
         Ok(Session { stream, tag: 1 })
     }
 
@@ -201,7 +252,12 @@ impl Ident {
 
     /// Every principal or every group, with `fields` of each, page after
     /// page on one connection. With `of`, a group's members instead.
-    pub fn enumerate(&self, kind: Kind, fields: Fields, of: Option<Key>) -> Result<Listing, Failure> {
+    pub fn enumerate(
+        &self,
+        kind: Kind,
+        fields: Fields,
+        of: Option<Key>,
+    ) -> Result<Listing, Failure> {
         let mut session = self.session()?;
         let mut listing = Listing::default();
         let mut cursor = Vec::new();
@@ -232,7 +288,11 @@ mod tests {
     /// connection with `answer` of it.
     fn stand_in(answer: impl Fn(&[u8]) -> Vec<u8> + Send + Sync + 'static) -> (Ident, PathBuf) {
         static NEXT: AtomicU32 = AtomicU32::new(0);
-        let dir = std::env::temp_dir().join(format!("auth-core/client-ident-{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)));
+        let dir = std::env::temp_dir().join(format!(
+            "auth-core/client-ident-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("ident.sock");
         let listener = UnixListener::bind(&path).unwrap();
@@ -250,18 +310,41 @@ mod tests {
     }
 
     fn record(name: &str) -> Record {
-        Record { sid: vec![1, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0], qualified_name: name.into(), kind_found: Kind::Principal, values: vec![Value::Enabled(true)], withheld: Vec::new() }
+        Record {
+            sid: vec![1, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0],
+            qualified_name: name.into(),
+            kind_found: Kind::Principal,
+            values: vec![Value::Enabled(true)],
+            withheld: Vec::new(),
+        }
     }
 
     #[test]
     fn a_listing_is_followed_to_its_last_page() {
         let (ident, dir) = stand_in(|request| {
             let request = ident::decode_enumerate(request).unwrap();
-            let (entries, next) = if request.cursor.is_empty() { (vec![record("dana")], b"more".to_vec()) } else { (vec![record("alice")], Vec::new()) };
-            ident::encode_enumerate_reply(&EnumerateReply { tag: request.tag, outcome: Outcome::Found, entries, next, incomplete: vec!["lpsd".into()] }).unwrap()
+            let (entries, next) = if request.cursor.is_empty() {
+                (vec![record("dana")], b"more".to_vec())
+            } else {
+                (vec![record("alice")], Vec::new())
+            };
+            ident::encode_enumerate_reply(&EnumerateReply {
+                tag: request.tag,
+                outcome: Outcome::Found,
+                entries,
+                next,
+                incomplete: vec!["lpsd".into()],
+            })
+            .unwrap()
         });
-        let listing = ident.enumerate(Kind::Principal, Fields::ENABLED, None).unwrap();
-        let names: Vec<&str> = listing.records.iter().map(|record| record.qualified_name.as_str()).collect();
+        let listing = ident
+            .enumerate(Kind::Principal, Fields::ENABLED, None)
+            .unwrap();
+        let names: Vec<&str> = listing
+            .records
+            .iter()
+            .map(|record| record.qualified_name.as_str())
+            .collect();
         assert_eq!(names, ["dana", "alice"]);
         assert_eq!(listing.incomplete, ["lpsd"]);
         std::fs::remove_dir_all(dir).unwrap();
@@ -271,13 +354,35 @@ mod tests {
     fn nobody_by_a_name_is_none_and_a_refusal_is_an_error() {
         let (ident, dir) = stand_in(|request| {
             let request = ident::decode_lookup(request).unwrap();
-            let outcome = if request.key == Key::Name("nobody".into()) { Outcome::NotFound } else { Outcome::Unavailable };
-            ident::encode_lookup_reply(&LookupReply { tag: request.tag, outcome, record: None }).unwrap()
+            let outcome = if request.key == Key::Name("nobody".into()) {
+                Outcome::NotFound
+            } else {
+                Outcome::Unavailable
+            };
+            ident::encode_lookup_reply(&LookupReply {
+                tag: request.tag,
+                outcome,
+                record: None,
+            })
+            .unwrap()
         });
-        assert_eq!(ident.lookup(Key::Name("nobody".into()), Kind::Any, Fields::empty()).unwrap(), None);
-        let error = ident.lookup(Key::Name("dana".into()), Kind::Any, Fields::empty()).unwrap_err();
-        assert_eq!(error.to_string(), "a source that could have answered did not");
-        assert!(error.transient(), "a source that didn't answer may next time");
+        assert_eq!(
+            ident
+                .lookup(Key::Name("nobody".into()), Kind::Any, Fields::empty())
+                .unwrap(),
+            None
+        );
+        let error = ident
+            .lookup(Key::Name("dana".into()), Kind::Any, Fields::empty())
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "a source that could have answered did not"
+        );
+        assert!(
+            error.transient(),
+            "a source that didn't answer may next time"
+        );
         std::fs::remove_dir_all(dir).unwrap();
     }
 
@@ -286,21 +391,44 @@ mod tests {
     #[test]
     fn why_a_question_failed_is_told() {
         let missing = Ident::at("/nonexistent/ident.sock");
-        let unreachable = missing.lookup(Key::Name("dana".into()), Kind::Any, Fields::empty()).unwrap_err();
-        assert!(matches!(unreachable, Failure::Unreachable(_)) && !unreachable.transient(), "{unreachable:?}");
-        assert!(unreachable.to_string().starts_with("cannot reach authd on /nonexistent/ident.sock"));
+        let unreachable = missing
+            .lookup(Key::Name("dana".into()), Kind::Any, Fields::empty())
+            .unwrap_err();
+        assert!(
+            matches!(unreachable, Failure::Unreachable(_)) && !unreachable.transient(),
+            "{unreachable:?}"
+        );
+        assert!(
+            unreachable
+                .to_string()
+                .starts_with("cannot reach authd on /nonexistent/ident.sock")
+        );
 
         // An answer to another question, and a refusal.
         let (ident, dir) = stand_in(|request| {
             let request = ident::decode_lookup(request).unwrap();
-            let (tag, outcome) = if request.key == Key::Name("stale".into()) { (request.tag + 1, Outcome::NotFound) } else { (request.tag, Outcome::Refused) };
-            ident::encode_lookup_reply(&LookupReply { tag, outcome, record: None }).unwrap()
+            let (tag, outcome) = if request.key == Key::Name("stale".into()) {
+                (request.tag + 1, Outcome::NotFound)
+            } else {
+                (request.tag, Outcome::Refused)
+            };
+            ident::encode_lookup_reply(&LookupReply {
+                tag,
+                outcome,
+                record: None,
+            })
+            .unwrap()
         });
         let mut session = ident.session().unwrap();
-        assert!(matches!(session.lookup(Key::Name("stale".into()), Kind::Any, Fields::empty()), Err(Failure::Unreadable(_))));
+        assert!(matches!(
+            session.lookup(Key::Name("stale".into()), Kind::Any, Fields::empty()),
+            Err(Failure::Unreadable(_))
+        ));
         // The stand-in answers one connection at a time.
         drop(session);
-        let refused = ident.lookup(Key::Name("dana".into()), Kind::Any, Fields::empty()).unwrap_err();
+        let refused = ident
+            .lookup(Key::Name("dana".into()), Kind::Any, Fields::empty())
+            .unwrap_err();
         assert!(matches!(refused, Failure::Declined(Outcome::Refused)) && !refused.transient());
         std::fs::remove_dir_all(dir).unwrap();
     }
@@ -315,12 +443,26 @@ mod tests {
                 b"" => (Outcome::Found, vec![record("dana")], b"more".to_vec()),
                 _ => (Outcome::Unavailable, Vec::new(), Vec::new()),
             };
-            ident::encode_enumerate_reply(&EnumerateReply { tag: request.tag, outcome, entries, next, incomplete: Vec::new() }).unwrap()
+            ident::encode_enumerate_reply(&EnumerateReply {
+                tag: request.tag,
+                outcome,
+                entries,
+                next,
+                incomplete: Vec::new(),
+            })
+            .unwrap()
         });
-        let mut session = ident.with_timeout(Duration::from_secs(1)).session().unwrap();
-        let first = session.page(Kind::Principal, Fields::empty(), None, b"").unwrap();
+        let mut session = ident
+            .with_timeout(Duration::from_secs(1))
+            .session()
+            .unwrap();
+        let first = session
+            .page(Kind::Principal, Fields::empty(), None, b"")
+            .unwrap();
         assert_eq!(first.next, b"more");
-        let second = session.page(Kind::Principal, Fields::empty(), None, &first.next).unwrap_err();
+        let second = session
+            .page(Kind::Principal, Fields::empty(), None, &first.next)
+            .unwrap_err();
         assert!(second.transient(), "{second:?}");
         std::fs::remove_dir_all(dir).unwrap();
     }

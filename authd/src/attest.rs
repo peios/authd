@@ -195,7 +195,14 @@ fn attest_service(
     // them, no credential could exist for them, and they are designated by
     // construction.
     if let Some(user) = virtual_identity(&attest.identity, &service) {
-        return mint_and_send(stream, user.as_ref(), &[], &service, &attest.service, attestation);
+        return mint_and_send(
+            stream,
+            user.as_ref(),
+            &[],
+            &service,
+            &attest.service,
+            attestation,
+        );
     }
 
     // Anything else is a principal somebody holds, so it is resolved and its
@@ -297,7 +304,7 @@ fn resolve_service_principal(registry: &Registry, identity: &str) -> Option<Reso
 /// create a principal-source account or enable credentialled logon.
 fn virtual_identity(identity: &str, service: &Sid) -> Option<Sid> {
     if identity.eq_ignore_ascii_case("Service") {
-        Some(service.clone())
+        Some(*service)
     } else {
         well_known_identity(identity)
     }
@@ -437,8 +444,8 @@ mod tests {
     fn service_accounts_are_bound_to_the_attested_name() {
         let first = service_sid::of("eventd").expect("service SID");
         let second = service_sid::of("other").expect("service SID");
-        assert_eq!(virtual_identity("Service", &first), Some(first.clone()));
-        assert_eq!(virtual_identity("service", &second), Some(second.clone()));
+        assert_eq!(virtual_identity("Service", &first), Some(first));
+        assert_eq!(virtual_identity("service", &second), Some(second));
         assert_ne!(first, second);
         assert_eq!(
             virtual_identity("LocalService", &first),
@@ -483,7 +490,10 @@ mod tests {
             record.get("object.service.name"),
             Some(&audit::Value::Str("jellyfin".into()))
         );
-        assert_eq!(record.get("outcome.success"), Some(&audit::Value::Bool(false)));
+        assert_eq!(
+            record.get("outcome.success"),
+            Some(&audit::Value::Bool(false))
+        );
         assert_eq!(
             record.get("outcome.reason"),
             Some(&audit::Value::Str("permission-denied".into()))

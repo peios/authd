@@ -40,15 +40,25 @@ def _package_impl(ctx):
     )
     return [DefaultInfo(files = depset([output]))]
 
-auth_package = rule(implementation = _package_impl, attrs = {
-    "definition": attr.label(allow_single_file = True),
-    "stage": attr.label(),
-    "source": attr.bool(),
-    "srcs": attr.label_list(allow_files = True),
-    "_driver": attr.label(default = "//packages:package.py", allow_single_file = True),
-    "_assembly": attr.label(default = "//packages:assembly.py", allow_single_file = True),
-    "_writer": attr.label(default = "//vendor/ppk:ppk", executable = True, cfg = "exec"),
-})
+auth_package = rule(
+    implementation = _package_impl,
+    doc = "Assemble one declared payload and emit canonical PPK blobs, manifest and provenance.",
+    attrs = {
+        "definition": attr.label(
+            allow_single_file = True,
+            doc = "JSON payload recipe for binary packages.",
+        ),
+        "stage": attr.label(doc = "Validated staging output for binary packages."),
+        "source": attr.bool(doc = "Package the declared source view instead of a binary recipe."),
+        "srcs": attr.label_list(
+            allow_files = True,
+            doc = "Declared files available to the action.",
+        ),
+        "_driver": attr.label(default = "//packages:package.py", allow_single_file = True),
+        "_assembly": attr.label(default = "//packages:assembly.py", allow_single_file = True),
+        "_writer": attr.label(default = "//vendor/ppk:ppk", executable = True, cfg = "exec"),
+    },
+)
 
 def _store_impl(ctx):
     output = ctx.actions.declare_directory(ctx.label.name + ".store")
@@ -75,12 +85,19 @@ def _store_impl(ctx):
     )
     return [DefaultInfo(files = depset([output]))]
 
-package_store = rule(implementation = _store_impl, attrs = {
-    "packages": attr.label_list(mandatory = True),
-    "_driver": attr.label(default = "//packages:package.py", allow_single_file = True),
-    "_assembly": attr.label(default = "//packages:assembly.py", allow_single_file = True),
-    "_checker": attr.label(default = "//packages:check-blobs", executable = True, cfg = "exec"),
-})
+package_store = rule(
+    implementation = _store_impl,
+    doc = "Merge package outputs into a verified content-addressed store and family index.",
+    attrs = {
+        "packages": attr.label_list(
+            mandatory = True,
+            doc = "Canonical package output directories.",
+        ),
+        "_driver": attr.label(default = "//packages:package.py", allow_single_file = True),
+        "_assembly": attr.label(default = "//packages:assembly.py", allow_single_file = True),
+        "_checker": attr.label(default = "//packages:check-blobs", executable = True, cfg = "exec"),
+    },
+)
 
 def _store_test_impl(ctx):
     executable = ctx.actions.declare_file(ctx.label.name + ".sh")
@@ -100,9 +117,21 @@ exec /usr/bin/python3 "$root/%s"
         files = ctx.files.srcs + [ctx.file.main, ctx.executable._writer, ctx.executable._checker],
     ))]
 
-package_store_test = rule(implementation = _store_test_impl, test = True, attrs = {
-    "main": attr.label(allow_single_file = True, mandatory = True),
-    "srcs": attr.label_list(allow_files = True),
-    "_writer": attr.label(default = "//vendor/ppk:ppk", executable = True, cfg = "exec"),
-    "_checker": attr.label(default = "//packages:check-blobs", executable = True, cfg = "exec"),
-})
+package_store_test = rule(
+    implementation = _store_test_impl,
+    test = True,
+    doc = "Run Python package-store checks with the declared writer and blob checker binaries.",
+    attrs = {
+        "main": attr.label(
+            allow_single_file = True,
+            mandatory = True,
+            doc = "Python test entry point.",
+        ),
+        "srcs": attr.label_list(
+            allow_files = True,
+            doc = "Declared files available to the action.",
+        ),
+        "_writer": attr.label(default = "//vendor/ppk:ppk", executable = True, cfg = "exec"),
+        "_checker": attr.label(default = "//packages:check-blobs", executable = True, cfg = "exec"),
+    },
+)

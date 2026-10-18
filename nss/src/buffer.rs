@@ -25,11 +25,7 @@ impl Packer {
     /// `base` must point to at least `len` writable bytes, and must outlive
     /// every pointer this hands out.
     pub unsafe fn new(base: *mut c_char, len: usize) -> Self {
-        Self {
-            base,
-            len,
-            used: 0,
-        }
+        Self { base, len, used: 0 }
     }
 
     /// Copy a string in, NUL-terminated, and return a pointer to it.

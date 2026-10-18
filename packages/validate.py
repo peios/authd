@@ -6,6 +6,7 @@ from pathlib import Path
 
 
 def validate(stage: Path, *, native: bool, sdk: Path) -> None:
+    """Run staged-payload and ABI checks, propagating any failed validation command."""
     environment = os.environ | {
         "LD_LIBRARY_PATH": str(stage.resolve() / "usr/lib/x86_64-linux-peios")
         + ":"

@@ -36,7 +36,10 @@ pub struct Refusal {
 
 impl Refusal {
     fn unreached(reason: impl Into<String>) -> Refusal {
-        Refusal { failure: None, reason: reason.into() }
+        Refusal {
+            failure: None,
+            reason: reason.into(),
+        }
     }
 
     /// Whether lpsd refused the caller, as opposed to the request.
@@ -73,7 +76,9 @@ impl Admin {
 
     /// An admin socket at `path`: for tests, and nothing else.
     pub fn at(path: impl AsRef<Path>) -> Admin {
-        Admin { path: path.as_ref().to_path_buf() }
+        Admin {
+            path: path.as_ref().to_path_buf(),
+        }
     }
 
     fn connect(&self) -> Result<UnixStream, Refusal> {
@@ -81,20 +86,23 @@ impl Admin {
         let stream = UnixStream::connect(&self.path).map_err(|error| match error.kind() {
             // By far the most common failure, and the least self-explanatory:
             // the socket exists only while lpsd runs.
-            io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused => {
-                Refusal::unreached(format!("cannot reach lpsd on {at}: it does not appear to be running"))
-            }
+            io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused => Refusal::unreached(
+                format!("cannot reach lpsd on {at}: it does not appear to be running"),
+            ),
             // The socket's descriptor admits whom lpsd would, so refusing the
             // connection is refusing the caller, as lpsd itself would have.
-            io::ErrorKind::PermissionDenied => {
-                Refusal { failure: Some(Failure::Denied), reason: format!("cannot reach lpsd on {at}: permission denied") }
-            }
+            io::ErrorKind::PermissionDenied => Refusal {
+                failure: Some(Failure::Denied),
+                reason: format!("cannot reach lpsd on {at}: permission denied"),
+            },
             _ => Refusal::unreached(format!("cannot reach lpsd on {at}: {error}")),
         })?;
         stream
             .set_read_timeout(Some(REPLY_TIMEOUT))
             .and_then(|()| stream.set_write_timeout(Some(SEND_TIMEOUT)))
-            .map_err(|error| Refusal::unreached(format!("could not configure the connection: {error}")))?;
+            .map_err(|error| {
+                Refusal::unreached(format!("could not configure the connection: {error}"))
+            })?;
         Ok(stream)
     }
 
@@ -102,26 +110,40 @@ impl Admin {
     /// error, so that every caller has one failure path.
     pub fn request(&self, message: &[u8]) -> Result<Secret, Refusal> {
         let stream = self.connect()?;
-        send_message(&stream, message).map_err(|error| Refusal::unreached(format!("could not send the request: {error}")))?;
+        send_message(&stream, message)
+            .map_err(|error| Refusal::unreached(format!("could not send the request: {error}")))?;
         let received = recv_message(&lps::FRAMING, &stream).map_err(|error| {
             Refusal::unreached(match error.kind() {
-                io::ErrorKind::UnexpectedEof => "lpsd closed the connection without answering".to_string(),
-                io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut => "lpsd did not answer in time".to_string(),
+                io::ErrorKind::UnexpectedEof => {
+                    "lpsd closed the connection without answering".to_string()
+                }
+                io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut => {
+                    "lpsd did not answer in time".to_string()
+                }
                 _ => format!("could not read the answer: {error}"),
             })
         })?;
-        let (msg_type, _) =
-            lps::decode_type(received.expose()).map_err(|error| Refusal::unreached(format!("lpsd sent something unreadable: {error:?}")))?;
+        let (msg_type, _) = lps::decode_type(received.expose()).map_err(|error| {
+            Refusal::unreached(format!("lpsd sent something unreadable: {error:?}"))
+        })?;
         if msg_type == lps::MSG_FAILED {
-            let failed = lps::decode_failed(received.expose())
-                .map_err(|error| Refusal::unreached(format!("lpsd sent an unreadable refusal: {error:?}")))?;
-            return Err(Refusal { failure: Some(failed.failure), reason: failed.reason });
+            let failed = lps::decode_failed(received.expose()).map_err(|error| {
+                Refusal::unreached(format!("lpsd sent an unreadable refusal: {error:?}"))
+            })?;
+            return Err(Refusal {
+                failure: Some(failed.failure),
+                reason: failed.reason,
+            });
         }
         Ok(received)
     }
 
     /// Sends `message` and decodes the answer with `decode`.
-    fn ask<T>(&self, message: Result<Vec<u8>, WireError>, decode: impl FnOnce(&[u8]) -> Result<T, WireError>) -> Result<T, Refusal> {
+    fn ask<T>(
+        &self,
+        message: Result<Vec<u8>, WireError>,
+        decode: impl FnOnce(&[u8]) -> Result<T, WireError>,
+    ) -> Result<T, Refusal> {
         let reply = self.request(&encoded(message)?)?;
         expect(decode(reply.expose()))
     }
@@ -150,7 +172,9 @@ impl Admin {
 
     /// Creates a principal, and answers its RID.
     pub fn add(&self, add: &lps::Add<'_>) -> Result<u32, Refusal> {
-        let message = lps::encode_add(add).map_err(|error| Refusal::unreached(format!("could not encode the request: {error:?}")))?;
+        let message = lps::encode_add(add).map_err(|error| {
+            Refusal::unreached(format!("could not encode the request: {error:?}"))
+        })?;
         let reply = self.request(message.expose())?;
         expect(lps::decode_created(reply.expose()))
     }
@@ -162,22 +186,38 @@ impl Admin {
     /// Renames a principal. Its SID, and everything that names it by SID,
     /// stays; so does its home directory.
     pub fn rename(&self, name: &str, new_name: &str) -> Result<(), Refusal> {
-        self.done(lps::encode_rename(&lps::Rename { name: name.into(), new_name: new_name.into() }))
+        self.done(lps::encode_rename(&lps::Rename {
+            name: name.into(),
+            new_name: new_name.into(),
+        }))
     }
 
     /// Sets which kinds of sign-on the principal may be used for;
     /// [`lps::LogonTypes::UNSTATED`] returns it to the authority's default.
-    pub fn set_logon_types(&self, name: &str, permitted_logon_types: lps::LogonTypes) -> Result<(), Refusal> {
-        self.done(lps::encode_set_logon_types(&lps::SetLogonTypes { name: name.into(), permitted_logon_types }))
+    pub fn set_logon_types(
+        &self,
+        name: &str,
+        permitted_logon_types: lps::LogonTypes,
+    ) -> Result<(), Refusal> {
+        self.done(lps::encode_set_logon_types(&lps::SetLogonTypes {
+            name: name.into(),
+            permitted_logon_types,
+        }))
     }
 
     pub fn set_enabled(&self, name: &str, enabled: bool) -> Result<(), Refusal> {
-        self.done(lps::encode_set_enabled(&lps::SetEnabled { name: name.into(), enabled }))
+        self.done(lps::encode_set_enabled(&lps::SetEnabled {
+            name: name.into(),
+            enabled,
+        }))
     }
 
     pub fn set_password(&self, name: &str, secret: &[u8]) -> Result<(), Refusal> {
-        let message = lps::encode_set_password(&lps::SetPassword { name: name.into(), secret })
-            .map_err(|error| Refusal::unreached(format!("could not encode the request: {error:?}")))?;
+        let message = lps::encode_set_password(&lps::SetPassword {
+            name: name.into(),
+            secret,
+        })
+        .map_err(|error| Refusal::unreached(format!("could not encode the request: {error:?}")))?;
         let reply = self.request(message.expose())?;
         expect(lps::decode_done(reply.expose()))
     }
@@ -210,17 +250,29 @@ impl Admin {
     /// Creates a local group, and answers its RID. An empty description is
     /// none.
     pub fn group_create(&self, name: &str, description: &str) -> Result<u32, Refusal> {
-        self.ask(lps::encode_group_create(&lps::NewGroup { name: name.into(), description: description.into() }), lps::decode_created)
+        self.ask(
+            lps::encode_group_create(&lps::NewGroup {
+                name: name.into(),
+                description: description.into(),
+            }),
+            lps::decode_created,
+        )
     }
 
     /// Renames a local group. Its SID, and so every membership, stays.
     pub fn group_rename(&self, name: &str, new_name: &str) -> Result<(), Refusal> {
-        self.done(lps::encode_group_rename(&lps::Rename { name: name.into(), new_name: new_name.into() }))
+        self.done(lps::encode_group_rename(&lps::Rename {
+            name: name.into(),
+            new_name: new_name.into(),
+        }))
     }
 
     /// Sets a local group's description; empty clears it.
     pub fn group_describe(&self, name: &str, description: &str) -> Result<(), Refusal> {
-        self.done(lps::encode_group_describe(&lps::Describe { name: name.into(), description: description.into() }))
+        self.done(lps::encode_group_describe(&lps::Describe {
+            name: name.into(),
+            description: description.into(),
+        }))
     }
 
     pub fn group_delete(&self, name: &str) -> Result<(), Refusal> {
@@ -228,28 +280,47 @@ impl Admin {
     }
 
     pub fn set_claim(&self, name: &str, claim: crate::Claim) -> Result<(), Refusal> {
-        self.done(lps::encode_set_claim(&lps::SetClaim { name: name.into(), claim }))
+        self.done(lps::encode_set_claim(&lps::SetClaim {
+            name: name.into(),
+            claim,
+        }))
     }
 
     pub fn remove_claim(&self, name: &str, claim_name: &str) -> Result<(), Refusal> {
-        self.done(lps::encode_remove_claim(&lps::NamedClaim { name: name.into(), claim_name: claim_name.into() }))
+        self.done(lps::encode_remove_claim(&lps::NamedClaim {
+            name: name.into(),
+            claim_name: claim_name.into(),
+        }))
     }
 
     /// The principal's credential policy and its SSH public keys.
     pub fn keys(&self, name: &str) -> Result<(Policy, Vec<lps::KeyInfo>), Refusal> {
-        self.ask(lps::encode_key_request(&lps::KeyRequest::List { name: name.into() }), lps::decode_keys)
+        self.ask(
+            lps::encode_key_request(&lps::KeyRequest::List { name: name.into() }),
+            lps::decode_keys,
+        )
     }
 
     pub fn key_add(&self, name: &str, public_key: &str, label: &str) -> Result<(), Refusal> {
-        self.done(lps::encode_key_request(&lps::KeyRequest::Add { name: name.into(), public_key: public_key.into(), label: label.into() }))
+        self.done(lps::encode_key_request(&lps::KeyRequest::Add {
+            name: name.into(),
+            public_key: public_key.into(),
+            label: label.into(),
+        }))
     }
 
     pub fn key_remove(&self, name: &str, id: [u8; 16]) -> Result<(), Refusal> {
-        self.done(lps::encode_key_request(&lps::KeyRequest::Remove { name: name.into(), id }))
+        self.done(lps::encode_key_request(&lps::KeyRequest::Remove {
+            name: name.into(),
+            id,
+        }))
     }
 
     pub fn set_credential_policy(&self, name: &str, policy: Policy) -> Result<(), Refusal> {
-        self.done(lps::encode_key_request(&lps::KeyRequest::Policy { name: name.into(), policy }))
+        self.done(lps::encode_key_request(&lps::KeyRequest::Policy {
+            name: name.into(),
+            policy,
+        }))
     }
 }
 
@@ -258,7 +329,10 @@ fn named(name: &str) -> lps::Named {
 }
 
 fn membership(name: &str, group: &str) -> lps::Membership {
-    lps::Membership { name: name.into(), group: group.into() }
+    lps::Membership {
+        name: name.into(),
+        group: group.into(),
+    }
 }
 
 fn encoded(message: Result<Vec<u8>, WireError>) -> Result<Vec<u8>, Refusal> {
@@ -269,7 +343,11 @@ fn encoded(message: Result<Vec<u8>, WireError>) -> Result<Vec<u8>, Refusal> {
 /// parse: by now the request was accepted, so it is a version mismatch or a
 /// bug, not bad input.
 fn expect<T>(decoded: Result<T, WireError>) -> Result<T, Refusal> {
-    decoded.map_err(|error| Refusal::unreached(format!("lpsd's answer was not the one expected ({error:?}); versions may differ")))
+    decoded.map_err(|error| {
+        Refusal::unreached(format!(
+            "lpsd's answer was not the one expected ({error:?}); versions may differ"
+        ))
+    })
 }
 
 #[cfg(test)]
@@ -282,14 +360,20 @@ mod tests {
     /// `answer` of what it was sent.
     fn stand_in(answer: impl Fn(&[u8]) -> Vec<u8> + Send + 'static) -> (Admin, PathBuf) {
         static NEXT: AtomicU32 = AtomicU32::new(0);
-        let dir = std::env::temp_dir().join(format!("auth-core/client-{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)));
+        let dir = std::env::temp_dir().join(format!(
+            "auth-core/client-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("admin.sock");
         let listener = UnixListener::bind(&path).unwrap();
         std::thread::spawn(move || {
             for stream in listener.incoming() {
                 let Ok(stream) = stream else { return };
-                let Ok(received) = recv_message(&lps::FRAMING, &stream) else { continue };
+                let Ok(received) = recv_message(&lps::FRAMING, &stream) else {
+                    continue;
+                };
                 let _ = send_message(&stream, &answer(received.expose()));
             }
         });
@@ -301,7 +385,14 @@ mod tests {
         let (admin, dir) = stand_in(|request| {
             let (msg_type, _) = lps::decode_type(request).unwrap();
             assert_eq!(msg_type, lps::MSG_LIST);
-            lps::encode_principals(&[lps::Summary { name: "dana".into(), rid: 1002, enabled: true, groups: 1, unix_id: 1002 }]).unwrap()
+            lps::encode_principals(&[lps::Summary {
+                name: "dana".into(),
+                rid: 1002,
+                enabled: true,
+                groups: 1,
+                unix_id: 1002,
+            }])
+            .unwrap()
         });
         let listed = admin.list().unwrap();
         assert_eq!(listed[0].name, "dana");
@@ -311,7 +402,11 @@ mod tests {
     #[test]
     fn a_refusal_carries_lpsd_s_code_and_words() {
         let (admin, dir) = stand_in(|_| {
-            lps::encode_failed(&lps::Failed { failure: Failure::Denied, reason: "the caller is not an administrator".into() }).unwrap()
+            lps::encode_failed(&lps::Failed {
+                failure: Failure::Denied,
+                reason: "the caller is not an administrator".into(),
+            })
+            .unwrap()
         });
         let refused = admin.domain().unwrap_err();
         assert!(refused.denied());
@@ -324,14 +419,22 @@ mod tests {
         let admin = Admin::at("/nonexistent/lpsd/admin.sock");
         let refused = admin.list().unwrap_err();
         assert_eq!(refused.failure, None);
-        assert!(refused.reason.contains("it does not appear to be running"), "{}", refused.reason);
+        assert!(
+            refused.reason.contains("it does not appear to be running"),
+            "{}",
+            refused.reason
+        );
     }
 
     #[test]
     fn the_wrong_answer_is_blamed_on_the_daemon() {
         let (admin, dir) = stand_in(|_| lps::encode_done().unwrap());
         let refused = admin.list().unwrap_err();
-        assert!(refused.reason.contains("versions may differ"), "{}", refused.reason);
+        assert!(
+            refused.reason.contains("versions may differ"),
+            "{}",
+            refused.reason
+        );
         std::fs::remove_dir_all(dir).unwrap();
     }
 }

@@ -60,7 +60,7 @@ class StoreTests(unittest.TestCase):
         first, second = self.store("first"), self.store("second")
         merged = self.root / "merged"
         package.merge([first, second], merged, self.checker)
-        index = json.loads((merged / "index.json").read_text())
+        index = json.loads((merged / "index.json").read_text(encoding="utf-8"))
         self.assertEqual(index["package_count"], 2)
         self.assertEqual(index["blob_count"], 1)
         manifest = merged / index["packages"][0]["manifest"]
@@ -71,7 +71,7 @@ class StoreTests(unittest.TestCase):
             + hashlib.sha256(b"shared content").hexdigest()
             + '", exec = true }\n'
         )
-        self.assertEqual(manifest.read_text(), expected)
+        self.assertEqual(manifest.read_text(encoding="utf-8"), expected)
         again = self.root / "again"
         package.merge([second, first], again, self.checker)
         left = {
@@ -84,7 +84,7 @@ class StoreTests(unittest.TestCase):
 
     def test_manifest_tampering_fails(self) -> None:
         store = self.store("one")
-        next(store.rglob("manifest.toml")).write_text("tampered")
+        next(store.rglob("manifest.toml")).write_text("tampered", encoding="utf-8")
         with self.assertRaisesRegex(ValueError, "manifest hash"):
             package.merge([store], self.root / "merged", self.checker)
 
@@ -121,9 +121,9 @@ class StoreTests(unittest.TestCase):
     def test_source_contains_only_declared_files_and_modes(self) -> None:
         source = self.root / "input"
         source.mkdir()
-        (source / "declared").write_text("declared")
+        (source / "declared").write_text("declared", encoding="utf-8")
         (source / "declared").chmod(0o755)
-        (source / "undeclared").write_text("must not be packaged")
+        (source / "undeclared").write_text("must not be packaged", encoding="utf-8")
         manifest = self.root / "inputs.json"
         package.write_json(
             manifest, [{"relative": "scripts/declared", "path": str(source / "declared")}]
@@ -143,7 +143,8 @@ class StoreTests(unittest.TestCase):
         writer = self.root / "blocking-writer"
         writer.write_text(
             "#!/usr/bin/python3\nfrom pathlib import Path\nimport time\n"
-            f'Path({str(marker)!r}).write_text("started")\ntime.sleep(30)\n'
+            f'Path({str(marker)!r}).write_text("started")\ntime.sleep(30)\n',
+            encoding="utf-8",
         )
         writer.chmod(0o755)
         output = self.root / "cancelled"
@@ -178,6 +179,7 @@ class StoreTests(unittest.TestCase):
             try:
                 os.killpg(process.pid, signal.SIGKILL)
             except ProcessLookupError:
+                # The process group has already exited, so there is nothing to clean up.
                 pass
             process.wait(timeout=5)
 

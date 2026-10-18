@@ -52,6 +52,7 @@ pub struct EnumerateRequest<'a> {
     pub cursor: &'a [u8],
 }
 impl Client {
+    /// Begin an identity lookup; requested fields can be withheld by policy.
     pub fn lookup(
         &self,
         key: Key<'_>,
@@ -67,6 +68,7 @@ impl Client {
         // SAFETY: client and every borrowed input remain live through begin.
         Operation::new(unsafe { sys::peios_auth_identity_lookup_begin(self.handle.as_ptr(), &raw) })
     }
+    /// Begin one enumeration page. Preserve its cursor and incomplete-source status.
     pub fn enumerate(&self, request: EnumerateRequest<'_>) -> Result<Operation, Error> {
         let group = request.group.as_ref().map(Key::raw);
         let raw = abi::EnumerateRequest {
@@ -145,6 +147,7 @@ pub struct AccountKey {
 }
 
 impl Operation {
+    /// Copy the completed identity result, including partial results and the next cursor.
     pub fn identity(&self) -> Result<Identity, Error> {
         // SAFETY: every getter in this method uses the same immutable live
         // operation; read initializes the output and bytes are copied immediately.
@@ -183,32 +186,10 @@ impl Operation {
                 if state == 0 {
                     continue;
                 }
-                let value = if state != 5 {
-                    Field::Withheld(state as u32)
+                let value = if state == 5 {
+                    self.record_field(index, field)?
                 } else {
-                    match field {
-                        fields::HOME
-                        | fields::SHELL
-                        | fields::DISPLAY_NAME
-                        | fields::DESCRIPTION => Field::Text(copy_text(read(|out| {
-                            sys::peios_auth_record_text(self.handle.as_ptr(), index, field, out)
-                        })?)),
-                        fields::UNIX_ID | fields::ENABLED | fields::LOGON_TYPES => {
-                            Field::Number(read(|out| {
-                                sys::peios_auth_record_number(
-                                    self.handle.as_ptr(),
-                                    index,
-                                    field,
-                                    out,
-                                )
-                            })?)
-                        }
-                        fields::PRIMARY_GROUP | fields::GROUPS | fields::MEMBERS => {
-                            Field::References(self.references(index, field)?)
-                        }
-                        fields::CLAIMS => Field::Claims(self.claims(index)?),
-                        _ => return Err(invalid()),
-                    }
+                    Field::Withheld(state as u32)
                 };
                 values.insert(field, value);
             }
@@ -220,6 +201,30 @@ impl Operation {
             })
         }
     }
+    fn record_field(&self, index: usize, field: u32) -> Result<Field, Error> {
+        // SAFETY: the operation remains immutably borrowed; getters validate the
+        // record index and field, initialize outputs, and return readable views.
+        unsafe {
+            match field {
+                fields::HOME | fields::SHELL | fields::DISPLAY_NAME | fields::DESCRIPTION => {
+                    Ok(Field::Text(copy_text(read(|out| {
+                        sys::peios_auth_record_text(self.handle.as_ptr(), index, field, out)
+                    })?)))
+                }
+                fields::UNIX_ID | fields::ENABLED | fields::LOGON_TYPES => {
+                    Ok(Field::Number(read(|out| {
+                        sys::peios_auth_record_number(self.handle.as_ptr(), index, field, out)
+                    })?))
+                }
+                fields::PRIMARY_GROUP | fields::GROUPS | fields::MEMBERS => {
+                    Ok(Field::References(self.references(index, field)?))
+                }
+                fields::CLAIMS => Ok(Field::Claims(self.claims(index)?)),
+                _ => Err(invalid()),
+            }
+        }
+    }
+
     fn references(&self, index: usize, field: u32) -> Result<Vec<Reference>, Error> {
         // SAFETY: all views are read from one immutable operation and copied.
         unsafe {
@@ -280,6 +285,7 @@ impl Operation {
             Ok(claims)
         }
     }
+    /// Copy the completed self-account profile and enrolled public keys.
     pub fn account(&self) -> Result<Account, Error> {
         // SAFETY: all getters borrow a live immutable operation and all returned
         // spans are copied before any mutation or destruction can take place.

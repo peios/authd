@@ -238,8 +238,8 @@ mod tests {
             "S-1-5-19",
             "S-1-5-20",
         ] {
-            let id = built_in(sid(text).as_ref())
-                .unwrap_or_else(|| panic!("{text} must have a number"));
+            let id =
+                built_in(sid(text).as_ref()).unwrap_or_else(|| panic!("{text} must have a number"));
             assert!(id < RESERVED, "{text} must be inside authd's own band");
         }
     }
@@ -356,7 +356,10 @@ mod tests {
 
         let projection = project(Some(&range()), 1, developers.as_ref(), &groups);
         assert_eq!(projection.uid, 1_000_001);
-        assert_eq!(projection.gid, 1_000_005, "the primary group is the local one");
+        assert_eq!(
+            projection.gid, 1_000_005,
+            "the primary group is the local one"
+        );
         assert_eq!(
             projection.supplementary,
             vec![102, 1_000_005],
@@ -481,7 +484,10 @@ mod tests {
     fn the_well_known_numbers_are_below_the_source_band() {
         for sid in crate::well_known::numbered() {
             let id = crate::well_known::unix_id(sid.as_ref()).expect("numbered");
-            assert!(id < RESERVED, "{sid} at {id} is inside the band sources can reach");
+            assert!(
+                id < RESERVED,
+                "{sid} at {id} is inside the band sources can reach"
+            );
         }
     }
 }

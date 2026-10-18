@@ -1330,7 +1330,9 @@ mod tests {
 
         // Neither opening decodes as the other.
         assert!(decode_change_credential(&bytes).is_err());
-        assert!(decode_enroll_credential(&encode_change_credential(9, &change()).unwrap()).is_err());
+        assert!(
+            decode_enroll_credential(&encode_change_credential(9, &change()).unwrap()).is_err()
+        );
         for cut in 0..bytes.len() {
             assert!(decode_enroll_credential(&bytes[..cut]).is_err());
         }
@@ -1357,7 +1359,9 @@ mod tests {
         assert!(!Capabilities::CHANGES_CREDENTIALS.contains(Capabilities::ENROLLS_CREDENTIALS));
         let register = Register {
             source_name: "lpsd".into(),
-            domain: vec![1, 4, 0, 0, 0, 0, 0, 5, 21, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0, 3, 0, 0, 0],
+            domain: vec![
+                1, 4, 0, 0, 0, 0, 0, 5, 21, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0, 3, 0, 0, 0,
+            ],
             capabilities: Capabilities::CHANGES_CREDENTIALS | Capabilities::ENROLLS_CREDENTIALS,
             entry_ttl: 0,
             max_batch: 1,

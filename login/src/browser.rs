@@ -6,6 +6,10 @@ use std::net::{IpAddr, SocketAddr};
 use peios::registry::{Key, KeyAccess, OpenFlags, ValueType};
 
 const FINGERPRINT: &str = "/var/state/gxwi/certificate.sha256";
+const FINGERPRINT_READ_LIMIT_BYTES: u64 = 256;
+const SHA256_BYTES: usize = 32;
+const FINGERPRINT_TEXT_BYTES: usize = SHA256_BYTES * 3 - 1;
+const DEFAULT_GXWI_PORT: u16 = 7780;
 
 pub(super) fn announce() {
     if !std::path::Path::new("/usr/bin/gxwid").exists() {
@@ -13,7 +17,10 @@ pub(super) fn announce() {
     }
     let mut text = String::new();
     let fingerprint = std::fs::File::open(FINGERPRINT)
-        .and_then(|file| file.take(256).read_to_string(&mut text))
+        .and_then(|file| {
+            file.take(FINGERPRINT_READ_LIMIT_BYTES)
+                .read_to_string(&mut text)
+        })
         .ok()
         .and_then(|_| fingerprint(&text));
     let listen = listen();
@@ -23,7 +30,7 @@ pub(super) fn announce() {
 
 fn fingerprint(text: &str) -> Option<&str> {
     let text = text.trim();
-    (text.len() == 95
+    (text.len() == FINGERPRINT_TEXT_BYTES
         && text.bytes().enumerate().all(|(i, byte)| {
             if i % 3 == 2 {
                 byte == b':'
@@ -51,7 +58,7 @@ fn listen() -> SocketAddr {
         std::str::from_utf8(bytes).ok()?.trim().parse().ok()
     })();
     // gxwid's own fallback when Listen is absent or malformed (gxwi.regman).
-    configured.unwrap_or_else(|| SocketAddr::from(([127, 0, 0, 1], 7780)))
+    configured.unwrap_or_else(|| SocketAddr::from(([127, 0, 0, 1], DEFAULT_GXWI_PORT)))
 }
 
 fn browser_addresses(listen: SocketAddr, mut addresses: Vec<IpAddr>) -> Vec<IpAddr> {

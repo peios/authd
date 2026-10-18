@@ -65,7 +65,7 @@ pub enum Paged {
 }
 
 /// What a lookup produced, in the terms an NSS entry point answers in.
-pub enum Found {
+pub enum Lookup {
     Record(Box<Record>),
     /// No such object, authoritatively.
     NotFound,
@@ -86,37 +86,36 @@ fn transient(failure: &Failure) -> bool {
 
 impl Client {
     pub fn open() -> io::Result<Self> {
-        Ident::new().with_timeout(TIMEOUT).session().map(Client).map_err(io::Error::from)
+        Ident::new()
+            .with_timeout(TIMEOUT)
+            .session()
+            .map(Client)
+            .map_err(io::Error::from)
     }
 
-    pub fn lookup(&mut self, key: ident::Key, kind: Kind, fields: Fields) -> Found {
+    pub fn lookup(&mut self, key: ident::Key, kind: Kind, fields: Fields) -> Lookup {
         match self.0.lookup(key, kind, fields) {
-            Ok(Some(record)) => Found::Record(Box::new(record)),
-            Ok(None) => Found::NotFound,
-            Err(failure) if transient(&failure) => Found::TryAgain,
-            Err(_) => Found::Unavailable,
+            Ok(Some(record)) => Lookup::Record(Box::new(record)),
+            Ok(None) => Lookup::NotFound,
+            Err(failure) if transient(&failure) => Lookup::TryAgain,
+            Err(_) => Lookup::Unavailable,
         }
     }
 
     /// One page of an enumeration, or why there is not one.
     ///
-    /// Flattening every non-`Found` outcome *and* every transport failure into
+    /// Flattening every non-`Lookup` outcome *and* every transport failure into
     /// `None` made an authority answering `Unavailable` mid-walk, or a socket
     /// that closed, indistinguishable from having reached the last principal —
     /// `getpwent_r` then returned `NotFound` and glibc read it as the end of
     /// the enumeration.
     ///
     /// The single-lookup path was already careful about exactly this (see
-    /// [`Found`]); the enumeration path threw it away at a scale where it
+    /// [`Lookup`]); the enumeration path threw it away at a scale where it
     /// matters more. One lookup failing softly affects one principal; a walk
     /// failing softly makes `getent passwd` print a short list that looks
     /// complete, for every principal at once, with nothing recording it.
-    pub fn enumerate(
-        &mut self,
-        kind: Kind,
-        fields: Fields,
-        cursor: &[u8],
-    ) -> Paged {
+    pub fn enumerate(&mut self, kind: Kind, fields: Fields, cursor: &[u8]) -> Paged {
         // A NotFound has no meaning for a walk, and the session reports it as
         // a refusal like the rest: the one thing that must never happen is a
         // failure reading as the end.

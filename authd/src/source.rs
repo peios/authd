@@ -46,8 +46,7 @@ use std::time::Duration;
 use auth_core::psi;
 use auth_core::transport::send_message;
 use auth_core::wire::{
-    CredentialChangeStart, CredentialEnrollStart, CredentialRequest, CredentialResponse,
-    LogonStart,
+    CredentialChangeStart, CredentialEnrollStart, CredentialRequest, CredentialResponse, LogonStart,
 };
 use peios::security::{Sid, SidRef};
 
@@ -56,7 +55,7 @@ use crate::policy;
 use crate::unix_id;
 
 /// How many sources may be registered at once.
-pub const MAX_SOURCES: usize = 8;
+const MAX_SOURCES: usize = 8;
 
 /// How many logons one source may have in flight.
 ///
@@ -589,13 +588,16 @@ impl Registry {
     /// cacheable absence — the moment it went away.
     pub fn configured_range(&self, unix_id: u32) -> Option<Configured> {
         let configured = self.configured.lock().unwrap_or_else(|e| e.into_inner());
-        configured.iter().cloned().find(|entry| {
-            entry.unix_id_range.is_some_and(|range| {
-                unix_id
-                    .checked_sub(range.base)
-                    .is_some_and(|relative| relative != 0 && relative < range.count)
+        configured
+            .iter()
+            .find(|entry| {
+                entry.unix_id_range.is_some_and(|range| {
+                    unix_id
+                        .checked_sub(range.base)
+                        .is_some_and(|relative| relative != 0 && relative < range.count)
+                })
             })
-        })
+            .cloned()
     }
 
     /// Every configured source that is not currently registered.
@@ -652,11 +654,11 @@ impl Registry {
 
         match first_declared.get(source.name()) {
             Some(before) if before.as_ref().as_bytes() != source.domain().as_ref().as_bytes() => {
-                return Err(Rejected::DomainChanged(before.clone()));
+                return Err(Rejected::DomainChanged(*before));
             }
             Some(_) => {}
             None => {
-                first_declared.insert(source.name().to_string(), source.domain().clone());
+                first_declared.insert(source.name().to_string(), *source.domain());
             }
         }
 
@@ -1062,16 +1064,16 @@ fn verify_domain(declared: &[u8], entry: &policy::SourceEntry) -> Option<Sid> {
         return None;
     }
 
-    if let Some(pinned) = &entry.pinned_domain {
-        if pinned.as_ref().as_bytes() != domain.as_bytes() {
-            log::error(format_args!(
-                "psi: refused {}: it declared {domain} but {}\\{} pins {pinned}",
-                entry.name,
-                policy::SOURCES_KEY,
-                entry.name
-            ));
-            return None;
-        }
+    if let Some(pinned) = &entry.pinned_domain
+        && pinned.as_ref().as_bytes() != domain.as_bytes()
+    {
+        log::error(format_args!(
+            "psi: refused {}: it declared {domain} but {}\\{} pins {pinned}",
+            entry.name,
+            policy::SOURCES_KEY,
+            entry.name
+        ));
+        return None;
     }
 
     Some(domain.to_sid())

@@ -53,7 +53,7 @@ const STAGING_SUFFIX: &str = ".new";
 /// looks like to anything reading the inode without KACS in the path — a
 /// recovery shell, a backup tool, an image mounted elsewhere. Belt and braces,
 /// and free.
-pub const STORE_MODE: u32 = 0o600;
+const STORE_MODE: u32 = 0o600;
 
 /// The filesystem operations a durable replacement needs, and nothing else.
 ///
@@ -100,18 +100,12 @@ fn staging_path(path: &Path) -> io::Result<PathBuf> {
     Ok(path.with_file_name(staged))
 }
 
-/// Replace `path`'s contents durably, or leave the previous contents entirely
-/// intact.
+/// Replace `path`'s contents and synchronize the containing directory.
 ///
-/// On any failure before the rename the target is untouched — that is the
-/// property this function exists to provide, and it is why the caller can treat
-/// a failed save as "nothing happened" rather than as an unknown state.
-///
-/// A failure at the final directory sync is different and is reported as such:
-/// the new contents *are* in place, they are merely not yet known to have
-/// survived a power loss. Callers should treat that as fatal rather than
-/// retrying, since a filesystem that cannot sync will not sync on the retry
-/// either.
+/// Failures before rename leave the target untouched. A final directory-sync
+/// failure occurs after the new contents are installed, with durability still
+/// unknown. Both cases return an I/O error; callers cannot infer rollback from
+/// `Err` alone. Distinguishing these outcomes in callers is tracked in PEI-1518.
 pub fn replace<F: Fs>(
     fs: &F,
     path: &Path,
@@ -227,8 +221,10 @@ impl Fs for RealFs {
         remove_stale_stage(path)?;
         let file = OpenOptions::new()
             .desired_access(
-                FileAccess::WRITE_DATA | FileAccess::WRITE_ATTRIBUTES
-                    | FileAccess::WRITE_DAC | FileAccess::SYNCHRONIZE,
+                FileAccess::WRITE_DATA
+                    | FileAccess::WRITE_ATTRIBUTES
+                    | FileAccess::WRITE_DAC
+                    | FileAccess::SYNCHRONIZE,
             )
             .disposition(Disposition::Create)
             .creator_sd(sd)
@@ -703,9 +699,12 @@ mod real_tests {
                 symlink(&victim, &stage).unwrap();
             }
             replace(
-                &RealFsWithoutSd, &store, b"credentials",
+                &RealFsWithoutSd,
+                &store,
+                b"credentials",
                 &crate::store::store_descriptor().unwrap(),
-            ).unwrap();
+            )
+            .unwrap();
             assert_eq!(std::fs::read(victim).unwrap(), b"untouched");
             assert_eq!(std::fs::read(store).unwrap(), b"credentials");
         }

@@ -102,10 +102,11 @@ impl KeyType {
 /// `getgrnam` may be asked the same string and expect different objects.
 /// Carrying the kind on the request is what serves both correctly without
 /// requiring an authority to forbid the collision.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum Kind {
     Any = 0,
+    #[default]
     Principal = 1,
     Group = 2,
 }
@@ -263,7 +264,9 @@ impl Fields {
     ///
     /// The order values appear in on the wire.
     pub fn iter(self) -> impl Iterator<Item = Fields> {
-        (0..u32::BITS).map(Fields::bit).filter(move |b| self.contains(*b))
+        (0..u32::BITS)
+            .map(Fields::bit)
+            .filter(move |b| self.contains(*b))
     }
 
     const fn bit(index: u32) -> Fields {
@@ -384,12 +387,6 @@ pub struct Record {
     /// In ascending field order.
     pub values: Vec<Value>,
     pub withheld: Vec<Withheld>,
-}
-
-impl Default for Kind {
-    fn default() -> Self {
-        Kind::Principal
-    }
 }
 
 impl Record {
@@ -960,11 +957,16 @@ mod tests {
         let decoded = decoded.record.unwrap();
 
         assert!(decoded.value(Fields::UNIX_ID).is_some());
-        assert_eq!(decoded.reason(Fields::MEMBERS), Some(WithheldReason::Declined));
+        assert_eq!(
+            decoded.reason(Fields::MEMBERS),
+            Some(WithheldReason::Declined)
+        );
         assert!(decoded.value(Fields::CLAIMS).is_none());
         assert!(decoded.reason(Fields::CLAIMS).is_none());
         assert!(
-            requested.difference(decoded.present()).contains(Fields::CLAIMS),
+            requested
+                .difference(decoded.present())
+                .contains(Fields::CLAIMS),
             "an unanswered field must be distinguishable from an answered one"
         );
     }
@@ -994,7 +996,10 @@ mod tests {
 
         let decoded = decode_lookup_reply(&w.finish().unwrap()).unwrap();
         let decoded = decoded.record.unwrap();
-        assert_eq!(decoded.value(Fields::UNIX_ID), Some(&Value::UnixId(1_001_000)));
+        assert_eq!(
+            decoded.value(Fields::UNIX_ID),
+            Some(&Value::UnixId(1_001_000))
+        );
         assert_eq!(
             decoded.value(Fields::ENABLED),
             Some(&Value::Enabled(true)),

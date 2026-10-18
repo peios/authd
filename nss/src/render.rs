@@ -20,7 +20,7 @@ fn unix_id(record: &Record, field: Fields) -> u32 {
     }
 }
 
-fn text<'a>(record: &'a Record, field: Fields) -> &'a str {
+fn text(record: &Record, field: Fields) -> &str {
     match record.value(field) {
         Some(Value::Home(value) | Value::Shell(value) | Value::DisplayName(value)) => value,
         _ => "",
@@ -216,7 +216,10 @@ mod tests {
         let mut buf = [0i8; 512];
         let mut packer = unsafe { Packer::new(buf.as_mut_ptr(), buf.len()) };
         let entry = group(
-            &group_record(vec![reference("jack", 1_001_000), reference("ada", 1_001_002)]),
+            &group_record(vec![
+                reference("jack", 1_001_000),
+                reference("ada", 1_001_002),
+            ]),
             &mut packer,
         )
         .expect("must fit");

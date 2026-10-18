@@ -240,7 +240,11 @@ pub(crate) fn open_body<'a>(
 }
 
 pub(crate) fn non_empty(s: &str) -> Option<String> {
-    if s.is_empty() { None } else { Some(s.to_owned()) }
+    if s.is_empty() {
+        None
+    } else {
+        Some(s.to_owned())
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -360,6 +364,8 @@ impl Writer {
 /// returned [`crate::secret::Secret`] does.
 pub(crate) fn wipe(mut buf: Vec<u8>) {
     for byte in buf.iter_mut() {
+        // SAFETY: byte is exclusively borrowed from the live buffer. Volatile stores
+        // preserve the wipe even though the allocation is released immediately after.
         unsafe { core::ptr::write_volatile(byte, 0) };
     }
     core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);

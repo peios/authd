@@ -862,16 +862,28 @@ mod tests {
     use super::*;
 
     fn ask(store: &mut Store, msg_type: u16, message: &[u8]) -> Result<Vec<u8>, Failure> {
-        dispatch(store, psi::Registered::default(), msg_type, message, &mut None)
-            .map(|(_, reply)| reply)
-            .map_err(|refused| refused.failure())
+        dispatch(
+            store,
+            psi::Registered::default(),
+            msg_type,
+            message,
+            &mut None,
+        )
+        .map(|(_, reply)| reply)
+        .map_err(|refused| refused.failure())
     }
 
     /// What a request would be recorded as, and whether it was refused.
     fn act_of(store: &mut Store, msg_type: u16, message: &[u8]) -> (Option<Act>, bool) {
         let mut act = None;
-        let refused = dispatch(store, psi::Registered::default(), msg_type, message, &mut act)
-            .is_err();
+        let refused = dispatch(
+            store,
+            psi::Registered::default(),
+            msg_type,
+            message,
+            &mut act,
+        )
+        .is_err();
         (act, refused)
     }
 
@@ -897,7 +909,10 @@ mod tests {
         let record = act.record(admin.as_ref(), None);
         assert_eq!(record.get("subject.token.sid"), Some(&bin(&admin)));
         assert_eq!(record.get("object.account.sid"), Some(&bin(&dana_sid)));
-        assert_eq!(record.get("outcome.success"), Some(&audit::Value::Bool(true)));
+        assert_eq!(
+            record.get("outcome.success"),
+            Some(&audit::Value::Bool(true))
+        );
         // A creation that failed names nothing it did not create.
         let failed = act.record(admin.as_ref(), Some("not-saved"));
         assert_eq!(failed.get("object.account.sid"), None);

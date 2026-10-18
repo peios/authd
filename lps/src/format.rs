@@ -77,7 +77,11 @@ pub fn listing(principals: &[Summary]) -> String {
             principal.name,
             principal.rid,
             unix_id(principal.unix_id),
-            if principal.enabled { "enabled" } else { "disabled" },
+            if principal.enabled {
+                "enabled"
+            } else {
+                "disabled"
+            },
             principal.groups,
         ));
     }
@@ -98,13 +102,33 @@ pub fn groups(groups: &[GroupSummary]) -> String {
         .max("NAME".len());
 
     // The description goes last, where a long one can run on.
-    let sid_width = groups.iter().map(|group| sid(&group.sid).len()).max().unwrap_or(0);
+    let sid_width = groups
+        .iter()
+        .map(|group| sid(&group.sid).len())
+        .max()
+        .unwrap_or(0);
     let described = groups.iter().any(|group| !group.description.is_empty());
     let line = |name: &str, rid: &str, gid: &str, members: &str, at: &str, description: &str| {
-        let line = format!("{name:<width$}  {rid:>6}  {gid:>8}  {members:>7}  {at:<sid_width$}  {description}");
-        format!("{}\n", if described { line.as_str() } else { line.trim_end() })
+        let line = format!(
+            "{name:<width$}  {rid:>6}  {gid:>8}  {members:>7}  {at:<sid_width$}  {description}"
+        );
+        format!(
+            "{}\n",
+            if described {
+                line.as_str()
+            } else {
+                line.trim_end()
+            }
+        )
     };
-    let mut out = line("NAME", "RID", "GID", "MEMBERS", "SID", if described { "DESCRIPTION" } else { "" });
+    let mut out = line(
+        "NAME",
+        "RID",
+        "GID",
+        "MEMBERS",
+        "SID",
+        if described { "DESCRIPTION" } else { "" },
+    );
     for group in groups {
         out.push_str(&line(
             &group.name,
@@ -176,11 +200,7 @@ fn claim(claim: &Claim) -> String {
     } else {
         values.join(", ")
     };
-    format!(
-        "{} ({}) = {rendered}",
-        claim.name,
-        claim.values.type_name()
-    )
+    format!("{} ({}) = {rendered}", claim.name, claim.values.type_name())
 }
 
 /// `lps show`.
@@ -200,12 +220,20 @@ pub fn detail(principal: &Detail) -> String {
     field(
         &mut out,
         "state",
-        if principal.enabled { "enabled" } else { "disabled" },
+        if principal.enabled {
+            "enabled"
+        } else {
+            "disabled"
+        },
     );
     field(&mut out, "primary group", &group(&principal.primary_group));
     field(&mut out, "home", &principal.home);
     field(&mut out, "shell", &principal.shell);
-    field(&mut out, "logon types", &logon_types(principal.permitted_logon_types));
+    field(
+        &mut out,
+        "logon types",
+        &logon_types(principal.permitted_logon_types),
+    );
     // Absent from a daemon that predates it, and then better unsaid than
     // guessed.
     if let Some(policy) = principal.credential_policy {
@@ -252,7 +280,11 @@ fn date(seconds: u64) -> String {
     let of_year = of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
     let shifted_month = (5 * of_year + 2) / 153;
     let day = of_year - (153 * shifted_month + 2) / 5 + 1;
-    let month = if shifted_month < 10 { shifted_month + 3 } else { shifted_month - 9 };
+    let month = if shifted_month < 10 {
+        shifted_month + 3
+    } else {
+        shifted_month - 9
+    };
     let year = year_of_era + era * 400 + i64::from(month <= 2);
     format!("{year:04}-{month:02}-{day:02}")
 }
@@ -265,9 +297,17 @@ pub fn keys(policy: Policy, keys: &[KeyInfo]) -> String {
         out.push_str("no keys\n");
         return out;
     }
-    let width = keys.iter().map(|key| key.fingerprint.len()).max().unwrap_or(0).max("FINGERPRINT".len());
+    let width = keys
+        .iter()
+        .map(|key| key.fingerprint.len())
+        .max()
+        .unwrap_or(0)
+        .max("FINGERPRINT".len());
     let line = |id: &str, fingerprint: &str, added: &str, label: &str| {
-        format!("{}\n", format!("{id:<32}  {fingerprint:<width$}  {added:<10}  {label}").trim_end())
+        format!(
+            "{}\n",
+            format!("{id:<32}  {fingerprint:<width$}  {added:<10}  {label}").trim_end()
+        )
     };
     out.push_str(&line("ID", "FINGERPRINT", "ADDED", "LABEL"));
     for key in keys {
@@ -354,10 +394,7 @@ mod tests {
             ..summary("jack", 1000, true)
         }]);
         assert!(listing.contains(" - "), "{listing}");
-        assert!(
-            !listing.contains(" 0 "),
-            "0 would read as root: {listing}"
-        );
+        assert!(!listing.contains(" 0 "), "0 would read as root: {listing}");
     }
 
     #[test]
@@ -439,9 +476,19 @@ mod tests {
         };
         let plain = groups(std::slice::from_ref(&developers));
         assert!(!plain.contains("DESCRIPTION"), "{plain}");
-        assert!(plain.lines().all(|line| line == line.trim_end()), "{plain:?}");
+        assert!(
+            plain.lines().all(|line| line == line.trim_end()),
+            "{plain:?}"
+        );
 
-        let described = groups(&[developers, GroupSummary { name: "ops".into(), description: "Keeps it running".into(), ..GroupSummary::default() }]);
+        let described = groups(&[
+            developers,
+            GroupSummary {
+                name: "ops".into(),
+                description: "Keeps it running".into(),
+                ..GroupSummary::default()
+            },
+        ]);
         let lines: Vec<&str> = described.lines().collect();
         assert!(lines[0].ends_with("DESCRIPTION"), "{described}");
         assert!(lines[2].ends_with("Keeps it running"), "{described}");
@@ -451,12 +498,23 @@ mod tests {
     fn keys_are_listed_with_the_policy_in_words_and_the_day_each_was_added() {
         let listed = keys(
             Policy::PasswordOrKey,
-            &[KeyInfo { id: [0xab; 16], fingerprint: "SHA256:abc".into(), label: "laptop".into(), created: 1_791_072_000 }],
+            &[KeyInfo {
+                id: [0xab; 16],
+                fingerprint: "SHA256:abc".into(),
+                label: "laptop".into(),
+                created: 1_791_072_000,
+            }],
         );
         let lines: Vec<&str> = listed.lines().collect();
         assert_eq!(lines[0], "credential  either");
-        assert!(lines[1].starts_with("ID ") && lines[1].ends_with("LABEL"), "{listed}");
-        assert_eq!(lines[2], format!("{}  SHA256:abc   2026-10-04  laptop", "ab".repeat(16)));
+        assert!(
+            lines[1].starts_with("ID ") && lines[1].ends_with("LABEL"),
+            "{listed}"
+        );
+        assert_eq!(
+            lines[2],
+            format!("{}  SHA256:abc   2026-10-04  laptop", "ab".repeat(16))
+        );
         assert_eq!(keys(Policy::Denied, &[]), "credential  denied\nno keys\n");
         assert_eq!(date(0), "1970-01-01");
         assert_eq!(date(951_782_400), "2000-02-29");
@@ -480,9 +538,15 @@ mod tests {
             sid: jack(),
             ..Detail::default()
         });
-        assert!(rendered.contains("logon types    default (interactive,"), "{rendered}");
+        assert!(
+            rendered.contains("logon types    default (interactive,"),
+            "{rendered}"
+        );
         assert!(!rendered.contains("service"), "{rendered}");
-        assert!(!rendered.contains("\ncredential "), "an unsaid policy is not guessed: {rendered}");
+        assert!(
+            !rendered.contains("\ncredential "),
+            "an unsaid policy is not guessed: {rendered}"
+        );
     }
 
     #[test]
@@ -514,7 +578,10 @@ mod tests {
             values: Values::String(Vec::new()),
         });
         assert!(rendered.contains("no values"), "{rendered}");
-        assert!(rendered.contains("string"), "the type is still worth showing");
+        assert!(
+            rendered.contains("string"),
+            "the type is still worth showing"
+        );
     }
 
     #[test]
@@ -523,6 +590,9 @@ mod tests {
         // omitting it would understate what the principal actually holds.
         let rendered = sid(b"not a sid");
         assert!(rendered.contains("unreadable"), "{rendered}");
-        assert!(rendered.contains('9'), "the length is worth reporting: {rendered}");
+        assert!(
+            rendered.contains('9'),
+            "the length is worth reporting: {rendered}"
+        );
     }
 }

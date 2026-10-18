@@ -3,7 +3,7 @@
 set -euo pipefail
 here=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 if [[ $(uname -s) != Linux || $(uname -m) != x86_64 ]]; then
-    echo 'Authd builds require x86_64 Linux.' >&2
+    echo "Authd builds require x86_64 Linux." >&2
     exit 1
 fi
 version=$(cat "$here/.bazelversion")
@@ -15,7 +15,7 @@ valid() {
 }
 if ! valid "$binary"; then
     if [[ -n ${PEIOS_BAZEL_BINARY:-} ]]; then
-        echo 'The supplied Bazel binary does not match build/bazel.sha256.' >&2
+        echo "The supplied Bazel binary does not match build/bazel.sha256." >&2
         exit 1
     fi
     mkdir -p "$cache"
@@ -24,7 +24,7 @@ if ! valid "$binary"; then
     curl --fail --location --proto '=https' --tlsv1.2 \
         "https://releases.bazel.build/$version/release/bazel-$version-linux-x86_64" -o "$temp"
     valid "$temp" || {
-        echo 'Bazel download checksum mismatch.' >&2
+        echo "Bazel download checksum mismatch." >&2
         exit 1
     }
     chmod 755 "$temp"

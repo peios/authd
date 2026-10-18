@@ -1,47 +1,17 @@
 #!/usr/bin/env python3
-"""Check C/Rust layouts, exact public exports, SONAME and a linked C caller."""
+"""Check C/Rust layouts, exact public exports, SONAME, and a linked C caller."""
+
 import os
-from pathlib import Path
 import re
 import subprocess
 import sys
 import tempfile
+from collections.abc import Mapping
+from pathlib import Path
 
-root = Path(__file__).absolute().parents[1]
-library = Path(sys.argv[1]).resolve()
+ROOT = Path(__file__).absolute().parents[1]
 
-def run(*args, **kwargs):
-    return subprocess.run(args, check=True, text=True, capture_output=True, **kwargs).stdout
-
-exports = run("nm", "-D", "--defined-only", str(library / "libauth.so.1"))
-actual = sorted(line.split()[-1] for line in exports.splitlines() if line.split())
-expected = (root / "libauth/exports.txt").read_text().splitlines()
-assert actual == expected, (actual, expected)
-assert "[libauth.so.1]" in run("readelf", "-d", str(library / "libauth.so.1"))
-source = (root / "auth-abi/src/lib.rs").read_text()
-structs = re.findall(r"pub struct (\w+)\s*\{(.*?)\}", source, re.S)
-c_lines = ['#include <stdio.h>', '#include <peios/auth.h>', 'int main(void) {']
-rust_lines = ['#[allow(dead_code)]', f'#[path = "{root}/auth-abi/src/lib.rs"] mod abi;', 'fn main() {']
-for name, body in structs:
-    c_name = "peios_auth_" + re.sub(r"(?<!^)(?=[A-Z])", "_", name).lower()
-    fields = re.findall(r"pub (\w+):", body)
-    c_lines.append(f'printf("{name} %zu %zu", sizeof({c_name}), _Alignof({c_name}));')
-    rust_lines.append(f'print!("{name} {{}} {{}}", size_of::<abi::{name}>(), align_of::<abi::{name}>());')
-    for field in fields:
-        c_lines.append(f'printf(" %zu", offsetof({c_name}, {field}));')
-        rust_lines.append(f'print!(" {{}}", std::mem::offset_of!(abi::{name}, {field}));')
-    c_lines.append('puts("");')
-    rust_lines.append('println!();')
-c_lines.append('}')
-rust_lines.append('}')
-with tempfile.TemporaryDirectory(prefix="auth-abi-") as directory:
-    tmp = Path(directory)
-    (tmp / "layout.c").write_text("\n".join(c_lines))
-    (tmp / "layout.rs").write_text("\n".join(rust_lines))
-    run("cc", "-std=c11", "-Wall", "-Wextra", "-Werror", "-I" + str(root / "libauth/include"), str(tmp / "layout.c"), "-o", str(tmp / "layout-c"))
-    run(os.environ.get("RUSTC", "rustc"), "--edition=2024", str(tmp / "layout.rs"), "-o", str(tmp / "layout-rust"))
-    assert run(str(tmp / "layout-c")) == run(str(tmp / "layout-rust")), "C/Rust layout mismatch"
-    (tmp / "caller.c").write_text(r'''
+CALLER_SOURCE = r"""
 #include <assert.h>
 #include <string.h>
 #include <peios/auth.h>
@@ -69,9 +39,105 @@ int main(int argc, char **argv) {
     peios_auth_client_destroy(NULL);
     return 0;
 }
-''')
-    run("cc", "-std=c11", "-Wall", "-Wextra", "-Werror", "-I" + str(root / "libauth/include"), str(tmp / "caller.c"), "-L" + str(library), "-lauth", "-o", str(tmp / "caller"))
+"""
+
+
+def run(*args: str, env: Mapping[str, str] | None = None) -> str:
+    """Capture a successful command; propagate failure with its captured output."""
+    return subprocess.run(args, check=True, text=True, capture_output=True, env=env).stdout
+
+
+def layout_sources() -> tuple[str, str, int]:
+    """Generate independent C and Rust probes for each declared layout."""
+    source = (ROOT / "auth-abi/src/lib.rs").read_text()
+    structs = re.findall(r"pub struct (\w+)\s*\{(.*?)\}", source, re.S)
+    c_lines = ["#include <stdio.h>", "#include <peios/auth.h>", "int main(void) {"]
+    rust_lines = [
+        "#[allow(dead_code)]",
+        f'#[path = "{ROOT}/auth-abi/src/lib.rs"] mod abi;',
+        "fn main() {",
+    ]
+    for name, body in structs:
+        c_name = "peios_auth_" + re.sub(r"(?<!^)(?=[A-Z])", "_", name).lower()
+        fields = re.findall(r"pub (\w+):", body)
+        c_lines.append(f'printf("{name} %zu %zu", sizeof({c_name}), _Alignof({c_name}));')
+        rust_lines.append(
+            f'print!("{name} {{}} {{}}", size_of::<abi::{name}>(), align_of::<abi::{name}>());'
+        )
+        for field in fields:
+            c_lines.append(f'printf(" %zu", offsetof({c_name}, {field}));')
+            rust_lines.append(f'print!(" {{}}", std::mem::offset_of!(abi::{name}, {field}));')
+        c_lines.append('puts("");')
+        rust_lines.append("println!();")
+    c_lines.append("}")
+    rust_lines.append("}")
+    return "\n".join(c_lines), "\n".join(rust_lines), len(structs)
+
+
+def check_layouts(temporary: Path) -> int:
+    """Compile and compare size, alignment, and field offsets in both languages."""
+    c_source, rust_source, count = layout_sources()
+    (temporary / "layout.c").write_text(c_source)
+    (temporary / "layout.rs").write_text(rust_source)
+    run(
+        "cc",
+        "-std=c11",
+        "-Wall",
+        "-Wextra",
+        "-Werror",
+        "-I" + str(ROOT / "libauth/include"),
+        str(temporary / "layout.c"),
+        "-o",
+        str(temporary / "layout-c"),
+    )
+    run(
+        os.environ.get("RUSTC", "rustc"),
+        "--edition=2024",
+        str(temporary / "layout.rs"),
+        "-o",
+        str(temporary / "layout-rust"),
+    )
+    assert run(str(temporary / "layout-c")) == run(str(temporary / "layout-rust")), (
+        "C/Rust layout mismatch"
+    )
+    return count
+
+
+def check_caller(temporary: Path, library: Path) -> None:
+    """Exercise the installed shared library through its public C interface."""
+    (temporary / "caller.c").write_text(CALLER_SOURCE)
+    run(
+        "cc",
+        "-std=c11",
+        "-Wall",
+        "-Wextra",
+        "-Werror",
+        "-I" + str(ROOT / "libauth/include"),
+        str(temporary / "caller.c"),
+        "-L" + str(library),
+        "-lauth",
+        "-o",
+        str(temporary / "caller"),
+    )
     environment = dict(os.environ)
     environment["LD_LIBRARY_PATH"] = str(library) + ":" + environment.get("LD_LIBRARY_PATH", "")
-    run(str(tmp / "caller"), str(tmp / "absent.sock"), env=environment)
-print(f"Verified {len(structs)} C/Rust layouts, {len(expected)} exports, SONAME and linked C caller")
+    run(str(temporary / "caller"), str(temporary / "absent.sock"), env=environment)
+
+
+def main() -> None:
+    """Verify installed symbols, layouts, and linked behavior in disposable files."""
+    library = Path(sys.argv[1]).resolve()
+    exports = run("nm", "-D", "--defined-only", str(library / "libauth.so.1"))
+    actual = sorted(line.split()[-1] for line in exports.splitlines() if line.split())
+    expected = (ROOT / "libauth/exports.txt").read_text().splitlines()
+    assert actual == expected, (actual, expected)
+    assert "[libauth.so.1]" in run("readelf", "-d", str(library / "libauth.so.1"))
+    with tempfile.TemporaryDirectory(prefix="auth-abi-") as directory:
+        temporary = Path(directory)
+        count = check_layouts(temporary)
+        check_caller(temporary, library)
+    print(f"Verified {count} C/Rust layouts, {len(expected)} exports, SONAME and linked C caller")
+
+
+if __name__ == "__main__":
+    main()

@@ -68,9 +68,7 @@ const AT_SYMLINK_NOFOLLOW: i32 = 0x100;
 /// every tool that walks the tree. If that trade is ever revisited, this
 /// is the line to change.
 fn home_sddl(user: &SidRef) -> String {
-    format!(
-        "O:{user}G:{user}D:P(A;OICI;GA;;;{user})(A;OICI;GA;;;SY)(A;OICI;GA;;;BA)"
-    )
+    format!("O:{user}G:{user}D:P(A;OICI;GA;;;{user})(A;OICI;GA;;;SY)(A;OICI;GA;;;BA)")
 }
 
 /// Ensure `home` exists for `user`, creating it if it does not.
@@ -117,7 +115,9 @@ fn check_existing(user: &SidRef, home: &str, path: &Path) {
         return;
     };
     let Ok(sd) = SdView::parse(blob.as_bytes()) else {
-        log::warn(format_args!("home {home} for {user} has an unreadable descriptor"));
+        log::warn(format_args!(
+            "home {home} for {user} has an unreadable descriptor"
+        ));
         return;
     };
     match sd.owner() {

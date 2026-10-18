@@ -24,7 +24,10 @@ pub fn sz<'a>(ty: &ValueType, data: &'a [u8]) -> Option<&'a str> {
     if *ty != ValueType::SZ {
         return None;
     }
-    data.split(|&byte| byte == 0).next().and_then(|bytes| core::str::from_utf8(bytes).ok()).map(str::trim)
+    data.split(|&byte| byte == 0)
+        .next()
+        .and_then(|bytes| core::str::from_utf8(bytes).ok())
+        .map(str::trim)
 }
 
 /// Read a `REG_MULTI_SZ` as a list of strings.
@@ -78,7 +81,10 @@ mod tests {
     fn a_well_formed_dword_reads_back() {
         assert_eq!(dword(&ValueType::DWORD, &0u32.to_le_bytes()), Some(0));
         assert_eq!(dword(&ValueType::DWORD, &1u32.to_le_bytes()), Some(1));
-        assert_eq!(dword(&ValueType::DWORD, &0xdead_beefu32.to_le_bytes()), Some(0xdead_beef));
+        assert_eq!(
+            dword(&ValueType::DWORD, &0xdead_beefu32.to_le_bytes()),
+            Some(0xdead_beef)
+        );
     }
 
     /// A short "DWORD" must not be padded into a zero.
@@ -109,10 +115,19 @@ mod tests {
 
     #[test]
     fn a_multi_sz_splits_on_nul_and_drops_the_terminators() {
-        assert_eq!(multi_sz(&ValueType::MULTI_SZ, b"one\0two\0\0"), Some(vec!["one", "two"]));
+        assert_eq!(
+            multi_sz(&ValueType::MULTI_SZ, b"one\0two\0\0"),
+            Some(vec!["one", "two"])
+        );
         // A writer that omitted the final terminator must produce the same list.
-        assert_eq!(multi_sz(&ValueType::MULTI_SZ, b"one\0two"), Some(vec!["one", "two"]));
-        assert_eq!(multi_sz(&ValueType::MULTI_SZ, b"  one  \0two\0\0"), Some(vec!["one", "two"]));
+        assert_eq!(
+            multi_sz(&ValueType::MULTI_SZ, b"one\0two"),
+            Some(vec!["one", "two"])
+        );
+        assert_eq!(
+            multi_sz(&ValueType::MULTI_SZ, b"  one  \0two\0\0"),
+            Some(vec!["one", "two"])
+        );
     }
 
     /// "Grant nothing" is a successful read of an empty list, and must not be
@@ -135,7 +150,14 @@ mod tests {
         assert_eq!(sz(&ValueType::SZ, &encode_sz("High")), Some("High"));
         let list = encode_multi_sz(["SeBackupPrivilege", "SeRestorePrivilege"]);
         assert_eq!(list, b"SeBackupPrivilege\0SeRestorePrivilege\0\0");
-        assert_eq!(multi_sz(&ValueType::MULTI_SZ, &list), Some(vec!["SeBackupPrivilege", "SeRestorePrivilege"]));
-        assert_eq!(multi_sz(&ValueType::MULTI_SZ, &encode_multi_sz([])), Some(Vec::new()), "an empty list stays a list");
+        assert_eq!(
+            multi_sz(&ValueType::MULTI_SZ, &list),
+            Some(vec!["SeBackupPrivilege", "SeRestorePrivilege"])
+        );
+        assert_eq!(
+            multi_sz(&ValueType::MULTI_SZ, &encode_multi_sz([])),
+            Some(Vec::new()),
+            "an empty list stays a list"
+        );
     }
 }

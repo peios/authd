@@ -774,7 +774,7 @@ impl Store {
                 members: self
                     .principals
                     .iter()
-                    .filter(|p| p.groups.iter().any(|g| *g == sid))
+                    .filter(|p| p.groups.contains(&sid))
                     .count(),
                 sid,
                 description: group.description.clone(),
@@ -806,7 +806,6 @@ impl Store {
         })
     }
 
-    /// Describe a group SID as fully as this machine can.
     // -----------------------------------------------------------------------
     // Lookup: answering about principals outside a logon
     //
@@ -946,18 +945,19 @@ impl Store {
             .collect()
     }
 
+    /// Describe a group SID as fully as this machine can.
     fn group_ref(&self, sid: &Sid) -> GroupRef {
-        if let Some(rid) = self.rid_in_domain(sid.as_ref()) {
-            if let Some(group) = self.groups.iter().find(|g| g.rid == rid) {
-                return GroupRef {
-                    sid: sid.clone(),
-                    name: Some(group.name.clone()),
-                    unix_id: Some(group.unix_id),
-                };
-            }
+        if let Some(rid) = self.rid_in_domain(sid.as_ref())
+            && let Some(group) = self.groups.iter().find(|g| g.rid == rid)
+        {
+            return GroupRef {
+                sid: *sid,
+                name: Some(group.name.clone()),
+                unix_id: Some(group.unix_id),
+            };
         }
         GroupRef {
-            sid: sid.clone(),
+            sid: *sid,
             name: well_known_group_name(sid.as_ref()).map(str::to_string),
             unix_id: None,
         }
@@ -1309,7 +1309,7 @@ impl Store {
     /// Add a group membership. Returns whether anything changed.
     pub fn add_membership(&mut self, name: &str, group: Sid) -> Result<bool, StoreError> {
         let at = self.position(name)?;
-        if self.principals[at].groups.iter().any(|g| *g == group) {
+        if self.principals[at].groups.contains(&group) {
             return Ok(false);
         }
         if self.principals[at].groups.len() >= MAX_GROUPS {
@@ -1431,7 +1431,10 @@ impl Store {
     pub fn describe_group(&mut self, name: &str, description: &str) -> Result<bool, StoreError> {
         let description = check_description(description)?;
         let at = self.group_position(name)?;
-        Ok(core::mem::replace(&mut self.groups[at].description, description) != self.groups[at].description)
+        Ok(
+            core::mem::replace(&mut self.groups[at].description, description)
+                != self.groups[at].description,
+        )
     }
 
     /// Delete a local group.
@@ -1451,7 +1454,7 @@ impl Store {
         let members = self
             .principals
             .iter()
-            .filter(|p| p.groups.iter().any(|g| *g == sid))
+            .filter(|p| p.groups.contains(&sid))
             .count();
         if members > 0 {
             return Err(StoreError::Invalid(format!(
@@ -1660,7 +1663,8 @@ impl Store {
         } else if !principal.policy.password() || principal.verifier.is_none() {
             Err(Unverified::NotPermitted)
         } else {
-            self.identity_of(principal).ok_or(Unverified::WrongCredential)
+            self.identity_of(principal)
+                .ok_or(Unverified::WrongCredential)
         };
         Verification::of(account, result)
     }
@@ -1698,6 +1702,8 @@ impl Store {
         }
     }
 
+    /// Capture the account RID and credential revision for a pending SSH proof.
+    /// An unknown identifier has no generation.
     pub fn credential_generation(&self, identifier: &[u8]) -> Option<(u32, u64)> {
         self.principals
             .iter()
@@ -1705,6 +1711,8 @@ impl Store {
             .map(|p| (p.rid, p.credential_generation))
     }
 
+    /// Check that an enabled account permits SSH and holds this supported key.
+    /// This checks eligibility only; it does not verify the signature.
     pub fn key_eligible(&self, identifier: &[u8], offer: &auth_core::ssh::Offer) -> bool {
         self.principals
             .iter()
@@ -1717,6 +1725,8 @@ impl Store {
             })
     }
 
+    /// Authenticate a bound SSH proof against the captured credential revision.
+    /// Return no identity for an unknown, changed, disabled, or unverified account.
     pub fn authenticate_key(
         &self,
         binding: &auth_core::ssh::Binding,
@@ -1767,6 +1777,9 @@ impl Store {
         Verification::of(account, result)
     }
 
+    /// Change the in-memory policy and invalidate pending SSH proofs.
+    /// Reject an unknown account or a change blocked by the last-admin guard;
+    /// the caller remains responsible for saving an accepted change.
     pub fn set_credential_policy(&mut self, name: &str, policy: Policy) -> Result<(), StoreError> {
         let at = self.position(name)?;
         let p = &self.principals[at];
@@ -1778,14 +1791,20 @@ impl Store {
         Ok(())
     }
 
+    /// Read the policy, or report that the named account does not exist.
     pub fn credential_policy(&self, name: &str) -> Result<Policy, StoreError> {
         Ok(self.principals[self.position(name)?].policy)
     }
 
+    /// Borrow the enrolled keys, or report that the named account does not exist.
     pub fn keys(&self, name: &str) -> Result<&[PublicKey], StoreError> {
         Ok(&self.principals[self.position(name)?].keys)
     }
 
+    /// Enroll an OpenSSH key in memory without changing credential policy.
+    /// Reject unknown accounts, unsupported or duplicate keys, and invalid labels
+    /// or limits. Randomness and clock errors also fail enrollment. The caller
+    /// saves the accepted change; an empty label uses the key line's comment.
     pub fn add_key(
         &mut self,
         name: &str,
@@ -1793,14 +1812,13 @@ impl Store {
         label: &str,
     ) -> Result<PublicKey, StoreError> {
         let at = self.position(name)?;
-        let (blob, comment) = crate::ssh::import(line)
-            .ok_or_else(|| {
-                StoreError::Invalid(
-                    "that is not an SSH public key this machine accepts: one line of an \
+        let (blob, comment) = crate::ssh::import(line).ok_or_else(|| {
+            StoreError::Invalid(
+                "that is not an SSH public key this machine accepts: one line of an \
                      OpenSSH .pub file, Ed25519, or RSA of 3072 to 8192 bits"
-                        .into(),
-                )
-            })?;
+                    .into(),
+            )
+        })?;
         let label = if label.is_empty() {
             comment
         } else {
@@ -1839,6 +1857,9 @@ impl Store {
         Ok(key)
     }
 
+    /// Remove an enrolled key by ID and invalidate pending SSH proofs.
+    /// Reject unknown accounts or keys and removals blocked by the last-admin
+    /// guard. The caller saves the accepted in-memory change.
     pub fn remove_key(&mut self, name: &str, id: [u8; 16]) -> Result<(), StoreError> {
         let at = self.position(name)?;
         let p = &self.principals[at];
@@ -2779,11 +2800,26 @@ mod tests {
         store.add(new("dana", vec![]), None).unwrap();
         store.create_group("developers", "").unwrap();
 
-        assert!(matches!(store.rename("dana", "JACK"), Err(StoreError::Exists(_))));
-        assert!(matches!(store.rename("dana", "Developers"), Err(StoreError::Exists(_))));
-        assert!(matches!(store.rename("dana", "Administrators"), Err(StoreError::Invalid(_))));
-        assert!(matches!(store.rename("dana", "a/b"), Err(StoreError::Invalid(_))));
-        assert!(matches!(store.rename("nobody", "x"), Err(StoreError::NotFound(_))));
+        assert!(matches!(
+            store.rename("dana", "JACK"),
+            Err(StoreError::Exists(_))
+        ));
+        assert!(matches!(
+            store.rename("dana", "Developers"),
+            Err(StoreError::Exists(_))
+        ));
+        assert!(matches!(
+            store.rename("dana", "Administrators"),
+            Err(StoreError::Invalid(_))
+        ));
+        assert!(matches!(
+            store.rename("dana", "a/b"),
+            Err(StoreError::Invalid(_))
+        ));
+        assert!(matches!(
+            store.rename("nobody", "x"),
+            Err(StoreError::NotFound(_))
+        ));
         assert_eq!(store.record("dana").unwrap().name, "dana");
     }
 
@@ -2799,12 +2835,18 @@ mod tests {
             store.add(new("DEVELOPERS", vec![]), None),
             Err(StoreError::Exists(_))
         ));
-        assert!(matches!(store.create_group("Jack", ""), Err(StoreError::Exists(_))));
+        assert!(matches!(
+            store.create_group("Jack", ""),
+            Err(StoreError::Exists(_))
+        ));
         assert!(matches!(
             store.add(new("jack", vec![]), None),
             Err(StoreError::Exists(_))
         ));
-        assert!(matches!(store.create_group("developers", ""), Err(StoreError::Exists(_))));
+        assert!(matches!(
+            store.create_group("developers", ""),
+            Err(StoreError::Exists(_))
+        ));
     }
 
     #[test]
@@ -2812,8 +2854,16 @@ mod tests {
         let mut store = seeded();
         store.add(new("dana", vec![]), None).unwrap();
 
-        assert!(store.set_logon_types("dana", LogonTypes::SERVICE_ONLY).unwrap());
-        assert!(!store.set_logon_types("dana", LogonTypes::SERVICE_ONLY).unwrap());
+        assert!(
+            store
+                .set_logon_types("dana", LogonTypes::SERVICE_ONLY)
+                .unwrap()
+        );
+        assert!(
+            !store
+                .set_logon_types("dana", LogonTypes::SERVICE_ONLY)
+                .unwrap()
+        );
         assert_eq!(
             store.record("dana").unwrap().permitted_logon_types,
             LogonTypes::SERVICE_ONLY
@@ -2843,8 +2893,14 @@ mod tests {
         );
 
         // With a second administrator, the first may be anything.
-        store.add(new("dana", vec![administrators()]), None).unwrap();
-        assert!(store.set_logon_types("jack", LogonTypes::SERVICE_ONLY).unwrap());
+        store
+            .add(new("dana", vec![administrators()]), None)
+            .unwrap();
+        assert!(
+            store
+                .set_logon_types("jack", LogonTypes::SERVICE_ONLY)
+                .unwrap()
+        );
     }
 
     /// Nor may the last administrator be left a policy naming nothing they
@@ -2855,17 +2911,25 @@ mod tests {
         let refused = |result| matches!(result, Err(StoreError::Invalid(_)));
 
         assert!(refused(store.set_credential_policy("jack", Policy::Denied)));
-        assert!(refused(store.set_credential_policy("jack", Policy::SshPublicKey)));
-        store.set_credential_policy("jack", Policy::PasswordOrKey).unwrap();
+        assert!(refused(
+            store.set_credential_policy("jack", Policy::SshPublicKey)
+        ));
+        store
+            .set_credential_policy("jack", Policy::PasswordOrKey)
+            .unwrap();
 
         let (line, _, _) = ssh_fixture();
         let key = store.add_key("jack", &line, "").unwrap();
-        store.set_credential_policy("jack", Policy::SshPublicKey).unwrap();
+        store
+            .set_credential_policy("jack", Policy::SshPublicKey)
+            .unwrap();
         assert!(refused(store.remove_key("jack", key.id)));
         assert_eq!(store.keys("jack").unwrap().len(), 1);
 
         // With a second administrator, the first may be left anything.
-        store.add(new("dana", vec![administrators()]), None).unwrap();
+        store
+            .add(new("dana", vec![administrators()]), None)
+            .unwrap();
         store.remove_key("jack", key.id).unwrap();
         store.set_credential_policy("jack", Policy::Denied).unwrap();
     }
@@ -3372,10 +3436,7 @@ mod tests {
         store.create_group("developers", "").unwrap();
         let developers = store.resolve_group("developers").unwrap();
         store
-            .add(
-                new("jack", vec![developers.clone(), administrators()]),
-                Some(b"pw"),
-            )
+            .add(new("jack", vec![developers, administrators()]), Some(b"pw"))
             .unwrap();
 
         let identity = store.authenticate(b"jack", b"pw").unwrap();
@@ -3403,9 +3464,7 @@ mod tests {
     fn a_foreign_sid_is_carried_without_a_name_or_a_number() {
         let mut store = Store::provision().expect("must provision");
         let foreign: Sid = "S-1-5-21-9-9-9-1000".parse().unwrap();
-        store
-            .add(new("jack", vec![foreign.clone()]), Some(b"pw"))
-            .unwrap();
+        store.add(new("jack", vec![foreign]), Some(b"pw")).unwrap();
         let identity = store.authenticate(b"jack", b"pw").unwrap();
         assert_eq!(identity.groups[0].sid, foreign);
         assert_eq!(identity.groups[0].name, None);
@@ -3463,9 +3522,7 @@ mod tests {
         let mut store = Store::provision().expect("must provision");
         store.create_group("developers", "").unwrap();
         let developers = store.resolve_group("developers").unwrap();
-        store
-            .add(new("a", vec![developers.clone()]), Some(b"pw"))
-            .unwrap();
+        store.add(new("a", vec![developers]), Some(b"pw")).unwrap();
         store.add(new("b", vec![developers]), Some(b"pw")).unwrap();
         store.add(new("c", vec![]), Some(b"pw")).unwrap();
 
@@ -3544,8 +3601,8 @@ mod tests {
             store.create_group("developers", "").unwrap();
             store.resolve_group("developers").unwrap()
         };
-        assert!(store.set_primary_group("jack", developers.clone()).unwrap());
-        assert!(!store.set_primary_group("jack", developers.clone()).unwrap());
+        assert!(store.set_primary_group("jack", developers).unwrap());
+        assert!(!store.set_primary_group("jack", developers).unwrap());
 
         let record = store.record("jack").unwrap();
         assert_eq!(record.primary_group.sid, developers);
@@ -3659,8 +3716,8 @@ mod tests {
         store
             .add(
                 NewPrincipal {
-                    groups: vec![developers.clone(), administrators()],
-                    primary_group: Some(developers.clone()),
+                    groups: vec![developers, administrators()],
+                    primary_group: Some(developers),
                     home: Some("/srv/jack".into()),
                     shell: Some("/bin/bash".into()),
                     display_name: Some("Jack Palfrey".into()),
@@ -4163,7 +4220,11 @@ mod tests {
             // rid, unix_id, then the name's length and bytes.
             let record = 4 + 4 + 4 + group.name.len();
             out.extend_from_slice(&body[at..at + record]);
-            assert_eq!(&body[at + record..at + record + 4], &[0, 0, 0, 0], "an empty description");
+            assert_eq!(
+                &body[at + record..at + record + 4],
+                &[0, 0, 0, 0],
+                "an empty description"
+            );
             at += record + 4;
         }
         out.extend_from_slice(&body[at..]);
@@ -4184,25 +4245,50 @@ mod tests {
         let loaded = Store::decode(4, &old).expect("a format 4 store must load");
         assert_eq!(loaded.group_summaries().unwrap()[0].description, "");
         assert_eq!(loaded.group_summaries().unwrap()[0].members, 1);
-        assert_eq!(loaded.encode(), store.encode(), "written again, it is format 5");
-        assert!(Store::decode(4, &store.encode()).is_err(), "a format 5 body is not format 4's");
+        assert_eq!(
+            loaded.encode(),
+            store.encode(),
+            "written again, it is format 5"
+        );
+        assert!(
+            Store::decode(4, &store.encode()).is_err(),
+            "a format 5 body is not format 4's"
+        );
     }
 
     #[test]
     fn a_group_s_description_is_kept_checked_and_cleared() {
         let mut store = seeded();
-        store.create_group("developers", "  Builds the software  ").unwrap();
+        store
+            .create_group("developers", "  Builds the software  ")
+            .unwrap();
         let body = store.encode();
         let back = Store::decode(codec::VERSION, &body).unwrap();
-        assert_eq!(back.group_summaries().unwrap()[0].description, "Builds the software");
+        assert_eq!(
+            back.group_summaries().unwrap()[0].description,
+            "Builds the software"
+        );
 
-        assert!(!store.describe_group("developers", "Builds the software").unwrap());
+        assert!(
+            !store
+                .describe_group("developers", "Builds the software")
+                .unwrap()
+        );
         assert!(store.describe_group("DEVELOPERS", "").unwrap());
         assert_eq!(store.group_summaries().unwrap()[0].description, "");
-        assert!(matches!(store.describe_group("developers", "two\nlines"), Err(StoreError::Invalid(_))));
+        assert!(matches!(
+            store.describe_group("developers", "two\nlines"),
+            Err(StoreError::Invalid(_))
+        ));
         let long = "x".repeat(MAX_DESCRIPTION_BYTES + 1);
-        assert!(matches!(store.create_group("ops", &long), Err(StoreError::Invalid(_))));
-        assert!(matches!(store.describe_group("nonesuch", ""), Err(StoreError::NoSuchGroup(_))));
+        assert!(matches!(
+            store.create_group("ops", &long),
+            Err(StoreError::Invalid(_))
+        ));
+        assert!(matches!(
+            store.describe_group("nonesuch", ""),
+            Err(StoreError::NoSuchGroup(_))
+        ));
     }
 
     #[test]
@@ -4215,15 +4301,34 @@ mod tests {
 
         assert!(store.rename_group("developers", "engineers").unwrap());
         assert_eq!(store.resolve_group("engineers").unwrap(), sid);
-        assert!(store.record("jack").unwrap().groups.iter().any(|g| g.name.as_deref() == Some("engineers")));
-        assert!(matches!(store.resolve_group("developers"), Err(StoreError::NoSuchGroup(_))));
+        assert!(
+            store
+                .record("jack")
+                .unwrap()
+                .groups
+                .iter()
+                .any(|g| g.name.as_deref() == Some("engineers"))
+        );
+        assert!(matches!(
+            store.resolve_group("developers"),
+            Err(StoreError::NoSuchGroup(_))
+        ));
 
         // Its own name in another case is a rename; anyone else's is not.
         assert!(!store.rename_group("engineers", "engineers").unwrap());
         assert!(store.rename_group("engineers", "Engineers").unwrap());
-        assert!(matches!(store.rename_group("Engineers", "DANA"), Err(StoreError::Exists(_))));
-        assert!(matches!(store.rename_group("Engineers", "Users"), Err(StoreError::Invalid(_))));
-        assert!(matches!(store.rename_group("nonesuch", "x"), Err(StoreError::NoSuchGroup(_))));
+        assert!(matches!(
+            store.rename_group("Engineers", "DANA"),
+            Err(StoreError::Exists(_))
+        ));
+        assert!(matches!(
+            store.rename_group("Engineers", "Users"),
+            Err(StoreError::Invalid(_))
+        ));
+        assert!(matches!(
+            store.rename_group("nonesuch", "x"),
+            Err(StoreError::NoSuchGroup(_))
+        ));
     }
 
     #[test]

@@ -156,16 +156,16 @@ mod tests {
         // The point of the shape rule: none of these needs naming to be
         // excluded.
         for text in [
-            "S-1-5-32",      // BUILTIN
-            "S-1-5-32-544",  // BUILTIN\Administrators
-            "S-1-5-18",      // LocalSystem
-            "S-1-5-11",      // Authenticated Users
-            "S-1-1-0",       // Everyone
-            "S-1-0-0",       // Null
-            "S-1-5",         // the NT authority itself
-            "S-1-5-21",      // the non-unique prefix with no domain
-            "S-1-5-21-1",    // too few
-            "S-1-5-21-1-2",  // too few
+            "S-1-5-32",       // BUILTIN
+            "S-1-5-32-544",   // BUILTIN\Administrators
+            "S-1-5-18",       // LocalSystem
+            "S-1-5-11",       // Authenticated Users
+            "S-1-1-0",        // Everyone
+            "S-1-0-0",        // Null
+            "S-1-5",          // the NT authority itself
+            "S-1-5-21",       // the non-unique prefix with no domain
+            "S-1-5-21-1",     // too few
+            "S-1-5-21-1-2",   // too few
             "S-1-5-22-1-2-3", // not the non-unique prefix
         ] {
             assert!(
@@ -183,16 +183,28 @@ mod tests {
     #[test]
     fn a_domain_contains_its_principals() {
         let domain = sid("S-1-5-21-1-2-3");
-        assert!(contains(domain.as_ref(), sid("S-1-5-21-1-2-3-1000").as_ref()));
-        assert!(contains(domain.as_ref(), sid("S-1-5-21-1-2-3-500").as_ref()));
+        assert!(contains(
+            domain.as_ref(),
+            sid("S-1-5-21-1-2-3-1000").as_ref()
+        ));
+        assert!(contains(
+            domain.as_ref(),
+            sid("S-1-5-21-1-2-3-500").as_ref()
+        ));
         assert!(contains(domain.as_ref(), sid("S-1-5-21-1-2-3-0").as_ref()));
     }
 
     #[test]
     fn a_domain_does_not_contain_another_domains_principals() {
         let domain = sid("S-1-5-21-1-2-3");
-        assert!(!contains(domain.as_ref(), sid("S-1-5-21-1-2-4-1000").as_ref()));
-        assert!(!contains(domain.as_ref(), sid("S-1-5-21-9-9-9-1000").as_ref()));
+        assert!(!contains(
+            domain.as_ref(),
+            sid("S-1-5-21-1-2-4-1000").as_ref()
+        ));
+        assert!(!contains(
+            domain.as_ref(),
+            sid("S-1-5-21-9-9-9-1000").as_ref()
+        ));
         assert!(!contains(domain.as_ref(), sid("S-1-5-32-544").as_ref()));
         assert!(!contains(domain.as_ref(), sid("S-1-5-18").as_ref()));
     }

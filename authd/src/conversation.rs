@@ -59,9 +59,9 @@ use auth_core::wire::{
     MSG_CREDENTIAL_CHANGE_START, MSG_CREDENTIAL_ENROLL_START, MSG_CREDENTIAL_RESPONSE,
     MSG_LOGON_START, MSG_SERVICE_ATTEST, MSG_SESSION_END, MSG_SESSION_END_QUERY, ServiceAttest,
     SessionEnd, SessionEndQuery, decode_credential_change_start, decode_credential_enroll_start,
-    decode_credential_response, decode_header, decode_logon_start,
-    decode_service_attest, decode_session_end, decode_session_end_query, encode_access_denied,
-    encode_access_granted, encode_credential_request,
+    decode_credential_response, decode_header, decode_logon_start, decode_service_attest,
+    decode_session_end, decode_session_end_query, encode_access_denied, encode_access_granted,
+    encode_credential_request,
 };
 use peios::security::{Sid, SidRef};
 
@@ -194,6 +194,9 @@ impl Purpose {
 
 /// How a relayed conversation ended, where it did not end in a denial the relay
 /// has already sent.
+// A single result is returned by value; boxing would add an allocation to every
+// successful logon without reducing a collection or long-lived state.
+#[allow(clippy::large_enum_variant)]
 pub(crate) enum Ended {
     /// The source said who the principal is. Only ever for [`Purpose::Logon`].
     Asserted(auth_core::psi::Assertion),
@@ -287,7 +290,12 @@ fn run(registry: &Registry, stream: &UnixStream, deadline: Instant) -> io::Resul
         // one message, and neither is a logon: who may is decided in
         // `crate::end` from the peer, not by the originator checks below.
         Ok(Opening::End(end)) => {
-            return crate::end::serve(stream, &peer, end.logon_session_id, crate::end::Request::End);
+            return crate::end::serve(
+                stream,
+                &peer,
+                end.logon_session_id,
+                crate::end::Request::End,
+            );
         }
         Ok(Opening::EndQuery(query)) => {
             return crate::end::serve(
@@ -304,7 +312,15 @@ fn run(registry: &Registry, stream: &UnixStream, deadline: Instant) -> io::Resul
     // written however it ends — including by an I/O error, which is why the
     // record is written here rather than at each terminal below.
     let mut attempt = Attempt::new(&peer, &start);
-    let result = logon(registry, stream, &peer, originator, &start, deadline, &mut attempt);
+    let result = logon(
+        registry,
+        stream,
+        &peer,
+        originator,
+        &start,
+        deadline,
+        &mut attempt,
+    );
     let shadow_owner = attempt.shadow_owner.take();
     attempt.finish();
     // The normal audit record, like the success reply, precedes advisory I/O.
@@ -456,7 +472,9 @@ fn logon(
     };
     // The session's auth package, should one be minted: the same name
     // `derive::mint` gives the kernel, so the two records agree.
-    attempt.record.str("object.session.auth-package", source.name());
+    attempt
+        .record
+        .str("object.session.auth-package", source.name());
 
     let Some(mut conversation) = source.open() else {
         log::warn(format_args!(
@@ -752,11 +770,7 @@ pub(crate) fn relay(
 }
 
 /// Send a denial and report the conversation as ended by it.
-fn denied(
-    stream: &UnixStream,
-    denial: Denial,
-    reason: &str,
-) -> io::Result<Result<Ended, Denial>> {
+fn denied(stream: &UnixStream, denial: Denial, reason: &str) -> io::Result<Result<Ended, Denial>> {
     deny(stream, denial, reason).map(|()| Err(denial))
 }
 
@@ -1034,7 +1048,7 @@ fn grant(
         };
         memberships.push((sid.to_sid(), group.unix_id));
     }
-    let mut memberships = drop_unassertable(memberships, &source_name);
+    let mut memberships = drop_unassertable(memberships, source_name);
 
     // The primary group. Empty means the source did not say, and Authenticated
     // Users is the answer: it is a membership authd derives for every principal
@@ -1084,7 +1098,7 @@ fn grant(
     // source must not be able to reach `BUILTIN\Administrators` through the one
     // field that skipped the scope check.
     if !memberships.iter().any(|(sid, _)| *sid == primary_group) {
-        memberships.push((primary_group.clone(), 0));
+        memberships.push((primary_group, 0));
     }
 
     let groups = scoped_groups(&memberships, primary_group.as_ref(), primary_group_asserted);
@@ -1094,18 +1108,18 @@ fn grant(
     // local source's privilege alone, because local membership is a local
     // decision and a directory must not be able to make its users
     // administrators of this machine.
-    if !conversation.may_assert_foreign_memberships() {
-        if let Some(foreign) = foreign_membership(user, &groups) {
-            log::error(format_args!(
-                "source {source_name} asserted {foreign} for {user}, which is outside that \
+    if !conversation.may_assert_foreign_memberships()
+        && let Some(foreign) = foreign_membership(user, &groups)
+    {
+        log::error(format_args!(
+            "source {source_name} asserted {foreign} for {user}, which is outside that \
                  principal's domain, and it may not assert foreign memberships"
-            ));
-            return attempt.refuse(
-                stream,
-                Denial::Internal,
-                "The authority returned a membership it is not permitted to assert.",
-            );
-        }
+        ));
+        return attempt.refuse(
+            stream,
+            Denial::Internal,
+            "The authority returned a membership it is not permitted to assert.",
+        );
     }
 
     // The SID set the token will carry, derived SIDs included. Built here
@@ -1383,6 +1397,8 @@ fn read_opening(stream: &UnixStream) -> Result<Opening, (Denial, &'static str)> 
 fn client_already_answered(stream: &UnixStream) -> bool {
     use std::os::unix::io::AsRawFd;
     let mut probe = [0u8; 1];
+    // SAFETY: the socket stays live and recv writes at most the one byte in
+    // this exclusively borrowed probe. MSG_PEEK leaves the queued data intact.
     let received = unsafe {
         libc::recv(
             stream.as_raw_fd(),
@@ -1495,7 +1511,16 @@ mod tests {
 
         let mut attempt = Attempt::new(&peer, &start);
         let deadline = Instant::now() + CONVERSATION_DEADLINE;
-        logon(&registry, &ours, &peer, false, &start, deadline, &mut attempt).unwrap();
+        logon(
+            &registry,
+            &ours,
+            &peer,
+            false,
+            &start,
+            deadline,
+            &mut attempt,
+        )
+        .unwrap();
         attempt.finish();
         drop(theirs);
 
@@ -1512,7 +1537,10 @@ mod tests {
             record.get("object.session.logon-type"),
             Some(&audit::Value::Str("interactive".into()))
         );
-        assert_eq!(record.get("outcome.success"), Some(&audit::Value::Bool(false)));
+        assert_eq!(
+            record.get("outcome.success"),
+            Some(&audit::Value::Bool(false))
+        );
         assert_eq!(
             record.get("outcome.reason"),
             Some(&audit::Value::Str("permission-denied".into()))
@@ -1536,7 +1564,10 @@ mod tests {
                 remote_host: Some(host.into()),
                 ..start_supporting(vec![])
             };
-            assert_eq!(Attempt::new(&peer, &start).record.get("source.address"), None);
+            assert_eq!(
+                Attempt::new(&peer, &start).record.get("source.address"),
+                None
+            );
         }
         let start = LogonStart {
             remote_host: Some("2001:db8::1".into()),

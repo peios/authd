@@ -4,7 +4,7 @@
 #include <stddef.h>
 #include <stdint.h>
 typedef struct peios_auth_bytes {
-    const uint8_t * data;
+    const uint8_t *data;
     size_t len;
 } peios_auth_bytes;
 typedef struct peios_auth_client_options {
@@ -48,7 +48,7 @@ typedef struct peios_auth_enumerate_request {
     size_t size;
     uint32_t kind;
     uint32_t fields;
-    const peios_auth_key * group;
+    const peios_auth_key *group;
     peios_auth_bytes cursor;
 } peios_auth_enumerate_request;
 typedef struct peios_auth_answer {

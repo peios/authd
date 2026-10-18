@@ -1,8 +1,15 @@
 //! Borrowed result views; no wire layouts or Rust collections cross the ABI.
-use auth_abi::*;
+use auth_abi::{
+    AccountKeyView, AccountView, Bytes, ClaimValue, ClaimView, IdentityView, RecordView,
+    ReferenceView,
+};
 use auth_core::{claim::Values, ident};
 use crate::api::{bytes, write};
 use crate::engine::{Operation, Output, State};
+
+// Public PEIOS_AUTH_FIELD_PRESENT from peios/auth.h; other field states use
+// the identity protocol's preserved withheld-reason discriminants.
+const FIELD_PRESENT: i32 = 5;
 
 fn record(operation: &Operation, index: usize) -> Option<&ident::Record> {
     match &operation.state {
@@ -15,16 +22,31 @@ macro_rules! view {
     ($out:expr, $body:block) => {{
         let value = (|| -> Option<_> { $body })();
         match value {
-            Some(value) => unsafe { write($out, value) },
+            Some(value) => {
+                // SAFETY: each accessor requires writable, aligned output storage
+                // disjoint from the live operation whose views it returns.
+                unsafe { write($out, value) }
+            }
             None => -1,
         }
     }};
 }
+/// Copy identity outcome, record count, cursor, and incomplete-source count.
+///
+/// # Safety
+///
+/// Operation must be null or a live library handle with no concurrent access.
+/// The handle must not have been reused across fork.
+/// Out must be null or aligned, writable storage for its declared type,
+/// disjoint from the operation. Returned spans remain operation-owned and
+/// expire at its next mutation or destruction; the caller must not free them.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn peios_auth_operation_identity(
     operation: *const Operation,
     out: *mut IdentityView,
 ) -> i32 {
+    // SAFETY: the accessor contract keeps the operation immutable and live;
+    // indices and field kinds are checked before constructing borrowed views.
     view!(out, {
         Some(match &unsafe { operation.as_ref()? }.state {
             State::Complete(Output::Lookup(reply)) => IdentityView {
@@ -43,12 +65,23 @@ pub unsafe extern "C" fn peios_auth_operation_identity(
         })
     })
 }
+/// Copy the name of one incomplete source as a borrowed byte span.
+///
+/// # Safety
+///
+/// Operation must be null or a live library handle with no concurrent access.
+/// The handle must not have been reused across fork.
+/// Out must be null or aligned, writable storage for its declared type,
+/// disjoint from the operation. Returned spans remain operation-owned and
+/// expire at its next mutation or destruction; the caller must not free them.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn peios_auth_operation_incomplete_source(
     operation: *const Operation,
     index: usize,
     out: *mut Bytes,
 ) -> i32 {
+    // SAFETY: the accessor contract keeps the operation immutable and live;
+    // indices and field kinds are checked before constructing borrowed views.
     view!(out, {
         let State::Complete(Output::Listing(reply)) = &unsafe { operation.as_ref()? }.state else {
             return None;
@@ -56,12 +89,23 @@ pub unsafe extern "C" fn peios_auth_operation_incomplete_source(
         Some(bytes(reply.incomplete.get(index)?.as_bytes()))
     })
 }
+/// Copy one identity record's SID, name, kind, and present-field mask.
+///
+/// # Safety
+///
+/// Operation must be null or a live library handle with no concurrent access.
+/// The handle must not have been reused across fork.
+/// Out must be null or aligned, writable storage for its declared type,
+/// disjoint from the operation. Returned spans remain operation-owned and
+/// expire at its next mutation or destruction; the caller must not free them.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn peios_auth_record(
     operation: *const Operation,
     index: usize,
     out: *mut RecordView,
 ) -> i32 {
+    // SAFETY: the accessor contract keeps the operation immutable and live;
+    // indices and field kinds are checked before constructing borrowed views.
     view!(out, {
         let record = record(unsafe { operation.as_ref()? }, index)?;
         Some(RecordView {
@@ -72,19 +116,26 @@ pub unsafe extern "C" fn peios_auth_record(
         })
     })
 }
+/// Return a field's presence/withholding state, or -1 for invalid input.
+///
+/// # Safety
+///
+/// Operation must be null or a live library handle with no concurrent access.
+/// The handle must not have been reused across fork.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn peios_auth_record_field_state(
     operation: *const Operation,
     index: usize,
     field: u32,
 ) -> i32 {
+    // SAFETY: the accessor contract keeps the operation immutable and live.
     (|| -> Option<i32> {
         let record = record(unsafe { operation.as_ref()? }, index)?;
         if field.count_ones() != 1 || field & !ident::Fields::KNOWN.0 != 0 {
             return None;
         }
         if record.value(ident::Fields(field)).is_some() {
-            return Some(5);
+            return Some(FIELD_PRESENT);
         }
         Some(
             record
@@ -95,6 +146,15 @@ pub unsafe extern "C" fn peios_auth_record_field_state(
     })()
     .unwrap_or(-1)
 }
+/// Copy a text field as a borrowed UTF-8 byte span.
+///
+/// # Safety
+///
+/// Operation must be null or a live library handle with no concurrent access.
+/// The handle must not have been reused across fork.
+/// Out must be null or aligned, writable storage for its declared type,
+/// disjoint from the operation. Returned spans remain operation-owned and
+/// expire at its next mutation or destruction; the caller must not free them.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn peios_auth_record_text(
     operation: *const Operation,
@@ -102,6 +162,8 @@ pub unsafe extern "C" fn peios_auth_record_text(
     field: u32,
     out: *mut Bytes,
 ) -> i32 {
+    // SAFETY: the accessor contract keeps the operation immutable and live;
+    // indices and field kinds are checked before constructing borrowed views.
     view!(out, {
         let record = record(unsafe { operation.as_ref()? }, index)?;
         let value = match record.value(ident::Fields(field))? {
@@ -114,6 +176,15 @@ pub unsafe extern "C" fn peios_auth_record_text(
         Some(bytes(value.as_bytes()))
     })
 }
+/// Copy a numeric identity field.
+///
+/// # Safety
+///
+/// Operation must be null or a live library handle with no concurrent access.
+/// The handle must not have been reused across fork.
+/// Out must be null or aligned, writable storage for its declared type,
+/// disjoint from the operation. Returned spans remain operation-owned and
+/// expire at its next mutation or destruction; the caller must not free them.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn peios_auth_record_number(
     operation: *const Operation,
@@ -121,6 +192,8 @@ pub unsafe extern "C" fn peios_auth_record_number(
     field: u32,
     out: *mut u32,
 ) -> i32 {
+    // SAFETY: the accessor contract keeps the operation immutable and live;
+    // indices and field kinds are checked before constructing borrowed views.
     view!(out, {
         let record = record(unsafe { operation.as_ref()? }, index)?;
         Some(match record.value(ident::Fields(field))? {
@@ -138,6 +211,15 @@ fn references(record: &ident::Record, field: u32) -> Option<&[ident::Reference]>
         _ => None,
     }
 }
+/// Copy the number of referenced identities in a field.
+///
+/// # Safety
+///
+/// Operation must be null or a live library handle with no concurrent access.
+/// The handle must not have been reused across fork.
+/// Out must be null or aligned, writable storage for its declared type,
+/// disjoint from the operation. Returned spans remain operation-owned and
+/// expire at its next mutation or destruction; the caller must not free them.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn peios_auth_record_reference_count(
     operation: *const Operation,
@@ -145,10 +227,21 @@ pub unsafe extern "C" fn peios_auth_record_reference_count(
     field: u32,
     out: *mut usize,
 ) -> i32 {
+    // SAFETY: the accessor contract keeps the operation immutable and live;
+    // indices and field kinds are checked before constructing borrowed views.
     view!(out, {
         Some(references(record(unsafe { operation.as_ref()? }, index)?, field)?.len())
     })
 }
+/// Copy one referenced identity as a borrowed view.
+///
+/// # Safety
+///
+/// Operation must be null or a live library handle with no concurrent access.
+/// The handle must not have been reused across fork.
+/// Out must be null or aligned, writable storage for its declared type,
+/// disjoint from the operation. Returned spans remain operation-owned and
+/// expire at its next mutation or destruction; the caller must not free them.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn peios_auth_record_reference(
     operation: *const Operation,
@@ -157,6 +250,8 @@ pub unsafe extern "C" fn peios_auth_record_reference(
     item: usize,
     out: *mut ReferenceView,
 ) -> i32 {
+    // SAFETY: the accessor contract keeps the operation immutable and live;
+    // indices and field kinds are checked before constructing borrowed views.
     view!(out, {
         let value = references(record(unsafe { operation.as_ref()? }, index)?, field)?.get(item)?;
         Some(ReferenceView {
@@ -166,12 +261,23 @@ pub unsafe extern "C" fn peios_auth_record_reference(
         })
     })
 }
+/// Copy the number of claims on an identity record.
+///
+/// # Safety
+///
+/// Operation must be null or a live library handle with no concurrent access.
+/// The handle must not have been reused across fork.
+/// Out must be null or aligned, writable storage for its declared type,
+/// disjoint from the operation. Returned spans remain operation-owned and
+/// expire at its next mutation or destruction; the caller must not free them.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn peios_auth_record_claim_count(
     operation: *const Operation,
     index: usize,
     out: *mut usize,
 ) -> i32 {
+    // SAFETY: the accessor contract keeps the operation immutable and live;
+    // indices and field kinds are checked before constructing borrowed views.
     view!(out, {
         let ident::Value::Claims(values) =
             record(unsafe { operation.as_ref()? }, index)?.value(ident::Fields::CLAIMS)?
@@ -181,6 +287,15 @@ pub unsafe extern "C" fn peios_auth_record_claim_count(
         Some(values.len())
     })
 }
+/// Copy one claim's metadata as a borrowed view.
+///
+/// # Safety
+///
+/// Operation must be null or a live library handle with no concurrent access.
+/// The handle must not have been reused across fork.
+/// Out must be null or aligned, writable storage for its declared type,
+/// disjoint from the operation. Returned spans remain operation-owned and
+/// expire at its next mutation or destruction; the caller must not free them.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn peios_auth_record_claim(
     operation: *const Operation,
@@ -188,6 +303,8 @@ pub unsafe extern "C" fn peios_auth_record_claim(
     item: usize,
     out: *mut ClaimView,
 ) -> i32 {
+    // SAFETY: the accessor contract keeps the operation immutable and live;
+    // indices and field kinds are checked before constructing borrowed views.
     view!(out, {
         let ident::Value::Claims(values) =
             record(unsafe { operation.as_ref()? }, index)?.value(ident::Fields::CLAIMS)?
@@ -203,6 +320,15 @@ pub unsafe extern "C" fn peios_auth_record_claim(
         })
     })
 }
+/// Copy one claim value, selecting the member indicated by its claim type.
+///
+/// # Safety
+///
+/// Operation must be null or a live library handle with no concurrent access.
+/// The handle must not have been reused across fork.
+/// Out must be null or aligned, writable storage for its declared type,
+/// disjoint from the operation. Returned spans remain operation-owned and
+/// expire at its next mutation or destruction; the caller must not free them.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn peios_auth_record_claim_value(
     operation: *const Operation,
@@ -211,6 +337,8 @@ pub unsafe extern "C" fn peios_auth_record_claim_value(
     value: usize,
     out: *mut ClaimValue,
 ) -> i32 {
+    // SAFETY: the accessor contract keeps the operation immutable and live;
+    // indices and field kinds are checked before constructing borrowed views.
     view!(out, {
         let ident::Value::Claims(values) =
             record(unsafe { operation.as_ref()? }, index)?.value(ident::Fields::CLAIMS)?
@@ -233,11 +361,22 @@ pub unsafe extern "C" fn peios_auth_record_claim_value(
         Some(result)
     })
 }
+/// Copy the calling account's profile as a borrowed view.
+///
+/// # Safety
+///
+/// Operation must be null or a live library handle with no concurrent access.
+/// The handle must not have been reused across fork.
+/// Out must be null or aligned, writable storage for its declared type,
+/// disjoint from the operation. Returned spans remain operation-owned and
+/// expire at its next mutation or destruction; the caller must not free them.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn peios_auth_operation_account(
     operation: *const Operation,
     out: *mut AccountView,
 ) -> i32 {
+    // SAFETY: the accessor contract keeps the operation immutable and live;
+    // indices and field kinds are checked before constructing borrowed views.
     view!(out, {
         let State::Complete(Output::Account(account)) = &unsafe { operation.as_ref()? }.state
         else {
@@ -254,12 +393,23 @@ pub unsafe extern "C" fn peios_auth_operation_account(
         })
     })
 }
+/// Copy one enrolled public key's metadata as a borrowed view.
+///
+/// # Safety
+///
+/// Operation must be null or a live library handle with no concurrent access.
+/// The handle must not have been reused across fork.
+/// Out must be null or aligned, writable storage for its declared type,
+/// disjoint from the operation. Returned spans remain operation-owned and
+/// expire at its next mutation or destruction; the caller must not free them.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn peios_auth_operation_account_key(
     operation: *const Operation,
     index: usize,
     out: *mut AccountKeyView,
 ) -> i32 {
+    // SAFETY: the accessor contract keeps the operation immutable and live;
+    // indices and field kinds are checked before constructing borrowed views.
     view!(out, {
         let State::Complete(Output::Account(account)) = &unsafe { operation.as_ref()? }.state
         else {

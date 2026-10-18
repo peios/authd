@@ -10,10 +10,10 @@ class FamilyTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.root = Path("packages.store")
-        index = json.loads((cls.root / "index.json").read_text())
+        index = json.loads((cls.root / "index.json").read_text(encoding="utf-8"))
         cls.packages = {p["name"].removeprefix("dev.peios."): p for p in index["packages"]}
         cls.manifests = {
-            name: tomllib.loads((cls.root / info["manifest"]).read_text())["files"]
+            name: tomllib.loads((cls.root / info["manifest"]).read_text(encoding="utf-8"))["files"]
             for name, info in cls.packages.items()
         }
 

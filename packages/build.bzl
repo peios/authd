@@ -3,7 +3,10 @@
 load("@rules_rust//rust:rust_common.bzl", "BuildInfo")
 load("//build:version.bzl", "VERSION")
 
-_SourceInfo = provider("Declared packaging inputs from a Rust dependency closure.", fields = {"files": "Declared source and compile inputs."})
+_SourceInfo = provider(
+    "Declared packaging inputs from a Rust dependency closure.",
+    fields = {"files": "Declared source and compile inputs."},
+)
 
 def _sources_impl(target, ctx):
     direct = []
@@ -70,16 +73,27 @@ _package_transition = transition(
 )
 
 auth_stage = rule(
+    doc = "Stage and validate declared payloads before recording their build provenance.",
     implementation = _stage_impl,
     toolchains = ["@rules_rust//rust:toolchain_type"],
     attrs = {
-        "components": attr.label_keyed_string_dict(aspects = [_sources], cfg = _package_transition),
-        "data": attr.label_list(allow_files = True),
-        "drivers": attr.label_list(allow_files = True),
-        "driver": attr.label(allow_single_file = True),
-        "native": attr.bool(),
-        "sdk": attr.label(default = "@peios_sdk//:files"),
-        "sdk_root": attr.label(default = "@peios_sdk//:root", allow_single_file = True),
-        "_allowlist_function_transition": attr.label(default = "@bazel_tools//tools/allowlists/function_transition_allowlist"),
+        "components": attr.label_keyed_string_dict(
+            aspects = [_sources],
+            cfg = _package_transition,
+            doc = "Binary targets mapped to the installed component names.",
+        ),
+        "data": attr.label_list(allow_files = True, doc = "Declared packaging and source inputs."),
+        "drivers": attr.label_list(allow_files = True, doc = "Staging implementation and helpers."),
+        "driver": attr.label(allow_single_file = True, doc = "Python staging entry point."),
+        "native": attr.bool(doc = "Require native Peios hardening checks for the staged binaries."),
+        "sdk": attr.label(default = "@peios_sdk//:files", doc = "Declared native SDK inputs."),
+        "sdk_root": attr.label(
+            default = "@peios_sdk//:root",
+            allow_single_file = True,
+            doc = "SDK root marker used to locate SDK libraries.",
+        ),
+        "_allowlist_function_transition": attr.label(
+            default = "@bazel_tools//tools/allowlists/function_transition_allowlist",
+        ),
     },
 )

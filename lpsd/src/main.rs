@@ -1019,7 +1019,9 @@ fn answer(
             &response,
             save,
         ),
-        Pending::Enroll(enroll) => answer_enroll(stream, store, conversation, enroll, &response, save),
+        Pending::Enroll(enroll) => {
+            answer_enroll(stream, store, conversation, enroll, &response, save)
+        }
     }
 }
 
@@ -1687,9 +1689,7 @@ fn commit_enroll(
     let snapshot = store.clone();
     if let Err(problem) = apply_enroll(store, &name, enroll.action, &enroll.material) {
         *store = snapshot;
-        log::info(format_args!(
-            "SSH key change for {name} refused: {problem}"
-        ));
+        log::info(format_args!("SSH key change for {name} refused: {problem}"));
         record_changed(&enroll.sid, operation, Err("rejected"));
         // The key went between the rounds (`remove_key`'s `NotFound`), or the
         // store now refuses what it accepted then: either way, the material.
@@ -2111,7 +2111,10 @@ mod tests {
             records[0].get("operation.name"),
             Some(&audit::Value::Str("password".into()))
         );
-        assert_eq!(records[0].get("outcome.success"), Some(&audit::Value::Bool(true)));
+        assert_eq!(
+            records[0].get("outcome.success"),
+            Some(&audit::Value::Bool(true))
+        );
 
         h.open("jack");
         h.reply(&[(PASSWORD_REF, b"guess")], &saved);
@@ -2124,7 +2127,10 @@ mod tests {
 
         h.open("jack");
         h.reply(&[(PASSWORD_REF, b"new")], &saved);
-        h.reply(&[(NEW_PASSWORD_REF, b"newer"), (AGAIN_REF, b"newer")], &unsaveable);
+        h.reply(
+            &[(NEW_PASSWORD_REF, b"newer"), (AGAIN_REF, b"newer")],
+            &unsaveable,
+        );
         let records = written("lpsd.credential.changed");
         assert_eq!(
             records[0].get("outcome.reason"),
@@ -2156,7 +2162,10 @@ mod tests {
                 1_000_000,
             )
             .expect("served");
-            assert!(matches!(h.sent(), Sent::Refused(Denial::AuthenticationFailed)));
+            assert!(matches!(
+                h.sent(),
+                Sent::Refused(Denial::AuthenticationFailed)
+            ));
         }
 
         let records = written("lpsd.credential.verified");
@@ -2373,7 +2382,10 @@ mod tests {
             unreachable!()
         };
         assert!(request.messages[0].text.contains("jack"));
-        assert!(h.fingerprints("jack").is_empty(), "nothing before the proof");
+        assert!(
+            h.fingerprints("jack").is_empty(),
+            "nothing before the proof"
+        );
 
         assert!(matches!(
             h.reply(&[(PASSWORD_REF, b"old")], &saved),
@@ -2391,7 +2403,10 @@ mod tests {
             records[0].get("operation.name"),
             Some(&audit::Value::Str("ssh-key-added".into()))
         );
-        assert_eq!(records[0].get("outcome.success"), Some(&audit::Value::Bool(true)));
+        assert_eq!(
+            records[0].get("outcome.success"),
+            Some(&audit::Value::Bool(true))
+        );
     }
 
     #[test]
@@ -2433,7 +2448,10 @@ mod tests {
         use auth_core::credential::Policy;
 
         let mut key_only = Harness::with("erin", Some(b"pw"));
-        key_only.store.add_key("erin", &key_line(3, ""), "").unwrap();
+        key_only
+            .store
+            .add_key("erin", &key_line(3, ""), "")
+            .unwrap();
         key_only
             .store
             .set_credential_policy("erin", Policy::SshPublicKey)
@@ -2447,7 +2465,11 @@ mod tests {
             .set_credential_policy("bob", Policy::Password)
             .unwrap();
 
-        for (mut h, name) in [(key_only, "erin"), (none, "kiosk"), (policy_without_one, "bob")] {
+        for (mut h, name) in [
+            (key_only, "erin"),
+            (none, "kiosk"),
+            (policy_without_one, "bob"),
+        ] {
             assert!(
                 matches!(
                     h.enroll(name, EnrollAction::Add, &key_line(4, "")),

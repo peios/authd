@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """Make Bazel acquisition output portable and usable as a read-only input."""
+
 import os
-from pathlib import Path
 import sys
+from pathlib import Path
 
 
-def freeze(root):
+def freeze(root: Path) -> None:
     """Replace acquisition-cache symlinks with paths inside the snapshot."""
     prefix = "../bazel-external/"
     for directory, directories, files in os.walk(root, followlinks=False):
@@ -14,17 +15,18 @@ def freeze(root):
             if not path.is_symlink():
                 continue
             target = os.readlink(path)
-            if target.startswith(prefix):
-                destination = root / target.removeprefix(prefix)
-                destination.resolve().relative_to(root.resolve())
-                if not destination.exists():
-                    raise ValueError(f"vendor target is not present: {destination}")
-                path.unlink()
-                path.symlink_to(os.path.relpath(destination, path.parent))
+            if not target.startswith(prefix):
+                continue
+            destination = root / target.removeprefix(prefix)
+            destination.resolve().relative_to(root.resolve())
+            if not destination.exists():
+                raise ValueError(f"vendor target is not present: {destination}")
+            path.unlink()
+            path.symlink_to(os.path.relpath(destination, path.parent))
     (root / "bazel-external").unlink(missing_ok=True)
 
 
-def view(root, destination):
+def view(root: Path, destination: Path) -> None:
     """Give Bazel a writable top level without copying immutable repositories."""
     destination.mkdir(parents=True, exist_ok=True)
     for entry in root.iterdir():

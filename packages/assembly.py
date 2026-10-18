@@ -17,6 +17,7 @@ class AssemblyDefinition(TypedDict):
 
 
 def relative(value: str | Path) -> Path:
+    """Return a nonempty relative path without parent-directory components."""
     path = Path(value)
     if path.is_absolute() or ".." in path.parts or not path.parts:
         raise ValueError(f"unsafe package path: {value!r}")
@@ -24,6 +25,7 @@ def relative(value: str | Path) -> Path:
 
 
 def leaves(path: Path) -> Iterator[Path]:
+    """Yield files, symlinks, and empty directories without following links."""
     if path.is_symlink() or not path.is_dir():
         yield path
         return
@@ -35,6 +37,7 @@ def leaves(path: Path) -> Iterator[Path]:
 
 
 def same(left: Path, right: Path) -> bool:
+    """Compare entries by the payload properties preserved in a package."""
     if left.is_symlink() or right.is_symlink():
         return left.is_symlink() and right.is_symlink() and os.readlink(left) == os.readlink(right)
     if left.is_dir() or right.is_dir():
@@ -46,6 +49,7 @@ def same(left: Path, right: Path) -> bool:
 
 
 def install(source: Path, destination: Path, output: Path) -> None:
+    """Install one payload entry, rejecting conflicts and symlink traversal."""
     # Never let a previously installed symlink turn a later mapping into an
     # out-of-tree write, even when its target would currently be nonexistent.
     for parent in destination.parents:
@@ -71,7 +75,22 @@ def install(source: Path, destination: Path, output: Path) -> None:
         raise ValueError(f"unsupported package entry: {source}")
 
 
+def _mapping_leaves(matches: list[Path], root: Path) -> set[Path]:
+    """Collect payload leaves without following symlinks in matched ancestors."""
+    candidates: set[Path] = set()
+    for match in matches:
+        if any(
+            parent.is_symlink()
+            for parent in match.parents
+            if parent != root and root in parent.parents
+        ):
+            continue
+        candidates.update(leaves(match))
+    return candidates
+
+
 def assemble(definition: AssemblyDefinition, roots: Mapping[str, Path], output: Path) -> int:
+    """Map declared inputs into output and return the nonzero number of entries."""
     output.mkdir(parents=True, exist_ok=True)
     count = 0
     excluded = definition.get("excludes", [])
@@ -95,15 +114,7 @@ def assemble(definition: AssemblyDefinition, roots: Mapping[str, Path], output: 
             base = root / pattern
         if not matches or not any(p.exists() or p.is_symlink() for p in matches):
             raise ValueError(f"package mapping matched nothing: {mapping}")
-        candidates: set[Path] = set()
-        for match in matches:
-            if any(
-                parent.is_symlink()
-                for parent in match.parents
-                if parent != root and root in parent.parents
-            ):
-                continue
-            candidates.update(leaves(match))
+        candidates = _mapping_leaves(matches, root)
         for path in sorted(candidates):
             name = str(path.relative_to(root))
             if any(fnmatch.fnmatchcase(stage + ":" + name, rule) for rule in excluded):

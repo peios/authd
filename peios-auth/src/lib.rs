@@ -13,7 +13,10 @@ use std::rc::Rc;
 use auth_abi as abi;
 mod identity;
 mod sys;
-pub use identity::*;
+pub use identity::{
+    Account, AccountKey, Claim, ClaimValue, EnumerateRequest, Field, Identity, IdentityKind, Key,
+    Record, Reference, fields,
+};
 
 /// Application-visible operation progress. Denials and failures are Errors.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -91,11 +94,13 @@ pub struct Options<'a> {
 #[derive(Clone, Copy)]
 pub struct Capabilities(pub u32);
 impl Capabilities {
+    // Bit values are the public libauth capability mask from peios/auth.h.
     pub const PASSWORD: Self = Self(1);
     pub const SSH_PUBLIC_KEY: Self = Self(2);
     pub const BOTH: Self = Self(3);
 }
 
+/// Logon category using the numeric values defined by peios/auth.h.
 #[derive(Clone, Copy)]
 #[repr(u32)]
 pub enum LogonType {
@@ -133,9 +138,11 @@ pub struct Client {
     marker: PhantomData<Rc<()>>,
 }
 impl Client {
+    /// Create a client using the standard local sockets and reply timeout.
     pub fn new() -> Result<Self, Error> {
         Self::with_options(Options::default())
     }
+    /// Create a client with copied configuration; reject an incompatible library ABI.
     pub fn with_options(options: Options<'_>) -> Result<Self, Error> {
         // SAFETY: this scalar query takes no pointers or mutable state.
         if unsafe { sys::peios_auth_abi_version() } != 1 {
@@ -156,6 +163,7 @@ impl Client {
             marker: PhantomData,
         })
     }
+    /// Begin a logon conversation. Drive the returned operation and answer its prompts.
     pub fn logon(&self, request: LogonRequest<'_>) -> Result<Operation, Error> {
         let raw = abi::LogonRequest {
             size: size_of::<abi::LogonRequest>(),
@@ -185,6 +193,7 @@ impl Client {
         // SAFETY: this owns a live client; request buffers outlive the call.
         Operation::new(unsafe { sys::peios_auth_logon_begin(self.handle.as_ptr(), &raw) })
     }
+    /// Request a token for the named service identity; the authority checks permission.
     pub fn service_attest(&self, identity: &str, service: &str) -> Result<Operation, Error> {
         let raw = abi::ServiceRequest {
             size: size_of::<abi::ServiceRequest>(),
@@ -194,18 +203,21 @@ impl Client {
         // SAFETY: the client and the borrowed request remain live through begin.
         Operation::new(unsafe { sys::peios_auth_service_attest_begin(self.handle.as_ptr(), &raw) })
     }
+    /// Begin changing the calling account’s password through a credential conversation.
     pub fn change_password(&self, supported: Capabilities) -> Result<Operation, Error> {
         // SAFETY: this owns the live client handle; remaining input is scalar.
         Operation::new(unsafe {
             sys::peios_auth_password_change_begin(self.handle.as_ptr(), supported.0)
         })
     }
+    /// Begin enrolling an SSH public key for the calling account.
     pub fn add_key(&self, public_key: &str, supported: Capabilities) -> Result<Operation, Error> {
         // SAFETY: the library copies public_key before returning.
         Operation::new(unsafe {
             sys::peios_auth_key_add_begin(self.handle.as_ptr(), string(public_key), supported.0)
         })
     }
+    /// Begin removing the calling account’s SSH key identified by its fingerprint.
     pub fn remove_key(
         &self,
         fingerprint: &str,
@@ -216,22 +228,26 @@ impl Client {
             sys::peios_auth_key_remove_begin(self.handle.as_ptr(), string(fingerprint), supported.0)
         })
     }
+    /// Request the calling account’s profile and enrolled public-key metadata.
     pub fn own_account(&self) -> Result<Operation, Error> {
         // SAFETY: this owns the live client handle.
         Operation::new(unsafe { sys::peios_auth_account_self_begin(self.handle.as_ptr()) })
     }
+    /// Begin changing the calling account’s display name.
     pub fn set_display_name(&self, name: &str) -> Result<Operation, Error> {
         // SAFETY: the library copies name before returning.
         Operation::new(unsafe {
             sys::peios_auth_display_name_set_begin(self.handle.as_ptr(), string(name))
         })
     }
+    /// Query permission to end a session without ending it.
     pub fn may_end_session(&self, session_id: u64) -> Result<Operation, Error> {
         // SAFETY: the handle is live; the session ID grants no authority.
         Operation::new(unsafe {
             sys::peios_auth_session_end_query_begin(self.handle.as_ptr(), session_id)
         })
     }
+    /// Request termination of a session; the authority checks permission again.
     pub fn end_session(&self, session_id: u64) -> Result<Operation, Error> {
         // SAFETY: the handle is live; authd authorises the requested action.
         Operation::new(unsafe {
@@ -253,17 +269,20 @@ pub struct Operation {
     handle: NonNull<sys::Operation>,
     marker: PhantomData<Rc<()>>,
 }
+/// Readiness request for the operation’s borrowed socket.
 #[derive(Debug)]
 pub struct PollInfo {
     pub fd: i32,
     pub events: i16,
     pub timeout_ms: u64,
 }
+/// An owned message displayed during a prompt round.
 #[derive(Debug)]
 pub struct Message {
     pub severity: u32,
     pub text: String,
 }
+/// One credential request in a prompt round.
 #[derive(Debug)]
 pub struct Prompt {
     pub credential_ref: u32,
@@ -272,6 +291,7 @@ pub struct Prompt {
     pub label: String,
     pub parameters: Vec<u8>,
 }
+/// An owned snapshot of the active messages and credential prompts.
 #[derive(Debug)]
 pub struct Round {
     pub id: u64,
@@ -283,6 +303,7 @@ pub struct Answer<'a> {
     pub credential_ref: u32,
     pub data: &'a [u8],
 }
+/// Profile data returned by a successful logon.
 #[derive(Debug)]
 pub struct Grant {
     pub session_id: u64,
@@ -290,6 +311,7 @@ pub struct Grant {
     pub shell: String,
     pub display_name: String,
 }
+/// Counts reported by a completed session termination.
 #[derive(Debug)]
 pub struct Ended {
     pub ended: u32,
@@ -312,11 +334,13 @@ impl Operation {
             _ => Err(invalid()),
         }
     }
+    /// Advance without blocking; report waiting, prompts, completion, or failure.
     pub fn step(&mut self) -> Result<Progress, Error> {
         // SAFETY: exclusive access to the uniquely owned operation.
         let state = unsafe { sys::peios_auth_operation_step(self.handle.as_ptr()) };
         self.progress(state)
     }
+    /// Block until prompts, completion, or failure requires the caller’s attention.
     pub fn wait(&mut self) -> Result<Progress, Error> {
         // SAFETY: exclusive access for the duration of the blocking driver.
         let state = unsafe { sys::peios_auth_operation_wait(self.handle.as_ptr()) };
@@ -333,12 +357,14 @@ impl Operation {
             timeout_ms: raw.timeout_ms,
         })
     }
+    /// Cancel locally. A submitted mutation can still have taken effect.
     pub fn cancel(&mut self) {
         // SAFETY: exclusive access to the uniquely owned operation.
         unsafe {
             sys::peios_auth_operation_cancel(self.handle.as_ptr());
         }
     }
+    /// Copy the failure details; return an error if no failure is available.
     pub fn error(&self) -> Result<Error, Error> {
         // SAFETY: the getter initializes storage on success; views are copied now.
         let raw =
@@ -350,6 +376,7 @@ impl Operation {
             message: copy_text(raw.message),
         })
     }
+    /// Copy the active prompt round; reject an operation without pending prompts.
     pub fn round(&self) -> Result<Round, Error> {
         let (mut id, mut messages, mut prompts) = (0, 0, 0);
         // SAFETY: all three outputs are distinct live stack variables.
@@ -394,6 +421,7 @@ impl Operation {
         }
         Ok(result)
     }
+    /// Submit answers for the active round. The caller remains responsible for wiping them.
     pub fn respond(&mut self, round: u64, answers: &[Answer<'_>]) -> Result<(), Error> {
         let raw: Vec<_> = answers
             .iter()
@@ -411,6 +439,7 @@ impl Operation {
         }
         Ok(())
     }
+    /// Copy a successful logon’s profile; reject other operation states.
     pub fn grant(&self) -> Result<Grant, Error> {
         // SAFETY: live immutable operation and valid writable result storage.
         let raw =
@@ -422,6 +451,7 @@ impl Operation {
             display_name: copy_text(raw.display_name),
         })
     }
+    /// Transfer the granted token once. The caller owns and closes the returned descriptor.
     pub fn take_token(&mut self) -> Result<OwnedFd, Error> {
         // SAFETY: the operation transfers ownership of a fresh CLOEXEC fd.
         let fd = unsafe { sys::peios_auth_operation_take_token(self.handle.as_ptr()) };
@@ -431,6 +461,7 @@ impl Operation {
         // SAFETY: this descriptor is now exclusively owned by the caller.
         Ok(unsafe { OwnedFd::from_raw_fd(fd) })
     }
+    /// Copy the termination counts from a completed session-end operation.
     pub fn ended(&self) -> Result<Ended, Error> {
         // SAFETY: the getter validates result kind and initializes out on success.
         let raw =

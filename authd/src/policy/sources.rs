@@ -175,26 +175,30 @@ pub fn sources() -> Vec<SourceEntry> {
             continue;
         };
 
-        let (may_assert_foreign_memberships, pinned_domain, unix_id_range, order) =
-            match Key::open(Some(&key), &name, KeyAccess::QUERY_VALUE, OpenFlags::empty()) {
-                Ok(entry) => (
-                    is_set(&entry, FOREIGN_MEMBERSHIPS_VALUE),
-                    pinned_domain(&entry, &name),
-                    unix_id_range(&entry, &name),
-                    search_order(&entry, &name),
-                ),
-                Err(error) => {
-                    // The entry exists — it was just enumerated — so failing to
-                    // reopen it is a real fault rather than the ordinary
-                    // "unconfigured" case. Admit it with the narrower
-                    // permission rather than dropping it.
-                    log::warn(format_args!(
-                        "could not read {SOURCES_KEY}\\{name} ({error}); assuming no \
+        let (may_assert_foreign_memberships, pinned_domain, unix_id_range, order) = match Key::open(
+            Some(&key),
+            &name,
+            KeyAccess::QUERY_VALUE,
+            OpenFlags::empty(),
+        ) {
+            Ok(entry) => (
+                is_set(&entry, FOREIGN_MEMBERSHIPS_VALUE),
+                pinned_domain(&entry, &name),
+                unix_id_range(&entry, &name),
+                search_order(&entry, &name),
+            ),
+            Err(error) => {
+                // The entry exists — it was just enumerated — so failing to
+                // reopen it is a real fault rather than the ordinary
+                // "unconfigured" case. Admit it with the narrower
+                // permission rather than dropping it.
+                log::warn(format_args!(
+                    "could not read {SOURCES_KEY}\\{name} ({error}); assuming no \
                          foreign memberships and no Unix ID range"
-                    ));
-                    (false, None, None, DEFAULT_SEARCH_ORDER)
-                }
-            };
+                ));
+                (false, None, None, DEFAULT_SEARCH_ORDER)
+            }
+        };
 
         entries.push(SourceEntry {
             name,

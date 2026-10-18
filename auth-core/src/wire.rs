@@ -1894,7 +1894,10 @@ mod tests {
         })
         .unwrap();
         assert_eq!(ended.len(), HEADER_BYTES + 4 + 8);
-        assert_eq!(ended[HEADER_BYTES + 4..HEADER_BYTES + 8], 5u32.to_le_bytes());
+        assert_eq!(
+            ended[HEADER_BYTES + 4..HEADER_BYTES + 8],
+            5u32.to_le_bytes()
+        );
         assert_eq!(ended[HEADER_BYTES + 8..], 2u32.to_le_bytes());
     }
 
@@ -1907,7 +1910,10 @@ mod tests {
         w.u32(7);
         w.close(body);
         let bytes = w.finish().unwrap();
-        assert_eq!(decode_session_end(&bytes).unwrap_err(), WireError::Truncated);
+        assert_eq!(
+            decode_session_end(&bytes).unwrap_err(),
+            WireError::Truncated
+        );
     }
 
     #[test]
@@ -2010,7 +2016,10 @@ mod tests {
         w.string("from the future", 64).unwrap();
         w.close(body);
         let bytes = w.finish().unwrap();
-        assert_eq!(decode_credential_enroll_start(&bytes).unwrap(), enroll_start());
+        assert_eq!(
+            decode_credential_enroll_start(&bytes).unwrap(),
+            enroll_start()
+        );
     }
 
     /// Every field is mandatory: the message is newer than the rule that lets
@@ -2020,8 +2029,11 @@ mod tests {
     fn an_enroll_start_without_its_material_is_malformed() {
         let mut w = Writer::new(&FRAMING, MSG_CREDENTIAL_ENROLL_START);
         let body = w.open();
-        w.bytes(&[CredentialType::Password as u8], MAX_SUPPORTED_CREDENTIAL_TYPES)
-            .unwrap();
+        w.bytes(
+            &[CredentialType::Password as u8],
+            MAX_SUPPORTED_CREDENTIAL_TYPES,
+        )
+        .unwrap();
         w.u8(EnrollAction::Add as u8);
         w.u8(CredentialType::SshPublicKey as u8);
         w.close(body);
@@ -2036,8 +2048,11 @@ mod tests {
         for (action, credential_type) in [(3u8, 2u8), (0, 2), (1, 99)] {
             let mut w = Writer::new(&FRAMING, MSG_CREDENTIAL_ENROLL_START);
             let body = w.open();
-            w.bytes(&[CredentialType::Password as u8], MAX_SUPPORTED_CREDENTIAL_TYPES)
-                .unwrap();
+            w.bytes(
+                &[CredentialType::Password as u8],
+                MAX_SUPPORTED_CREDENTIAL_TYPES,
+            )
+            .unwrap();
             w.u8(action);
             w.u8(credential_type);
             w.string("x", MAX_ENROLL_MATERIAL_BYTES).unwrap();

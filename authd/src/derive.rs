@@ -125,9 +125,7 @@ fn add_unique(groups: &mut Vec<(Sid, u32)>, sid: Sid, attributes: u32) {
 /// sub-authority of 5 is the logon-SID namespace, whatever follows.
 pub(crate) fn is_logon_sid(sid: &SidRef) -> bool {
     let bytes = sid.as_bytes();
-    bytes.len() >= 12
-        && bytes[2..8] == [0, 0, 0, 0, 0, 5]
-        && bytes[8..12] == 5u32.to_le_bytes()
+    bytes.len() >= 12 && bytes[2..8] == [0, 0, 0, 0, 0, 5] && bytes[8..12] == 5u32.to_le_bytes()
 }
 
 /// Everything a mint needs. A struct rather than seven positional arguments,
@@ -151,11 +149,7 @@ pub(crate) fn is_logon_sid(sid: &SidRef) -> bool {
 ///   through would fail every logon behind a buggy source.
 /// - Duplicates are dropped, including against the derived set. A source
 ///   asserting `Everyone` is not wrong, merely redundant.
-pub fn token_groups(
-    user: &SidRef,
-    asserted: &[&SidRef],
-    logon_type: LogonType,
-) -> Vec<(Sid, u32)> {
+pub fn token_groups(user: &SidRef, asserted: &[&SidRef], logon_type: LogonType) -> Vec<(Sid, u32)> {
     let enabled = (GroupAttributes::MANDATORY
         | GroupAttributes::ENABLED_BY_DEFAULT
         | GroupAttributes::ENABLED)
@@ -614,7 +608,7 @@ mod tests {
         let bad = wire_claim(Values::Sid(vec![b"not a sid".to_vec()]));
 
         assert!(kacs_claims(core::slice::from_ref(&good)).is_some());
-        assert_eq!(kacs_claims(&[bad.clone()]), None);
+        assert_eq!(kacs_claims(std::slice::from_ref(&bad)), None);
         assert_eq!(
             kacs_claims(&[good, bad]),
             None,
@@ -660,15 +654,19 @@ mod tests {
     #[test]
     fn add_unique_keeps_the_first_mention() {
         let user: Sid = "S-1-5-21-0-0-0-1000".parse().unwrap();
-        let mut groups = vec![(user.clone(), 0xf0)];
+        let mut groups = vec![(user, 0xf0)];
 
         // A source redundantly asserting the user must not strip OWNER back
         // off by re-adding it with plain attributes.
-        add_unique(&mut groups, user.clone(), 0x01);
+        add_unique(&mut groups, user, 0x01);
         assert_eq!(groups.len(), 1);
         assert_eq!(groups[0].1, 0xf0);
 
-        add_unique(&mut groups, Sid::well_known(peios::security::WellKnown::Everyone), 0x01);
+        add_unique(
+            &mut groups,
+            Sid::well_known(peios::security::WellKnown::Everyone),
+            0x01,
+        );
         assert_eq!(groups.len(), 2);
     }
 }

@@ -317,9 +317,10 @@ fn check_shadowing(
     let slots = registry.slots();
     // Match the registration, not just its name. If it disappeared or was
     // replaced during authentication, its position is no longer established.
-    let Some(position) = slots.iter().position(|slot| {
-        matches!(slot, Slot::Live(source) if Arc::ptr_eq(source, owner))
-    }) else {
+    let Some(position) = slots
+        .iter()
+        .position(|slot| matches!(slot, Slot::Live(source) if Arc::ptr_eq(source, owner)))
+    else {
         return;
     };
     for slot in &slots[position + 1..] {
@@ -433,17 +434,35 @@ fn by_unix_id(
 // asked about — which is also what stops two sources both claiming `Everyone`.
 // ---------------------------------------------------------------------------
 
-fn well_known_by_name(registry: &Registry, name: &str, kind: Kind, fields: Fields, deadline: std::time::Instant) -> Option<Answer> {
+fn well_known_by_name(
+    registry: &Registry,
+    name: &str,
+    kind: Kind,
+    fields: Fields,
+    deadline: std::time::Instant,
+) -> Option<Answer> {
     let sid = well_known::by_name(name)?;
     well_known_answer(registry, sid.as_ref(), kind, fields, deadline)
 }
 
-fn well_known_by_sid(registry: &Registry, sid: &SidRef, kind: Kind, fields: Fields, deadline: std::time::Instant) -> Option<Answer> {
+fn well_known_by_sid(
+    registry: &Registry,
+    sid: &SidRef,
+    kind: Kind,
+    fields: Fields,
+    deadline: std::time::Instant,
+) -> Option<Answer> {
     well_known::name_of(sid)?;
     well_known_answer(registry, sid, kind, fields, deadline)
 }
 
-fn well_known_by_unix_id(registry: &Registry, id: u32, kind: Kind, fields: Fields, deadline: std::time::Instant) -> Option<Answer> {
+fn well_known_by_unix_id(
+    registry: &Registry,
+    id: u32,
+    kind: Kind,
+    fields: Fields,
+    deadline: std::time::Instant,
+) -> Option<Answer> {
     let sid = well_known::by_unix_id(id)?;
     well_known_answer(registry, sid.as_ref(), kind, fields, deadline)
 }
@@ -467,7 +486,11 @@ fn recorded_well_known(of: &auth_core::ident::Key) -> Option<peios::security::Si
 /// where a source in the order couldn't or wouldn't say: a list missing one
 /// source's members would look complete, and is a wrong answer rather than a
 /// smaller one (§2.16).
-fn recorded_members(registry: &Registry, sid: &SidRef, deadline: std::time::Instant) -> Result<Vec<auth_core::ident::Reference>, WithheldReason> {
+fn recorded_members(
+    registry: &Registry,
+    sid: &SidRef,
+    deadline: std::time::Instant,
+) -> Result<Vec<auth_core::ident::Reference>, WithheldReason> {
     if !registry.complete() {
         return Err(WithheldReason::Declined);
     }
@@ -479,19 +502,38 @@ fn recorded_members(registry: &Registry, sid: &SidRef, deadline: std::time::Inst
         if !source.may_assert_foreign_memberships() {
             continue;
         }
-        if !source.capabilities().contains(psi::Capabilities::ENUMERATES) {
+        if !source
+            .capabilities()
+            .contains(psi::Capabilities::ENUMERATES)
+        {
             return Err(WithheldReason::Declined);
         }
         let mut cursor = Vec::new();
         loop {
-            let page = page_from(&source, Kind::Principal, Fields::UNIX_ID, Some(of.clone()), &cursor, deadline).ok_or(WithheldReason::Declined)?;
+            let page = page_from(
+                &source,
+                Kind::Principal,
+                Fields::UNIX_ID,
+                Some(of.clone()),
+                &cursor,
+                deadline,
+            )
+            .ok_or(WithheldReason::Declined)?;
             for entry in &page.entries {
-                if let Answer { record: Some(record), .. } = found(&source, entry, Kind::Principal, Fields::UNIX_ID) {
+                if let Answer {
+                    record: Some(record),
+                    ..
+                } = found(&source, entry, Kind::Principal, Fields::UNIX_ID)
+                {
                     let unix_id = match record.value(Fields::UNIX_ID) {
                         Some(Value::UnixId(id)) => *id,
                         _ => 0,
                     };
-                    members.push(auth_core::ident::Reference { sid: record.sid, name: record.qualified_name, unix_id });
+                    members.push(auth_core::ident::Reference {
+                        sid: record.sid,
+                        name: record.qualified_name,
+                        unix_id,
+                    });
                 }
             }
             if members.len() > auth_core::ident::MAX_MEMBERS {
@@ -506,7 +548,13 @@ fn recorded_members(registry: &Registry, sid: &SidRef, deadline: std::time::Inst
     Ok(members)
 }
 
-fn well_known_answer(registry: &Registry, sid: &SidRef, kind: Kind, fields: Fields, deadline: std::time::Instant) -> Option<Answer> {
+fn well_known_answer(
+    registry: &Registry,
+    sid: &SidRef,
+    kind: Kind,
+    fields: Fields,
+    deadline: std::time::Instant,
+) -> Option<Answer> {
     let name = well_known::name_of(sid)?;
 
     // Every one of these is a group. `SYSTEM` is the awkward case — it is a
@@ -1100,7 +1148,14 @@ pub fn enumerate_members(
     cursor: &[u8],
 ) -> Result<Page, Outcome> {
     if let Some(sid) = recorded_well_known(of) {
-        return walk(registry, kind, fields, Some(psi::Key::Sid(sid.as_ref().as_bytes().to_vec())), true, cursor);
+        return walk(
+            registry,
+            kind,
+            fields,
+            Some(psi::Key::Sid(sid.as_ref().as_bytes().to_vec())),
+            true,
+            cursor,
+        );
     }
     let fields = fields.intersection(KNOWN);
     let deadline = std::time::Instant::now() + QUERY_TIMEOUT;
@@ -1211,7 +1266,7 @@ fn owning_group_source(
             let Some(sid) = SidRef::from_bytes(bytes) else {
                 return Err(Outcome::Malformed);
             };
-            match registry.owning(&sid) {
+            match registry.owning(sid) {
                 Some(source) => (source, psi::Key::Sid(bytes.clone())),
                 None if registry.complete() => return Err(Outcome::NotFound),
                 None => return Err(Outcome::Unavailable),
@@ -1307,15 +1362,25 @@ fn split_cursor(cursor: &[u8]) -> Option<(Option<String>, &[u8])> {
 /// Emitted by authd itself, and only where a caller asked for groups: every one
 /// of them that carries a number is a group, and `getgrent` would otherwise
 /// never see `Everyone` at all.
-pub fn well_known_page(registry: &Registry, kind: Kind, fields: Fields) -> Vec<auth_core::ident::Record> {
+pub fn well_known_page(
+    registry: &Registry,
+    kind: Kind,
+    fields: Fields,
+) -> Vec<auth_core::ident::Record> {
     if kind != Kind::Group {
         return Vec::new();
     }
     let deadline = std::time::Instant::now() + QUERY_TIMEOUT;
     well_known::numbered()
         .filter_map(|sid| {
-            well_known_answer(registry, sid.as_ref(), kind, fields.intersection(KNOWN), deadline)
-                .and_then(|answer| answer.record)
+            well_known_answer(
+                registry,
+                sid.as_ref(),
+                kind,
+                fields.intersection(KNOWN),
+                deadline,
+            )
+            .and_then(|answer| answer.record)
         })
         .collect()
 }
@@ -2445,8 +2510,18 @@ mod tests {
     /// walk; who is in `Everyone` is still a rule.
     #[test]
     fn a_builtin_group_s_members_come_from_the_sources_that_may_record_them() {
-        let registry = stub_with_foreign("lpsd", DOMAIN, 1, Some(entry("S-1-5-21-1-2-3-1000", "jack", 1000)));
-        let answer = lookup(&registry, &Key::Name("Administrators".into()), Kind::Group, Fields::MEMBERS);
+        let registry = stub_with_foreign(
+            "lpsd",
+            DOMAIN,
+            1,
+            Some(entry("S-1-5-21-1-2-3-1000", "jack", 1000)),
+        );
+        let answer = lookup(
+            &registry,
+            &Key::Name("Administrators".into()),
+            Kind::Group,
+            Fields::MEMBERS,
+        );
         let record = answer.record.expect("a record");
         assert_eq!(
             record.value(Fields::MEMBERS),
@@ -2457,45 +2532,99 @@ mod tests {
             }]))
         );
         let of = auth_core::ident::Key::Name("Administrators".into());
-        let page = enumerate_members(&registry, &of, Kind::Principal, Fields::PASSWD, b"").expect("a page");
+        let page = enumerate_members(&registry, &of, Kind::Principal, Fields::PASSWD, b"")
+            .expect("a page");
         assert_eq!(page.entries.len(), 1);
         assert!(page.incomplete.is_empty());
 
-        let everyone = lookup(&registry, &Key::Name("Everyone".into()), Kind::Group, Fields::MEMBERS).record.expect("a record");
-        assert_eq!(everyone.reason(Fields::MEMBERS), Some(WithheldReason::Absent));
+        let everyone = lookup(
+            &registry,
+            &Key::Name("Everyone".into()),
+            Kind::Group,
+            Fields::MEMBERS,
+        )
+        .record
+        .expect("a record");
+        assert_eq!(
+            everyone.reason(Fields::MEMBERS),
+            Some(WithheldReason::Absent)
+        );
     }
 
     /// authd says what each of its own groups is, after the fields before it.
     #[test]
     fn a_well_known_group_is_described() {
         let registry = stub_with_foreign("lpsd", DOMAIN, 1, None);
-        let record = lookup(&registry, &Key::Name("Administrators".into()), Kind::Group, Fields::UNIX_ID | Fields::DESCRIPTION)
-            .record
-            .expect("a record");
+        let record = lookup(
+            &registry,
+            &Key::Name("Administrators".into()),
+            Kind::Group,
+            Fields::UNIX_ID | Fields::DESCRIPTION,
+        )
+        .record
+        .expect("a record");
         assert_eq!(record.values.len(), 2);
         assert_eq!(record.values[0], Value::UnixId(102));
-        assert!(matches!(&record.values[1], Value::Description(said) if said.contains("change anything")));
+        assert!(
+            matches!(&record.values[1], Value::Description(said) if said.contains("change anything"))
+        );
     }
 
     /// A source that may not assert a membership outside its domain has
     /// none of `Administrators` that a token would carry.
     #[test]
     fn a_source_confined_to_its_domain_adds_nobody_to_a_builtin_group() {
-        let registry = stub("corp", DOMAIN, 1, Some(entry("S-1-5-21-1-2-3-1000", "jack", 1000)));
-        let record = lookup(&registry, &Key::Name("Administrators".into()), Kind::Group, Fields::MEMBERS).record.expect("a record");
-        assert_eq!(record.value(Fields::MEMBERS), Some(&Value::Members(Vec::new())));
+        let registry = stub(
+            "corp",
+            DOMAIN,
+            1,
+            Some(entry("S-1-5-21-1-2-3-1000", "jack", 1000)),
+        );
+        let record = lookup(
+            &registry,
+            &Key::Name("Administrators".into()),
+            Kind::Group,
+            Fields::MEMBERS,
+        )
+        .record
+        .expect("a record");
+        assert_eq!(
+            record.value(Fields::MEMBERS),
+            Some(&Value::Members(Vec::new()))
+        );
         let of = auth_core::ident::Key::Name("Administrators".into());
-        let page = enumerate_members(&registry, &of, Kind::Principal, Fields::PASSWD, b"").expect("a page");
+        let page = enumerate_members(&registry, &of, Kind::Principal, Fields::PASSWD, b"")
+            .expect("a page");
         assert!(page.entries.is_empty() && page.incomplete.is_empty());
     }
 
     /// With a source missing, a list of the rest would look complete.
     #[test]
     fn a_builtin_group_s_members_are_declined_past_an_absent_source() {
-        let registry = Arc::new(Registry::for_test(&[("first", 1, Some(range())), ("second", 2, Some(range()))]));
-        add_stub_with_foreign(&registry, "first", DOMAIN, 1, Some(entry("S-1-5-21-1-2-3-1000", "jack", 1000)), true);
-        let record = lookup(&registry, &Key::Name("Administrators".into()), Kind::Group, Fields::MEMBERS).record.expect("a record");
-        assert_eq!(record.reason(Fields::MEMBERS), Some(WithheldReason::Declined));
+        let registry = Arc::new(Registry::for_test(&[
+            ("first", 1, Some(range())),
+            ("second", 2, Some(range())),
+        ]));
+        add_stub_with_foreign(
+            &registry,
+            "first",
+            DOMAIN,
+            1,
+            Some(entry("S-1-5-21-1-2-3-1000", "jack", 1000)),
+            true,
+        );
+        let record = lookup(
+            &registry,
+            &Key::Name("Administrators".into()),
+            Kind::Group,
+            Fields::MEMBERS,
+        )
+        .record
+        .expect("a record");
+        assert_eq!(
+            record.reason(Fields::MEMBERS),
+            Some(WithheldReason::Declined)
+        );
     }
 
     #[test]

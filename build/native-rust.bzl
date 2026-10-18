@@ -22,7 +22,13 @@ def _native_rust_impl(ctx):
     ctx.file("BUILD.bazel", """
 load("@rules_rust//rust:toolchain.bzl", "rust_stdlib_filegroup", "rust_toolchain")
 package(default_visibility = ["//visibility:public"])
-filegroup(name = "driver", srcs = glob(["compiler-libs/librustc_driver*.so", "compiler-libs/libLLVM*.so*"], allow_empty = True))
+filegroup(
+    name = "driver",
+    srcs = glob(
+        ["compiler-libs/librustc_driver*.so", "compiler-libs/libLLVM*.so*"],
+        allow_empty = True,
+    ),
+)
 rust_stdlib_filegroup(name = "std", srcs = glob(["lib/rustlib/x86_64-unknown-linux-gnu/lib/**"]))
 rust_toolchain(
     name = "implementation",
@@ -66,6 +72,7 @@ toolchain(
 """ % version)
 
 native_rust = repository_rule(
+    doc = "Expose the installed Peios compiler and hardened standard library as a Rust toolchain.",
     implementation = _native_rust_impl,
     local = True,
     configure = True,

@@ -182,9 +182,9 @@ impl Entry {
 /// (PSPU §2.19), and its members are asked of the sources. Who is in the rest
 /// is a rule authd applies when it derives a token, and nothing records it.
 pub fn recorded(sid: &SidRef) -> bool {
-    WELL_KNOWN
-        .iter()
-        .any(|entry| entry.authority == 5 && entry.sub_authorities.first() == Some(&32) && entry.is(sid))
+    WELL_KNOWN.iter().any(|entry| {
+        entry.authority == 5 && entry.sub_authorities.first() == Some(&32) && entry.is(sid)
+    })
 }
 
 /// The POSIX id this machine projects a well-known SID to, if it has one.
@@ -300,7 +300,10 @@ mod tests {
             ("Service", "S-1-5-6"),
             ("Remote Interactive", "S-1-5-14"),
         ] {
-            assert_eq!(by_name(name).as_deref().map(SidRef::to_sid), Some(sid(text)));
+            assert_eq!(
+                by_name(name).as_deref().map(SidRef::to_sid),
+                Some(sid(text))
+            );
             assert_eq!(unix_id(sid(text).as_ref()), None, "{name} must have no gid");
         }
     }
@@ -332,7 +335,9 @@ mod tests {
     #[test]
     fn a_multi_word_name_resolves() {
         assert_eq!(
-            by_name("authenticated users").as_ref().map(|s| s.to_string()),
+            by_name("authenticated users")
+                .as_ref()
+                .map(|s| s.to_string()),
             Some(sid("S-1-5-11").to_string())
         );
     }
@@ -368,7 +373,11 @@ mod tests {
         for entry in WELL_KNOWN {
             let built = entry.sid().expect("a buildable SID");
             let said = description_of(built.as_ref()).unwrap_or_default();
-            assert!(!said.is_empty() && said.len() <= auth_core::wire::MAX_DESCRIPTION_BYTES, "{}", entry.name);
+            assert!(
+                !said.is_empty() && said.len() <= auth_core::wire::MAX_DESCRIPTION_BYTES,
+                "{}",
+                entry.name
+            );
         }
         assert_eq!(description_of(sid("S-1-5-21-1-2-3-1000").as_ref()), None);
     }

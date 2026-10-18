@@ -18,7 +18,7 @@ typedef struct peios_auth_operation peios_auth_operation;
  * endpoint selection and tests, never untrusted environment variables.
  *
  * All pointers must be valid and correctly aligned for their declared types.
- * Input byte spans may use NULL only at length zero. Text is UTF-8 without NUL;
+ * Input byte spans can use NULL only at length zero. Text is UTF-8 without NUL;
  * byte spans are not terminated. Inputs are copied before begin/respond return.
  * Callers own and must erase their credential buffers after use.
  *
@@ -52,7 +52,7 @@ typedef struct peios_auth_operation peios_auth_operation;
  * Unknown denial codes are preserved. Check outcome_unknown before offering a
  * retry: any submitted mutating request can have taken effect without a reply.
  * No mutation is retried automatically. A successful query does not guarantee
- * that a later session-end request will still be authorised.
+ * that a later session-end request will still be authorized.
  *
  * Identity results retain outcome, incomplete sources and opaque next cursor.
  * Continue while next is nonempty, even if a page has no records. Field state
@@ -66,7 +66,7 @@ typedef struct peios_auth_operation peios_auth_operation;
  * is PASSWORD, SSH_PUBLIC_KEY, or zero to use source policy. Empty tty and
  * remote_host are absent. SSH binding fields are all absent or all present:
  * connection is 16 nonzero-as-a-whole bytes, session is 16..64 bytes, and
- * username is nonempty UTF-8. These describe the authorised live transport.
+ * username is nonempty UTF-8. These describe the authorized live transport.
  * Key.kind selects NAME (UTF-8 value), SID (binary value), or UNIX_ID (unix_id).
  * LookupRequest.kind can be ANY; EnumerateRequest.kind must be PRINCIPAL or
  * GROUP. A NULL group enumerates all; otherwise it names the group whose

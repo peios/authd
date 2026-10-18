@@ -23,20 +23,23 @@ WRITER_REVISION = "9d586e59b6560a2e95eb41564fdcc759ea4f0733"
 
 
 def digest(path: Path) -> str:
+    """Return the SHA-256 identity of a file without loading it all into memory."""
     with path.open("rb") as stream:
         return hashlib.file_digest(stream, "sha256").hexdigest()
 
 
 def write_json(path: Path, value: object) -> None:
-    path.write_text(json.dumps(value, sort_keys=True, indent=2) + "\n")
+    """Write deterministic UTF-8 JSON with a final newline."""
+    path.write_text(json.dumps(value, sort_keys=True, indent=2) + "\n", encoding="utf-8")
 
 
 def source_payload(manifest: Path, payload: Path) -> dict[str, str | int]:
+    """Materialize only the declared source files and return their provenance."""
     # Package the declared source view. Bazel's input symlinks
     # are execution plumbing, not package symlinks. No undeclared tree walk.
     sources = payload / "usr/src/authd"
     fingerprints = {}
-    for entry in json.loads(manifest.read_text()):
+    for entry in json.loads(manifest.read_text(encoding="utf-8")):
         name = relative(entry["relative"])
         original = Path(entry["path"])
         target = sources / name
@@ -47,7 +50,7 @@ def source_payload(manifest: Path, payload: Path) -> dict[str, str | int]:
         fingerprints[str(name)] = digest(target) + ":" + oct(mode)
     if not fingerprints:
         raise ValueError("empty source package")
-    encoded = json.dumps(fingerprints, sort_keys=True).encode()
+    encoded = json.dumps(fingerprints, sort_keys=True).encode("utf-8")
     return {
         "input_digest": hashlib.sha256(encoded).hexdigest(),
         "source_files": len(fingerprints),
@@ -56,6 +59,7 @@ def source_payload(manifest: Path, payload: Path) -> dict[str, str | int]:
 
 
 def commit(args: argparse.Namespace) -> None:
+    """Assemble one payload, verify the canonical writer result, and record provenance."""
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=True)
     # Provenance combines heterogeneous decoded build metadata at the JSON boundary.
@@ -76,7 +80,7 @@ def commit(args: argparse.Namespace) -> None:
             name, arch = "dev.peios.authd-source", "noarch"
             provenance["source"] = source_payload(args.source_manifest, payload)
         else:
-            definition = json.loads(args.definition.read_text())
+            definition = json.loads(args.definition.read_text(encoding="utf-8"))
             metadata = definition["package"]
             name, arch = metadata["name"], metadata["architecture"]
             if metadata["version"] != args.version:
@@ -84,7 +88,9 @@ def commit(args: argparse.Namespace) -> None:
             roots = {"source": args.data.resolve(), "stage": args.stage.resolve()}
             assemble(cast(AssemblyDefinition, definition), roots, payload)
             provenance["recipe_sha256"] = digest(args.definition)
-            provenance["build"] = json.loads((args.stage / "build.json").read_text())
+            provenance["build"] = json.loads(
+                (args.stage / "build.json").read_text(encoding="utf-8")
+            )
             # The canonical manifest is deliberately unchanged. Policy remains explicit
             # alongside it until an installer supports these fields in its own schema.
             provenance["package_metadata"] = {
@@ -112,12 +118,13 @@ def commit(args: argparse.Namespace) -> None:
 
 
 def manifest_blobs(store: Path, info: Mapping[str, Any]) -> set[Path]:
+    """Validate canonical manifest identity and entries, returning referenced blob paths."""
     # This JSON boundary validates identity and manifest shape before consuming it.
     path = relative(info["manifest"])
     manifest = store / path
     if "sha256:" + digest(manifest) != info["manifest_hash"]:
         raise ValueError(f"manifest hash mismatch: {manifest}")
-    doc = tomllib.loads(manifest.read_text())
+    doc = tomllib.loads(manifest.read_text(encoding="utf-8"))
     if set(doc) != {"name", "version", "arch", "files"}:
         raise ValueError("unexpected canonical manifest fields")
     for key in ("name", "version", "arch"):
@@ -146,11 +153,12 @@ def manifest_blobs(store: Path, info: Mapping[str, Any]) -> set[Path]:
 
 
 def merge(stores: Sequence[Path], output: Path, checker: Path) -> None:
+    """Merge declared stores, rejecting identity conflicts and invalid blob contents."""
     output.mkdir(parents=True, exist_ok=True)
     packages, seen = [], set()
     blob_names = set()
     for store in stores:
-        info = json.loads((store / "provenance.json").read_text())
+        info = json.loads((store / "provenance.json").read_text(encoding="utf-8"))
         identity = (info["name"], info["version"], info["arch"])
         if identity in seen:
             raise ValueError(f"duplicate package identity: {identity}")
@@ -186,6 +194,7 @@ def merge(stores: Sequence[Path], output: Path, checker: Path) -> None:
 
 
 def main() -> None:
+    """Dispatch the package-commit or store-merge command."""
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
     build = commands.add_parser("commit")

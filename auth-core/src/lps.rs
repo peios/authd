@@ -1214,7 +1214,7 @@ mod tests {
             home: None,
             shell: None,
             display_name: None,
-            name:"jack".into(),
+            name: "jack".into(),
             credential: Credential::Password(b"hunter2"),
             enabled: true,
             groups: vec!["Administrators".into()],
@@ -1238,7 +1238,7 @@ mod tests {
             home: None,
             shell: None,
             display_name: None,
-            name:"guest".into(),
+            name: "guest".into(),
             credential: Credential::None,
             enabled: false,
             groups: vec![],
@@ -1262,7 +1262,7 @@ mod tests {
             home: None,
             shell: None,
             display_name: None,
-            name:"jack".into(),
+            name: "jack".into(),
             credential: Credential::Password(b"pw"),
             enabled: true,
             groups: vec![],
@@ -1295,7 +1295,7 @@ mod tests {
             home: None,
             shell: None,
             display_name: None,
-            name:"jack".into(),
+            name: "jack".into(),
             credential: Credential::None,
             enabled: true,
             groups: vec![],
@@ -1307,7 +1307,7 @@ mod tests {
             home: None,
             shell: None,
             display_name: None,
-            name:"jack".into(),
+            name: "jack".into(),
             credential: Credential::Password(b""),
             enabled: true,
             groups: vec![],
@@ -1480,7 +1480,10 @@ mod tests {
     fn an_unknown_credential_policy_is_refused() {
         let mut bytes = encode_principal(&detail()).unwrap();
         *bytes.last_mut().unwrap() = 0x7f;
-        assert_eq!(decode_principal(&bytes).unwrap_err(), WireError::UnknownValue);
+        assert_eq!(
+            decode_principal(&bytes).unwrap_err(),
+            WireError::UnknownValue
+        );
     }
 
     #[test]
@@ -1534,7 +1537,10 @@ mod tests {
             name: "dana".into(),
             new_name: "dscully".into(),
         };
-        assert_eq!(decode_rename(&encode_rename(&rename).unwrap()).unwrap(), rename);
+        assert_eq!(
+            decode_rename(&encode_rename(&rename).unwrap()).unwrap(),
+            rename
+        );
 
         let set = SetLogonTypes {
             name: "dana".into(),
@@ -1623,7 +1629,10 @@ mod tests {
         w.u32(0);
         w.close(entry);
         w.close(body);
-        assert_eq!(decode_groups(&w.finish().unwrap()).unwrap()[0].description, "");
+        assert_eq!(
+            decode_groups(&w.finish().unwrap()).unwrap()[0].description,
+            ""
+        );
     }
 
     /// Clearing a display name and leaving it alone are different operations,
@@ -1791,7 +1800,7 @@ mod tests {
                 home: None,
                 shell: None,
                 display_name: None,
-                name:"jack".into(),
+                name: "jack".into(),
                 credential: Credential::Password(&long),
                 enabled: true,
                 groups: vec![],
@@ -1810,7 +1819,7 @@ mod tests {
                 home: None,
                 shell: None,
                 display_name: None,
-                name:"jack".into(),
+                name: "jack".into(),
                 credential: Credential::Password(b"pw"),
                 enabled: true,
                 groups: vec!["Administrators".to_string(); MAX_GROUPS + 1],
@@ -2307,7 +2316,10 @@ mod self_tests {
     fn account() -> OwnAccount {
         OwnAccount {
             name: "alice".into(),
-            sid: vec![1, 5, 0, 0, 0, 0, 0, 5, 21, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0, 3, 0, 0, 0, 232, 3, 0, 0],
+            sid: vec![
+                1, 5, 0, 0, 0, 0, 0, 5, 21, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0, 3, 0, 0, 0, 232, 3, 0,
+                0,
+            ],
             display_name: "Alice Liddell".into(),
             enabled: true,
             policy: Policy::PasswordOrKey,
@@ -2324,7 +2336,10 @@ mod self_tests {
 
     #[test]
     fn self_messages_round_trip() {
-        assert_eq!(decode_self(&encode_self(&account()).unwrap()).unwrap(), account());
+        assert_eq!(
+            decode_self(&encode_self(&account()).unwrap()).unwrap(),
+            account()
+        );
         decode_show_self(&encode_show_self().unwrap()).unwrap();
         let set = SetDisplayName {
             display_name: "Alice".into(),

@@ -22,8 +22,8 @@ use peios::registry::{CreateFlags, Disposition, Key, KeyAccess, OpenFlags, Trans
 use peios::security::{IntegrityLevel, Privileges, SidRef, sddl};
 
 use crate::{
-    DEFAULT_DACL_VALUE, DENIED_PRIVILEGES_VALUE, FLOOR, INTEGRITY_VALUE, KEY, OWNER_VALUE, PRIVILEGES_VALUE, Record, encode_multi_sz, encode_sz, resolve,
-    tier_name, well_known,
+    DEFAULT_DACL_VALUE, DENIED_PRIVILEGES_VALUE, FLOOR, INTEGRITY_VALUE, KEY, OWNER_VALUE,
+    PRIVILEGES_VALUE, Record, encode_multi_sz, encode_sz, resolve, tier_name, well_known,
 };
 
 /// What a record says, as a form gives it: each `None` is a value the record
@@ -44,7 +44,10 @@ impl Draft {
         Draft {
             privileges: record.privileges,
             integrity: record.integrity,
-            owner: record.owner.as_ref().map(|owner| record_name(owner.as_ref())),
+            owner: record
+                .owner
+                .as_ref()
+                .map(|owner| record_name(owner.as_ref())),
             default_dacl: record.default_dacl.as_ref().map(|dacl| dacl.sddl.clone()),
         }
     }
@@ -79,74 +82,180 @@ pub fn record_name(sid: &SidRef) -> String {
 /// are.
 pub fn save(name: &str, draft: &Draft) -> Result<(), String> {
     if resolve(name).is_none() {
-        return Err(format!("{name} is not a well-known principal or a SID, so authd would ignore a record for it."));
+        return Err(format!(
+            "{name} is not a well-known principal or a SID, so authd would ignore a record for it."
+        ));
     }
     draft.check()?;
     let txn = Transaction::begin().map_err(|error| said(&error, "change this machine's policy"))?;
     let policy = policy_key(&txn)?;
-    let (record, _) = Key::create(Some(&policy), name, KeyAccess::SET_VALUE | KeyAccess::QUERY_VALUE, CreateFlags::empty(), None, Some(&txn))
-        .map_err(|error| said(&error, "make this record"))?;
+    let (record, _) = Key::create(
+        Some(&policy),
+        name,
+        KeyAccess::SET_VALUE | KeyAccess::QUERY_VALUE,
+        CreateFlags::empty(),
+        None,
+        Some(&txn),
+    )
+    .map_err(|error| said(&error, "make this record"))?;
     let integrity = draft.integrity.map(|level| match tier_name(level) {
         Some(tier) => (ValueType::SZ, encode_sz(tier)),
         None => (ValueType::DWORD, level.0.to_le_bytes().to_vec()),
     });
-    set(&record, PRIVILEGES_VALUE, draft.privileges.map(|privileges| (ValueType::MULTI_SZ, encode_multi_sz(privileges.canonical_names()))), &txn)?;
+    set(
+        &record,
+        PRIVILEGES_VALUE,
+        draft.privileges.map(|privileges| {
+            (
+                ValueType::MULTI_SZ,
+                encode_multi_sz(privileges.canonical_names()),
+            )
+        }),
+        &txn,
+    )?;
     set(&record, INTEGRITY_VALUE, integrity, &txn)?;
-    set(&record, OWNER_VALUE, draft.owner.as_deref().map(|owner| (ValueType::SZ, encode_sz(owner.trim()))), &txn)?;
-    set(&record, DEFAULT_DACL_VALUE, draft.default_dacl.as_deref().map(|dacl| (ValueType::SZ, encode_sz(dacl.trim()))), &txn)?;
-    txn.commit().map_err(|error| said(&error, "change this machine's policy"))
+    set(
+        &record,
+        OWNER_VALUE,
+        draft
+            .owner
+            .as_deref()
+            .map(|owner| (ValueType::SZ, encode_sz(owner.trim()))),
+        &txn,
+    )?;
+    set(
+        &record,
+        DEFAULT_DACL_VALUE,
+        draft
+            .default_dacl
+            .as_deref()
+            .map(|dacl| (ValueType::SZ, encode_sz(dacl.trim()))),
+        &txn,
+    )?;
+    txn.commit()
+        .map_err(|error| said(&error, "change this machine's policy"))
 }
 
 /// Deletes the record `name`. What it granted is no longer granted, from the
 /// next sign-in.
 pub fn delete(name: &str) -> Result<(), String> {
-    let record = Key::open(None, &format!("{KEY}\\{name}"), KeyAccess::DELETE, OpenFlags::empty()).map_err(|error| said(&error, "delete this record"))?;
-    record.delete_key(None, None).map_err(|error| said(&error, "delete this record"))
+    let record = Key::open(
+        None,
+        &format!("{KEY}\\{name}"),
+        KeyAccess::DELETE,
+        OpenFlags::empty(),
+    )
+    .map_err(|error| said(&error, "delete this record"))?;
+    record
+        .delete_key(None, None)
+        .map_err(|error| said(&error, "delete this record"))
 }
 
 /// Sets the privileges no record may grant; `None` removes the list.
 pub fn set_denied(denied: Option<Privileges>) -> Result<(), String> {
     let txn = Transaction::begin().map_err(|error| said(&error, "change this machine's policy"))?;
     let policy = policy_key(&txn)?;
-    set(&policy, DENIED_PRIVILEGES_VALUE, denied.map(|denied| (ValueType::MULTI_SZ, encode_multi_sz(denied.canonical_names()))), &txn)?;
-    txn.commit().map_err(|error| said(&error, "change this machine's policy"))
+    set(
+        &policy,
+        DENIED_PRIVILEGES_VALUE,
+        denied.map(|denied| {
+            (
+                ValueType::MULTI_SZ,
+                encode_multi_sz(denied.canonical_names()),
+            )
+        }),
+        &txn,
+    )?;
+    txn.commit()
+        .map_err(|error| said(&error, "change this machine's policy"))
 }
 
 /// Whether this person may change the policy, or why not: the key's own
 /// descriptor says, not anyone else's. On a machine with no key, whether they
 /// may make it under its parent.
 pub fn may_write() -> Result<(), String> {
-    let opened = match Key::open(None, KEY, KeyAccess::SET_VALUE | KeyAccess::CREATE_SUB_KEY, OpenFlags::empty()) {
-        Err(error) if error.kind() == ErrorKind::NotFound => Key::open(None, "Machine", KeyAccess::CREATE_SUB_KEY, OpenFlags::empty()),
+    let opened = match Key::open(
+        None,
+        KEY,
+        KeyAccess::SET_VALUE | KeyAccess::CREATE_SUB_KEY,
+        OpenFlags::empty(),
+    ) {
+        Err(error) if error.kind() == ErrorKind::NotFound => Key::open(
+            None,
+            "Machine",
+            KeyAccess::CREATE_SUB_KEY,
+            OpenFlags::empty(),
+        ),
         opened => opened,
     };
-    opened.map(|_| ()).map_err(|error| said(&error, "change this machine's policy"))
+    opened
+        .map(|_| ())
+        .map_err(|error| said(&error, "change this machine's policy"))
 }
 
 /// The policy key, opened to make records under and to set its own values;
 /// made, with the floor's records, where it isn't there.
 fn policy_key(txn: &Transaction) -> Result<Key, String> {
-    let mut key = Key::open(None, "Machine", KeyAccess::CREATE_SUB_KEY, OpenFlags::empty()).map_err(|error| said(&error, "change this machine's policy"))?;
+    let mut key = Key::open(
+        None,
+        "Machine",
+        KeyAccess::CREATE_SUB_KEY,
+        OpenFlags::empty(),
+    )
+    .map_err(|error| said(&error, "change this machine's policy"))?;
     let mut made = false;
     let parts: Vec<&str> = KEY.split('\\').skip(1).collect();
     for (at, part) in parts.iter().enumerate() {
         let last = at + 1 == parts.len();
-        let access = if last { KeyAccess::CREATE_SUB_KEY | KeyAccess::SET_VALUE } else { KeyAccess::CREATE_SUB_KEY };
-        let (next, disposition) = Key::create(Some(&key), part, access, CreateFlags::empty(), None, Some(txn)).map_err(|error| said(&error, "make the policy key"))?;
+        let access = if last {
+            KeyAccess::CREATE_SUB_KEY | KeyAccess::SET_VALUE
+        } else {
+            KeyAccess::CREATE_SUB_KEY
+        };
+        let (next, disposition) = Key::create(
+            Some(&key),
+            part,
+            access,
+            CreateFlags::empty(),
+            None,
+            Some(txn),
+        )
+        .map_err(|error| said(&error, "make the policy key"))?;
         made = last && disposition == Disposition::CreatedNew;
         key = next;
     }
     if made {
         for (name, privileges) in FLOOR {
-            let (record, _) = Key::create(Some(&key), name, KeyAccess::SET_VALUE, CreateFlags::empty(), None, Some(txn)).map_err(|error| said(&error, "make the policy key"))?;
-            set(&record, PRIVILEGES_VALUE, Some((ValueType::MULTI_SZ, encode_multi_sz(privileges.canonical_names()))), txn)?;
+            let (record, _) = Key::create(
+                Some(&key),
+                name,
+                KeyAccess::SET_VALUE,
+                CreateFlags::empty(),
+                None,
+                Some(txn),
+            )
+            .map_err(|error| said(&error, "make the policy key"))?;
+            set(
+                &record,
+                PRIVILEGES_VALUE,
+                Some((
+                    ValueType::MULTI_SZ,
+                    encode_multi_sz(privileges.canonical_names()),
+                )),
+                txn,
+            )?;
         }
     }
     Ok(key)
 }
 
 /// Sets a value, or deletes it for `None`.
-fn set(key: &Key, name: &str, value: Option<(ValueType, Vec<u8>)>, txn: &Transaction) -> Result<(), String> {
+fn set(
+    key: &Key,
+    name: &str,
+    value: Option<(ValueType, Vec<u8>)>,
+    txn: &Transaction,
+) -> Result<(), String> {
     match value {
         Some((ty, data)) => key.set_value(name.as_bytes(), ty, &data).in_txn(txn).call(),
         None => match key.delete_value(name.as_bytes(), None, Some(txn)) {
@@ -159,7 +268,9 @@ fn set(key: &Key, name: &str, value: Option<(ValueType, Vec<u8>)>, txn: &Transac
 
 fn said(error: &peios::Error, what: &str) -> String {
     match error.kind() {
-        ErrorKind::PermissionDenied => format!("You may not {what}: it needs Administrators, enabled in your token."),
+        ErrorKind::PermissionDenied => {
+            format!("You may not {what}: it needs Administrators, enabled in your token.")
+        }
         _ => format!("Couldn't {what}: {error}."),
     }
 }
@@ -182,14 +293,32 @@ mod tests {
         let record = Record {
             privileges: Some(Privileges::BACKUP),
             owner: resolve("Administrators"),
-            default_dacl: Some(DefaultDacl { sddl: "D:(A;;GA;;;SY)".into(), acl: sddl::parse_acl("D:(A;;GA;;;SY)").unwrap() }),
+            default_dacl: Some(DefaultDacl {
+                sddl: "D:(A;;GA;;;SY)".into(),
+                acl: sddl::parse_acl("D:(A;;GA;;;SY)").unwrap(),
+            }),
             ..Record::empty("Users", resolve("Users").unwrap())
         };
         let draft = Draft::of(&record);
         assert_eq!(draft.owner.as_deref(), Some("Administrators"));
         assert_eq!(draft.default_dacl.as_deref(), Some("D:(A;;GA;;;SY)"));
         assert!(draft.check().is_ok());
-        assert!(Draft { owner: Some("developers".into()), ..draft.clone() }.check().is_err(), "a local name is nobody to authd");
-        assert!(Draft { default_dacl: Some("D:(nonsense)".into()), ..draft }.check().is_err());
+        assert!(
+            Draft {
+                owner: Some("developers".into()),
+                ..draft.clone()
+            }
+            .check()
+            .is_err(),
+            "a local name is nobody to authd"
+        );
+        assert!(
+            Draft {
+                default_dacl: Some("D:(nonsense)".into()),
+                ..draft
+            }
+            .check()
+            .is_err()
+        );
     }
 }

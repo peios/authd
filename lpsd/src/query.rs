@@ -462,7 +462,9 @@ fn group_members_page(
     // A `BUILTIN` group is no object of lpsd's to look up, but who is in it
     // is recorded here, so its members are answered by its SID (PSPU §2.16).
     let builtin = match key {
-        psi::Key::Sid(bytes) => SidRef::from_bytes(bytes).filter(|sid| store::builtin(sid)).map(SidRef::to_sid),
+        psi::Key::Sid(bytes) => SidRef::from_bytes(bytes)
+            .filter(|sid| store::builtin(sid))
+            .map(SidRef::to_sid),
         _ => None,
     };
     let group = match builtin {
@@ -471,7 +473,9 @@ fn group_members_page(
             let object = match key {
                 psi::Key::Name(name) => store.lookup_name(name),
                 psi::Key::RelativeId(rid) => store.lookup_relative_id(*rid),
-                psi::Key::Sid(bytes) => SidRef::from_bytes(bytes).and_then(|sid| store.lookup_sid(sid)),
+                psi::Key::Sid(bytes) => {
+                    SidRef::from_bytes(bytes).and_then(|sid| store.lookup_sid(sid))
+                }
             }?;
             let Object::Group(group) = object else {
                 return None;
@@ -581,14 +585,35 @@ mod tests {
     #[test]
     fn a_group_is_described_and_a_principal_is_not() {
         let mut store = seeded();
-        store.describe_group("developers", "Builds the software").unwrap();
-        let group = ask(&store, psi::Key::Name("developers".into()), Kind::Group, Fields::UNIX_ID | Fields::DESCRIPTION);
-        assert_eq!(group.values.last(), Some(&Value::Description("Builds the software".into())));
+        store
+            .describe_group("developers", "Builds the software")
+            .unwrap();
+        let group = ask(
+            &store,
+            psi::Key::Name("developers".into()),
+            Kind::Group,
+            Fields::UNIX_ID | Fields::DESCRIPTION,
+        );
+        assert_eq!(
+            group.values.last(),
+            Some(&Value::Description("Builds the software".into()))
+        );
         assert_eq!(group.values.len(), 2);
 
-        let jack = ask(&store, psi::Key::Name("jack".into()), Kind::Principal, Fields::DESCRIPTION);
+        let jack = ask(
+            &store,
+            psi::Key::Name("jack".into()),
+            Kind::Principal,
+            Fields::DESCRIPTION,
+        );
         assert!(jack.values.is_empty());
-        assert_eq!(jack.withheld, vec![Withheld { field: Fields::DESCRIPTION, reason: WithheldReason::Absent }]);
+        assert_eq!(
+            jack.withheld,
+            vec![Withheld {
+                field: Fields::DESCRIPTION,
+                reason: WithheldReason::Absent
+            }]
+        );
     }
 
     #[test]
@@ -919,7 +944,7 @@ mod tests {
         let developers = store.resolve_group("developers").unwrap();
         for name in ["ada", "grace"] {
             store.add(NewPrincipal::named(name), Some(b"pw")).unwrap();
-            store.add_membership(name, developers.clone()).unwrap();
+            store.add_membership(name, developers).unwrap();
         }
         let page = enumerate(
             &store,
@@ -948,8 +973,10 @@ mod tests {
         let mut store = seeded();
         let administrators = store::well_known_group("Administrators").unwrap();
         store.add(NewPrincipal::named("ada"), Some(b"pw")).unwrap();
-        store.add_membership("ada", administrators.clone()).unwrap();
-        store.add(NewPrincipal::named("grace"), Some(b"pw")).unwrap();
+        store.add_membership("ada", administrators).unwrap();
+        store
+            .add(NewPrincipal::named("grace"), Some(b"pw"))
+            .unwrap();
         let page = enumerate(
             &store,
             &psi::EnumerateSource {
@@ -961,8 +988,15 @@ mod tests {
             u32::MAX,
         );
         assert_eq!(page.outcome, Outcome::Found);
-        let names: Vec<&str> = page.entries.iter().map(|e| e.canonical_name.as_str()).collect();
-        assert!(names.contains(&"ada") && !names.contains(&"grace"), "{names:?}");
+        let names: Vec<&str> = page
+            .entries
+            .iter()
+            .map(|e| e.canonical_name.as_str())
+            .collect();
+        assert!(
+            names.contains(&"ada") && !names.contains(&"grace"),
+            "{names:?}"
+        );
     }
 
     /// `groups_page` paged on `unix_id` while `Store::groups_after` filters on
@@ -1092,7 +1126,13 @@ mod tests {
             // A stapled group: its membership is a rule, not a record, by
             // its name or its SID.
             psi::Key::Name("Everyone".into()),
-            psi::Key::Sid(store::well_known_group("Everyone").unwrap().as_ref().as_bytes().to_vec()),
+            psi::Key::Sid(
+                store::well_known_group("Everyone")
+                    .unwrap()
+                    .as_ref()
+                    .as_bytes()
+                    .to_vec(),
+            ),
             // A principal where a group was required.
             psi::Key::Name("jack".into()),
             // A key that resolves to nothing at all.

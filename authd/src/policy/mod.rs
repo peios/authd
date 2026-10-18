@@ -32,9 +32,7 @@ pub mod principal;
 pub mod sources;
 
 pub use auth_policy::{dword, sz};
-pub use principal::{
-    Outcome, logon_socket_descriptor, originator_logon_types, session_end_descriptor,
-};
+pub use principal::{Outcome, logon_socket_descriptor, originator_logon_types, session_end_descriptor};
 pub use sources::{SOURCES_KEY, SourceEntry, sources};
 
 #[cfg(test)]

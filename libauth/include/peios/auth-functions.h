@@ -2,163 +2,77 @@
 #ifndef PEIOS_AUTH_FUNCTIONS_H
 #define PEIOS_AUTH_FUNCTIONS_H
 uint32_t peios_auth_abi_version(void);
-peios_auth_client * peios_auth_client_create(const peios_auth_client_options * options);
-void peios_auth_client_destroy(peios_auth_client * client);
-peios_auth_operation * peios_auth_logon_begin(
-    const peios_auth_client * client,
-    const peios_auth_logon_request * request
-);
-peios_auth_operation * peios_auth_service_attest_begin(
-    const peios_auth_client * client,
-    const peios_auth_service_request * request
-);
-peios_auth_operation * peios_auth_password_change_begin(
-    const peios_auth_client * client,
-    uint32_t supported_credentials
-);
-peios_auth_operation * peios_auth_key_add_begin(
-    const peios_auth_client * client,
-    peios_auth_bytes public_key,
-    uint32_t supported_credentials
-);
-peios_auth_operation * peios_auth_key_remove_begin(
-    const peios_auth_client * client,
-    peios_auth_bytes fingerprint,
-    uint32_t supported_credentials
-);
-peios_auth_operation * peios_auth_identity_lookup_begin(
-    const peios_auth_client * client,
-    const peios_auth_lookup_request * request
-);
-peios_auth_operation * peios_auth_identity_enumerate_begin(
-    const peios_auth_client * client,
-    const peios_auth_enumerate_request * request
-);
-peios_auth_operation * peios_auth_account_self_begin(const peios_auth_client * client);
-peios_auth_operation * peios_auth_display_name_set_begin(
-    const peios_auth_client * client,
-    peios_auth_bytes name
-);
-peios_auth_operation * peios_auth_session_end_query_begin(
-    const peios_auth_client * client,
-    uint64_t session_id
-);
-peios_auth_operation * peios_auth_session_end_begin(
-    const peios_auth_client * client,
-    uint64_t session_id
-);
-int32_t peios_auth_operation_step(peios_auth_operation * operation);
-int32_t peios_auth_operation_poll_info(
-    const peios_auth_operation * operation,
-    peios_auth_poll_info * out
-);
-int32_t peios_auth_operation_wait(peios_auth_operation * operation);
-int32_t peios_auth_operation_respond(
-    peios_auth_operation * operation,
-    uint64_t round,
-    const peios_auth_answer * answers,
-    size_t count
-);
-void peios_auth_operation_cancel(peios_auth_operation * operation);
-void peios_auth_operation_destroy(peios_auth_operation * operation);
-int32_t peios_auth_operation_error(
-    const peios_auth_operation * operation,
-    peios_auth_error_view * out
-);
-int32_t peios_auth_operation_round(
-    const peios_auth_operation * operation,
-    uint64_t * round,
-    size_t * messages,
-    size_t * prompts
-);
-int32_t peios_auth_operation_prompt(
-    const peios_auth_operation * operation,
-    size_t index,
-    peios_auth_prompt_view * out
-);
-int32_t peios_auth_operation_message(
-    const peios_auth_operation * operation,
-    size_t index,
-    peios_auth_message_view * out
-);
-int32_t peios_auth_operation_grant(
-    const peios_auth_operation * operation,
-    peios_auth_grant_view * out
-);
-int32_t peios_auth_operation_take_token(peios_auth_operation * operation);
-int32_t peios_auth_operation_ended(
-    const peios_auth_operation * operation,
-    peios_auth_ended_view * out
-);
-int32_t peios_auth_operation_identity(
-    const peios_auth_operation * operation,
-    peios_auth_identity_view * out
-);
-int32_t peios_auth_operation_incomplete_source(
-    const peios_auth_operation * operation,
-    size_t index,
-    peios_auth_bytes * out
-);
-int32_t peios_auth_record(
-    const peios_auth_operation * operation,
-    size_t index,
-    peios_auth_record_view * out
-);
-int32_t peios_auth_record_field_state(
-    const peios_auth_operation * operation,
-    size_t index,
-    uint32_t field
-);
-int32_t peios_auth_record_text(
-    const peios_auth_operation * operation,
-    size_t index,
-    uint32_t field,
-    peios_auth_bytes * out
-);
-int32_t peios_auth_record_number(
-    const peios_auth_operation * operation,
-    size_t index,
-    uint32_t field,
-    uint32_t * out
-);
-int32_t peios_auth_record_reference_count(
-    const peios_auth_operation * operation,
-    size_t index,
-    uint32_t field,
-    size_t * out
-);
-int32_t peios_auth_record_reference(
-    const peios_auth_operation * operation,
-    size_t index,
-    uint32_t field,
-    size_t item,
-    peios_auth_reference_view * out
-);
-int32_t peios_auth_record_claim_count(
-    const peios_auth_operation * operation,
-    size_t index,
-    size_t * out
-);
-int32_t peios_auth_record_claim(
-    const peios_auth_operation * operation,
-    size_t index,
-    size_t item,
-    peios_auth_claim_view * out
-);
-int32_t peios_auth_record_claim_value(
-    const peios_auth_operation * operation,
-    size_t index,
-    size_t item,
-    size_t value,
-    peios_auth_claim_value * out
-);
-int32_t peios_auth_operation_account(
-    const peios_auth_operation * operation,
-    peios_auth_account_view * out
-);
-int32_t peios_auth_operation_account_key(
-    const peios_auth_operation * operation,
-    size_t index,
-    peios_auth_account_key_view * out
-);
+peios_auth_client *peios_auth_client_create(const peios_auth_client_options *options);
+void peios_auth_client_destroy(peios_auth_client *client);
+peios_auth_operation *peios_auth_logon_begin(const peios_auth_client *client,
+                                             const peios_auth_logon_request *request);
+peios_auth_operation *peios_auth_service_attest_begin(const peios_auth_client *client,
+                                                      const peios_auth_service_request *request);
+peios_auth_operation *peios_auth_password_change_begin(const peios_auth_client *client,
+                                                       uint32_t supported_credentials);
+peios_auth_operation *peios_auth_key_add_begin(const peios_auth_client *client,
+                                               peios_auth_bytes public_key,
+                                               uint32_t supported_credentials);
+peios_auth_operation *peios_auth_key_remove_begin(const peios_auth_client *client,
+                                                  peios_auth_bytes fingerprint,
+                                                  uint32_t supported_credentials);
+peios_auth_operation *peios_auth_identity_lookup_begin(const peios_auth_client *client,
+                                                       const peios_auth_lookup_request *request);
+peios_auth_operation *
+peios_auth_identity_enumerate_begin(const peios_auth_client *client,
+                                    const peios_auth_enumerate_request *request);
+peios_auth_operation *peios_auth_account_self_begin(const peios_auth_client *client);
+peios_auth_operation *peios_auth_display_name_set_begin(const peios_auth_client *client,
+                                                        peios_auth_bytes name);
+peios_auth_operation *peios_auth_session_end_query_begin(const peios_auth_client *client,
+                                                         uint64_t session_id);
+peios_auth_operation *peios_auth_session_end_begin(const peios_auth_client *client,
+                                                   uint64_t session_id);
+int32_t peios_auth_operation_step(peios_auth_operation *operation);
+int32_t peios_auth_operation_poll_info(const peios_auth_operation *operation,
+                                       peios_auth_poll_info *out);
+int32_t peios_auth_operation_wait(peios_auth_operation *operation);
+int32_t peios_auth_operation_respond(peios_auth_operation *operation, uint64_t round,
+                                     const peios_auth_answer *answers, size_t count);
+void peios_auth_operation_cancel(peios_auth_operation *operation);
+void peios_auth_operation_destroy(peios_auth_operation *operation);
+int32_t peios_auth_operation_error(const peios_auth_operation *operation,
+                                   peios_auth_error_view *out);
+int32_t peios_auth_operation_round(const peios_auth_operation *operation, uint64_t *round,
+                                   size_t *messages, size_t *prompts);
+int32_t peios_auth_operation_prompt(const peios_auth_operation *operation, size_t index,
+                                    peios_auth_prompt_view *out);
+int32_t peios_auth_operation_message(const peios_auth_operation *operation, size_t index,
+                                     peios_auth_message_view *out);
+int32_t peios_auth_operation_grant(const peios_auth_operation *operation,
+                                   peios_auth_grant_view *out);
+int32_t peios_auth_operation_take_token(peios_auth_operation *operation);
+int32_t peios_auth_operation_ended(const peios_auth_operation *operation,
+                                   peios_auth_ended_view *out);
+int32_t peios_auth_operation_identity(const peios_auth_operation *operation,
+                                      peios_auth_identity_view *out);
+int32_t peios_auth_operation_incomplete_source(const peios_auth_operation *operation, size_t index,
+                                               peios_auth_bytes *out);
+int32_t peios_auth_record(const peios_auth_operation *operation, size_t index,
+                          peios_auth_record_view *out);
+int32_t peios_auth_record_field_state(const peios_auth_operation *operation, size_t index,
+                                      uint32_t field);
+int32_t peios_auth_record_text(const peios_auth_operation *operation, size_t index, uint32_t field,
+                               peios_auth_bytes *out);
+int32_t peios_auth_record_number(const peios_auth_operation *operation, size_t index,
+                                 uint32_t field, uint32_t *out);
+int32_t peios_auth_record_reference_count(const peios_auth_operation *operation, size_t index,
+                                          uint32_t field, size_t *out);
+int32_t peios_auth_record_reference(const peios_auth_operation *operation, size_t index,
+                                    uint32_t field, size_t item, peios_auth_reference_view *out);
+int32_t peios_auth_record_claim_count(const peios_auth_operation *operation, size_t index,
+                                      size_t *out);
+int32_t peios_auth_record_claim(const peios_auth_operation *operation, size_t index, size_t item,
+                                peios_auth_claim_view *out);
+int32_t peios_auth_record_claim_value(const peios_auth_operation *operation, size_t index,
+                                      size_t item, size_t value, peios_auth_claim_value *out);
+int32_t peios_auth_operation_account(const peios_auth_operation *operation,
+                                     peios_auth_account_view *out);
+int32_t peios_auth_operation_account_key(const peios_auth_operation *operation, size_t index,
+                                         peios_auth_account_key_view *out);
 #endif

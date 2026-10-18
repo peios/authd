@@ -27,18 +27,19 @@ const MAX_ANSWER_BYTES: usize = auth_core::wire::MAX_CREDENTIAL_BYTES;
 /// Restores the terminal's echo setting when dropped.
 ///
 /// A guard rather than a matched pair of calls because the read between them
-/// can fail or the process can be interrupted, and a terminal left with echo
+/// can fail or unwind, and a terminal left with echo
 /// disabled is a broken terminal — the next person to type sees nothing.
 struct EchoGuard {
     fd: libc::c_int,
     original: libc::termios,
-    restore: bool,
 }
 
 impl EchoGuard {
     /// Disable echo on `fd`, returning a guard that restores it.
     fn suppress(fd: libc::c_int) -> io::Result<Self> {
+        // SAFETY: termios contains scalar fields; tcgetattr initializes the live output.
         let mut original: libc::termios = unsafe { std::mem::zeroed() };
+        // SAFETY: original is writable and lives through the syscall.
         if unsafe { libc::tcgetattr(fd, &mut original) } != 0 {
             // Not a terminal (a pipe under test, say). Nothing to suppress, and
             // nothing to restore — but say so rather than pretending.
@@ -51,23 +52,21 @@ impl EchoGuard {
         // otherwise the prompt and whatever follows it run together.
         quiet.c_lflag |= libc::ECHONL;
 
+        // SAFETY: quiet is a complete termios copied from tcgetattr.
         if unsafe { libc::tcsetattr(fd, libc::TCSAFLUSH, &quiet) } != 0 {
             return Err(io::Error::last_os_error());
         }
 
-        Ok(Self {
-            fd,
-            original,
-            restore: true,
-        })
+        Ok(Self { fd, original })
     }
 }
 
 impl Drop for EchoGuard {
     fn drop(&mut self) {
-        if self.restore {
-            unsafe { libc::tcsetattr(self.fd, libc::TCSAFLUSH, &self.original) };
-        }
+        // Drop cannot report a restoration failure. Make a best-effort attempt
+        // even when the read failed; the caller still receives its original error.
+        // SAFETY: original came from tcgetattr and remains valid through this call.
+        let _ = unsafe { libc::tcsetattr(self.fd, libc::TCSAFLUSH, &self.original) };
     }
 }
 
@@ -100,6 +99,7 @@ pub fn prompt_secret(prompt: &str) -> io::Result<Secret> {
     let _guard = match EchoGuard::suppress(libc::STDIN_FILENO) {
         Ok(guard) => Some(guard),
         Err(error) => {
+            // SAFETY: isatty accepts any descriptor and reports invalid ones as errors.
             if unsafe { libc::isatty(libc::STDIN_FILENO) } == 1 {
                 return Err(io::Error::other(format!(
                     "refusing to read a secret from a terminal whose echo could not be \

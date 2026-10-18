@@ -72,29 +72,7 @@ pub fn add(options: &[&str]) -> Result<(), Failed> {
     };
 
     if interactive {
-        // Only asked for when unset. A flag is an answer already given, and
-        // asking again would invite an operator to contradict themselves.
-        if requested.display_name.is_none() {
-            requested.display_name = non_empty(prompt("Full name", "optional")?);
-        }
-        if requested.groups.is_empty() {
-            let answer = prompt("Additional groups", "comma-separated, optional")?;
-            requested.groups = answer
-                .split(',')
-                .map(str::trim)
-                .filter(|group| !group.is_empty())
-                .map(str::to_string)
-                .collect();
-        }
-        if requested.primary_group.is_none() {
-            requested.primary_group = non_empty(prompt("Primary group", "the daemon's default")?);
-        }
-        if requested.home.is_none() {
-            requested.home = non_empty(prompt("Home directory", "the daemon's default")?);
-        }
-        if requested.shell.is_none() {
-            requested.shell = non_empty(prompt("Shell", "the daemon's default")?);
-        }
+        prompt_profile(&mut requested)?;
     }
 
     // Read before connecting: a prompt that appears and then fails because the
@@ -143,6 +121,33 @@ pub fn add(options: &[&str]) -> Result<(), Failed> {
         display_name: requested.display_name,
     })?;
     println!("created {name} with RID {rid}");
+    Ok(())
+}
+
+fn prompt_profile(requested: &mut Requested) -> Result<(), Failed> {
+    // Only asked for when unset. A flag is an answer already given, and
+    // asking again would invite an operator to contradict themselves.
+    if requested.display_name.is_none() {
+        requested.display_name = non_empty(prompt("Full name", "optional")?);
+    }
+    if requested.groups.is_empty() {
+        let answer = prompt("Additional groups", "comma-separated, optional")?;
+        requested.groups = answer
+            .split(',')
+            .map(str::trim)
+            .filter(|group| !group.is_empty())
+            .map(str::to_string)
+            .collect();
+    }
+    if requested.primary_group.is_none() {
+        requested.primary_group = non_empty(prompt("Primary group", "the daemon's default")?);
+    }
+    if requested.home.is_none() {
+        requested.home = non_empty(prompt("Home directory", "the daemon's default")?);
+    }
+    if requested.shell.is_none() {
+        requested.shell = non_empty(prompt("Shell", "the daemon's default")?);
+    }
     Ok(())
 }
 
@@ -370,7 +375,10 @@ mod tests {
 
     #[test]
     fn an_unknown_option_is_refused() {
-        assert!(matches!(parse(&["jack", "--nonesuch"]), Err(Failed::Usage(_))));
+        assert!(matches!(
+            parse(&["jack", "--nonesuch"]),
+            Err(Failed::Usage(_))
+        ));
         assert!(matches!(
             parse(&["jack", "--nonesuch", "x"]),
             Err(Failed::Usage(_))

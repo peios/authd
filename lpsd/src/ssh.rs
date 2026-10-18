@@ -1,8 +1,14 @@
 //! SSH key parsing and proof verification in the credential owner.
-use auth_core::ssh::{Binding, MAX_KEY, Offer};
 use signature::Verifier;
 use ssh_key::{Algorithm, HashAlg, PublicKey, Signature};
 
+use auth_core::ssh::{Binding, MAX_KEY, Offer};
+
+const MIN_RSA_BITS: usize = 3072;
+const MAX_RSA_BITS: usize = 8192;
+const MAX_PUBLIC_KEY_LINE_BYTES: usize = 16_384;
+
+/// Parse a canonical, supported public key, rejecting malformed or oversized keys.
 pub fn parse(blob: &[u8]) -> Option<PublicKey> {
     if blob.len() > MAX_KEY {
         return None;
@@ -20,7 +26,7 @@ pub fn parse(blob: &[u8]) -> Option<PublicKey> {
                 .len()
                 .checked_mul(8)?
                 .checked_sub(n.first()?.leading_zeros() as usize)?;
-            if !(3072..=8192).contains(&bits) {
+            if !(MIN_RSA_BITS..=MAX_RSA_BITS).contains(&bits) {
                 return None;
             }
             rsa_key(rsa)?;
@@ -37,13 +43,14 @@ fn rsa_key(key: &ssh_key::public::RsaPublicKey) -> Option<rsa::RsaPublicKey> {
     rsa::RsaPublicKey::new_with_max_size(
         rsa::BigUint::from_bytes_be(key.n.as_positive_bytes()?),
         rsa::BigUint::from_bytes_be(key.e.as_positive_bytes()?),
-        8192,
+        MAX_RSA_BITS,
     )
     .ok()
 }
 
+/// Import one OpenSSH public-key line and retain its comment as the label.
 pub fn import(line: &str) -> Option<(Vec<u8>, String)> {
-    if line.len() > 16384 || line.trim().contains(['\n', '\r']) {
+    if line.len() > MAX_PUBLIC_KEY_LINE_BYTES || line.trim().contains(['\n', '\r']) {
         return None;
     }
     let key = PublicKey::from_openssh(line.trim()).ok()?;
@@ -52,6 +59,7 @@ pub fn import(line: &str) -> Option<(Vec<u8>, String)> {
     Some((bytes, key.comment().to_owned()))
 }
 
+/// Whether a supported key accepts the requested SSH signature algorithm.
 pub fn eligible(blob: &[u8], algorithm: &str) -> bool {
     let Some(key) = parse(blob) else {
         return false;
@@ -63,6 +71,7 @@ pub fn eligible(blob: &[u8], algorithm: &str) -> bool {
     }
 }
 
+/// Verify a proof against the full connection binding; malformed input fails closed.
 pub fn verify(binding: &Binding, offer: &Offer) -> bool {
     if !eligible(&offer.key, &offer.algorithm) {
         return false;
@@ -100,6 +109,7 @@ pub fn verify(binding: &Binding, offer: &Offer) -> bool {
     }
 }
 
+/// Return the SHA-256 fingerprint of a canonical, supported key.
 pub fn fingerprint(blob: &[u8]) -> Option<String> {
     Some(parse(blob)?.fingerprint(HashAlg::Sha256).to_string())
 }

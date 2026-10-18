@@ -22,7 +22,7 @@ class AssemblyTests(unittest.TestCase):
     def write(self, name: str, content: str = "content") -> Path:
         path = self.source / name
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(content)
+        path.write_text(content, encoding="utf-8")
         return path
 
     def assemble(self, mappings: Mapping[str, str], excludes: Sequence[str] = ()) -> int:
@@ -50,7 +50,7 @@ class AssemblyTests(unittest.TestCase):
     def test_symlink_directories_are_not_followed(self) -> None:
         outside = self.root / "outside"
         outside.mkdir()
-        (outside / "secret").write_text("outside")
+        (outside / "secret").write_text("outside", encoding="utf-8")
         (self.source / "link").symlink_to(outside)
         self.assemble({"tools:**": "usr/share"})
         self.assertTrue((self.output / "usr/share/link").is_symlink())

@@ -747,7 +747,10 @@ mod tests {
             done.get("subject.token.sid"),
             Some(&audit::Value::Bin(asker.as_ref().as_bytes().to_vec()))
         );
-        assert_eq!(done.get("object.session.id"), Some(&audit::Value::Uint(4242)));
+        assert_eq!(
+            done.get("object.session.id"),
+            Some(&audit::Value::Uint(4242))
+        );
         assert_eq!(
             done.get("object.session.user.sid"),
             Some(&audit::Value::Bin(sid(BOB).as_ref().as_bytes().to_vec()))
@@ -760,7 +763,10 @@ mod tests {
         assert_eq!(done.get("outcome.reason"), None);
 
         let (_, unfinished) = &written[1];
-        assert_eq!(unfinished.get("outcome.success"), Some(&audit::Value::Bool(false)));
+        assert_eq!(
+            unfinished.get("outcome.success"),
+            Some(&audit::Value::Bool(false))
+        );
         assert_eq!(
             unfinished.get("outcome.reason"),
             Some(&audit::Value::Str("processes-remaining".into()))

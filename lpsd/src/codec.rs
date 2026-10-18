@@ -32,7 +32,7 @@
 //! heavy development for no benefit it can name. Recorded in PEI-166.
 
 /// `PEIOSLPS` — Peios Local Principal Store.
-pub const MAGIC: [u8; 8] = *b"PEIOSLPS";
+const MAGIC: [u8; 8] = *b"PEIOSLPS";
 
 /// The layout written. 5 gave groups a description.
 pub const VERSION: u16 = 5;
@@ -41,7 +41,7 @@ pub const VERSION: u16 = 5;
 pub const OLDEST_READABLE_VERSION: u16 = 4;
 
 /// `magic[8] | version u16 | body_len u32 | body_crc u32`
-pub const HEADER_BYTES: usize = 18;
+const HEADER_BYTES: usize = 18;
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum CodecError {

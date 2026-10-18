@@ -18,10 +18,8 @@ use std::io;
 
 /// Fill `buf` with randomness the kernel vouches for.
 ///
-/// `getrandom` may return short for large requests (the kernel caps a single
-/// call at 256 bytes when it must block), so this loops rather than assuming
-/// one call suffices — and retries on `EINTR`, which is a signal arriving, not
-/// a failure.
+/// `getrandom` can return fewer bytes than requested, so this loops until the
+/// buffer is full and retries an interrupted call (`EINTR`).
 pub fn fill(buf: &mut [u8]) -> io::Result<()> {
     let mut filled = 0;
     while filled < buf.len() {
@@ -59,8 +57,8 @@ mod tests {
 
     #[test]
     fn it_fills_the_whole_buffer() {
-        // Larger than getrandom's 256-byte single-call cap, so this exercises
-        // the loop rather than just the happy path.
+        // A larger request checks the whole output, including the tail. The
+        // kernel can satisfy it with either one read or several short reads.
         let mut buf = [0u8; 1024];
         fill(&mut buf).expect("the kernel must provide randomness");
         assert!(

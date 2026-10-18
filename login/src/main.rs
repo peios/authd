@@ -558,6 +558,8 @@ fn existence(name: &str) -> Existence {
 /// session, in which case `setsid` returns EPERM and there is nothing to fix.
 /// A hard failure here would break the common case to satisfy the uncommon one.
 fn become_session_leader() {
+    // SAFETY: setsid takes no pointers; TIOCSCTTY expects an integer argument,
+    // not a pointer. The kernel validates stdin and the requested operation.
     unsafe {
         libc::setsid();
         libc::ioctl(libc::STDIN_FILENO, libc::TIOCSCTTY, 0);
@@ -565,10 +567,13 @@ fn become_session_leader() {
 }
 
 fn current_tty() -> Option<String> {
+    // SAFETY: ttyname validates the descriptor and returns null on failure.
     let name = unsafe { libc::ttyname(libc::STDIN_FILENO) };
     if name.is_null() {
         return None;
     }
+    // SAFETY: ttyname returned a NUL-terminated libc buffer. This single-threaded
+    // program copies it before another ttyname call can overwrite it.
     unsafe { std::ffi::CStr::from_ptr(name) }
         .to_str()
         .ok()
@@ -592,8 +597,9 @@ fn current_tty() -> Option<String> {
 /// it is resolved there, which is what lets one service definition be right
 /// on a display and on a serial port.
 fn default_term() -> String {
-    // SAFETY: fstat into a zeroed, correctly sized struct on a fixed fd.
+    // SAFETY: stat consists of integer fields and padding, which permit zeroes.
     let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    // SAFETY: st is a live, correctly sized output buffer; fstat validates stdin.
     if unsafe { libc::fstat(libc::STDIN_FILENO, &mut st) } != 0
         || (st.st_mode & libc::S_IFMT) != libc::S_IFCHR
     {
@@ -706,7 +712,11 @@ fn exec_shell(username: &str, profile: &Profile, preserve_environment: bool) -> 
 
 #[cfg(test)]
 mod tests {
-    use super::{term_for_device, term_for_name};
+    use auth_core::wire::Denial;
+
+    use super::{
+        Identify, Options, absolute_or_default, parse_from, retryable, term_for_device, term_for_name,
+    };
 
     // TERM follows the terminal, not the seed: the same login-console
     // definition serves a display and a serial line (PEI-716).
@@ -772,7 +782,6 @@ mod tests {
             "/opt/my shell"
         );
     }
-    use super::*;
 
     fn parse(arguments: &[&str]) -> Result<Options, String> {
         parse_from(arguments.iter().map(|a| (*a).to_string()))

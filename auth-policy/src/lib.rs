@@ -229,7 +229,15 @@ pub struct Record {
 impl Record {
     /// A record naming `sid` that says nothing.
     pub fn empty(name: &str, sid: Sid) -> Record {
-        Record { name: name.to_string(), sid, privileges: None, integrity: None, owner: None, default_dacl: None, logon_types: None }
+        Record {
+            name: name.to_string(),
+            sid,
+            privileges: None,
+            integrity: None,
+            owner: None,
+            default_dacl: None,
+            logon_types: None,
+        }
     }
 
     fn names(&self, sid: &SidRef) -> bool {
@@ -254,7 +262,12 @@ impl Default for Policy {
     /// A configured machine that grants nothing — which is what an unreadable
     /// key means, and deliberately not what an absent one means.
     fn default() -> Self {
-        Policy { configured: true, records: Vec::new(), denied: Privileges::empty(), problems: Vec::new() }
+        Policy {
+            configured: true,
+            records: Vec::new(),
+            denied: Privileges::empty(),
+            problems: Vec::new(),
+        }
     }
 }
 
@@ -271,7 +284,12 @@ pub struct Evaluation {
 impl Policy {
     /// Read the key, or fall back to the floor if there is no key to read.
     pub fn read() -> Policy {
-        let key = match Key::open(None, KEY, KeyAccess::QUERY_VALUE | KeyAccess::ENUMERATE_SUB_KEYS, OpenFlags::empty()) {
+        let key = match Key::open(
+            None,
+            KEY,
+            KeyAccess::QUERY_VALUE | KeyAccess::ENUMERATE_SUB_KEYS,
+            OpenFlags::empty(),
+        ) {
             Ok(key) => key,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Policy::floor(),
             Err(error) => {
@@ -296,52 +314,70 @@ impl Policy {
         let mut records = Vec::new();
         for (index, subkey) in key.subkeys(None).enumerate() {
             if records.len() >= MAX_RECORDS {
-                problems.push(format!("ignoring policy records past the first {MAX_RECORDS} under {KEY}"));
+                problems.push(format!(
+                    "ignoring policy records past the first {MAX_RECORDS} under {KEY}"
+                ));
                 break;
             }
             let subkey = match subkey {
                 Ok(subkey) => subkey,
                 Err(error) => {
-                    problems.push(format!("could not enumerate policy record {index} under {KEY}: {error}"));
+                    problems.push(format!(
+                        "could not enumerate policy record {index} under {KEY}: {error}"
+                    ));
                     break;
                 }
             };
             let Ok(name) = String::from_utf8(subkey.name.clone()) else {
-                problems.push(format!("ignoring a policy record under {KEY} whose name is not UTF-8"));
+                problems.push(format!(
+                    "ignoring a policy record under {KEY} whose name is not UTF-8"
+                ));
                 continue;
             };
             // Resolving here, once, is what makes a mistyped principal
             // *visible*. A record naming nobody would otherwise sit in the key
             // looking authoritative and applying to no one, forever.
             let Some(sid) = resolve(&name) else {
-                problems.push(format!("ignoring policy record {KEY}\\{name}: not a well-known principal and not a SID"));
+                problems.push(format!(
+                    "ignoring policy record {KEY}\\{name}: not a well-known principal and not a SID"
+                ));
                 continue;
             };
-            match Key::open(Some(&key), &name, KeyAccess::QUERY_VALUE, OpenFlags::empty()) {
+            match Key::open(
+                Some(&key),
+                &name,
+                KeyAccess::QUERY_VALUE,
+                OpenFlags::empty(),
+            ) {
                 Ok(entry) => {
-                    let path = format!("{KEY}\\{name}");
-                    let value = |value_name: &str| entry.query_value(value_name.as_bytes(), None).ok().map(|value| (value.ty, value.data));
-                    records.push(Record {
-                        privileges: value(PRIVILEGES_VALUE).and_then(|(ty, data)| privilege_list(&ty, &data, &path, PRIVILEGES_VALUE, &mut problems)),
-                        integrity: value(INTEGRITY_VALUE).and_then(|(ty, data)| integrity_of(&ty, &data, &path, &mut problems)),
-                        owner: value(OWNER_VALUE).and_then(|(ty, data)| owner_of(&ty, &data, &path, &mut problems)),
-                        default_dacl: value(DEFAULT_DACL_VALUE).and_then(|(ty, data)| default_dacl_of(&ty, &data, &path, &mut problems)),
-                        logon_types: value(LOGON_TYPES_VALUE).and_then(|(ty, data)| logon_types_of(&ty, &data, &path, &mut problems)),
-                        name,
-                        sid,
-                    });
+                    records.push(read_record(&entry, name, sid, &mut problems));
                 }
-                Err(error) => problems.push(format!("could not read policy record {KEY}\\{name} ({error}); it grants nothing")),
+                Err(error) => problems.push(format!(
+                    "could not read policy record {KEY}\\{name} ({error}); it grants nothing"
+                )),
             }
         }
 
         let denied = key
             .query_value(DENIED_PRIVILEGES_VALUE.as_bytes(), None)
             .ok()
-            .and_then(|value| privilege_list(&value.ty, &value.data, KEY, DENIED_PRIVILEGES_VALUE, &mut problems))
+            .and_then(|value| {
+                privilege_list(
+                    &value.ty,
+                    &value.data,
+                    KEY,
+                    DENIED_PRIVILEGES_VALUE,
+                    &mut problems,
+                )
+            })
             .unwrap_or_else(Privileges::empty);
         problems.extend(duplicates(&records));
-        Policy { configured: true, records, denied, problems }
+        Policy {
+            configured: true,
+            records,
+            denied,
+            problems,
+        }
     }
 
     /// The compiled fallback for a machine with no policy key at all.
@@ -350,7 +386,12 @@ impl Policy {
             configured: false,
             records: FLOOR
                 .iter()
-                .filter_map(|(name, privileges)| Some(Record { privileges: Some(*privileges), ..Record::empty(name, well_known::by_name(name)?) }))
+                .filter_map(|(name, privileges)| {
+                    Some(Record {
+                        privileges: Some(*privileges),
+                        ..Record::empty(name, well_known::by_name(name)?)
+                    })
+                })
                 .collect(),
             denied: Privileges::empty(),
             problems: Vec::new(),
@@ -371,14 +412,23 @@ impl Policy {
     /// applied, and would quietly remove the ability to write policy against
     /// how a logon happened.
     pub fn evaluate(&self, user: &SidRef, groups: &[&SidRef]) -> Evaluation {
-        let carried = |record: &Record| record.names(user) || groups.iter().any(|group| record.names(group));
-        let applied: Vec<usize> = self.records.iter().enumerate().filter(|(_, record)| carried(record)).map(|(at, _)| at).collect();
+        let carried =
+            |record: &Record| record.names(user) || groups.iter().any(|group| record.names(group));
+        let applied: Vec<usize> = self
+            .records
+            .iter()
+            .enumerate()
+            .filter(|(_, record)| carried(record))
+            .map(|(at, _)| at)
+            .collect();
 
         // Privileges union across every SID on the token. A record that names
         // a principal the token does not carry contributes nothing.
         let mut privileges = Privileges::empty();
         for at in &applied {
-            privileges |= self.records[*at].privileges.unwrap_or_else(Privileges::empty);
+            privileges |= self.records[*at]
+                .privileges
+                .unwrap_or_else(Privileges::empty);
         }
         // The machine-wide mask, applied last so no record can defeat it.
         privileges &= !self.denied;
@@ -419,6 +469,32 @@ impl Policy {
 /// reads the key to see what a principal gets finds one and stops looking,
 /// and for the single values — integrity, owner, default DACL — the one
 /// enumerated first wins, which is no order anyone chose.
+/// Decode one principal's policy values, preserving diagnostics for invalid values.
+fn read_record(entry: &Key, name: String, sid: Sid, problems: &mut Vec<String>) -> Record {
+    let path = format!("{KEY}\\{name}");
+    // Missing or unreadable values grant nothing through this record. Invalid
+    // values are diagnosed by the typed parsers below.
+    let value = |value_name: &str| {
+        entry
+            .query_value(value_name.as_bytes(), None)
+            .ok()
+            .map(|value| (value.ty, value.data))
+    };
+    Record {
+        privileges: value(PRIVILEGES_VALUE)
+            .and_then(|(ty, data)| privilege_list(&ty, &data, &path, PRIVILEGES_VALUE, problems)),
+        integrity: value(INTEGRITY_VALUE)
+            .and_then(|(ty, data)| integrity_of(&ty, &data, &path, problems)),
+        owner: value(OWNER_VALUE).and_then(|(ty, data)| owner_of(&ty, &data, &path, problems)),
+        default_dacl: value(DEFAULT_DACL_VALUE)
+            .and_then(|(ty, data)| default_dacl_of(&ty, &data, &path, problems)),
+        logon_types: value(LOGON_TYPES_VALUE)
+            .and_then(|(ty, data)| logon_types_of(&ty, &data, &path, problems)),
+        name,
+        sid,
+    }
+}
+
 fn duplicates(records: &[Record]) -> Vec<String> {
     records
         .iter()
@@ -447,8 +523,18 @@ fn duplicates(records: &[Record]) -> Vec<String> {
 /// policy should depend on. Two groups naming different owners is therefore a
 /// misconfiguration, and it falls back to the user rather than picking
 /// arbitrarily. Two naming the *same* owner is not a conflict.
-fn owner(records: &[Record], user: &SidRef, groups: &[&SidRef], problems: &mut Vec<String>) -> Option<Sid> {
-    let of = |sid: &SidRef| records.iter().find(|record| record.names(sid)).and_then(|record| record.owner);
+fn owner(
+    records: &[Record],
+    user: &SidRef,
+    groups: &[&SidRef],
+    problems: &mut Vec<String>,
+) -> Option<Sid> {
+    let of = |sid: &SidRef| {
+        records
+            .iter()
+            .find(|record| record.names(sid))
+            .and_then(|record| record.owner)
+    };
 
     if let Some(owner) = of(user) {
         return Some(owner);
@@ -491,13 +577,22 @@ fn owner(records: &[Record], user: &SidRef, groups: &[&SidRef], problems: &mut V
 /// `Privileges` but no `Integrity` does not suppress the group computation, it
 /// simply does not speak to integrity.
 fn integrity(records: &[Record], user: &SidRef, groups: &[&SidRef]) -> IntegrityLevel {
-    let of = |sid: &SidRef| records.iter().find(|record| record.names(sid)).and_then(|record| record.integrity);
+    let of = |sid: &SidRef| {
+        records
+            .iter()
+            .find(|record| record.names(sid))
+            .and_then(|record| record.integrity)
+    };
 
     if let Some(level) = of(user) {
         return level;
     }
 
-    groups.iter().filter_map(|group| of(group)).max().unwrap_or(DEFAULT_INTEGRITY)
+    groups
+        .iter()
+        .filter_map(|group| of(group))
+        .max()
+        .unwrap_or(DEFAULT_INTEGRITY)
 }
 
 /// The DACL objects this token creates inherit when nothing else supplies one.
@@ -507,8 +602,18 @@ fn integrity(records: &[Record], user: &SidRef, groups: &[&SidRef]) -> Integrity
 /// whichever the registry enumerated first. The user's own record wins;
 /// otherwise a group may name one; two groups disagreeing falls back to the
 /// kernel's default.
-fn default_dacl(records: &[Record], user: &SidRef, groups: &[&SidRef], problems: &mut Vec<String>) -> Option<Acl> {
-    let of = |sid: &SidRef| records.iter().find(|record| record.names(sid)).and_then(|record| record.default_dacl.as_ref().map(|dacl| dacl.acl.clone()));
+fn default_dacl(
+    records: &[Record],
+    user: &SidRef,
+    groups: &[&SidRef],
+    problems: &mut Vec<String>,
+) -> Option<Acl> {
+    let of = |sid: &SidRef| {
+        records
+            .iter()
+            .find(|record| record.names(sid))
+            .and_then(|record| record.default_dacl.as_ref().map(|dacl| dacl.acl.clone()))
+    };
 
     if let Some(acl) = of(user) {
         return Some(acl);
@@ -544,7 +649,11 @@ fn default_dacl(records: &[Record], user: &SidRef, groups: &[&SidRef], problems:
 /// because policy is evaluated against them: a program saying what someone
 /// gets must add exactly what authd adds.
 pub fn derived_sids(logon_type: LogonType) -> Vec<Sid> {
-    let mut sids = vec![Sid::well_known(WellKnown::Everyone), Sid::well_known(WellKnown::AuthenticatedUsers), Sid::well_known(WellKnown::Local)];
+    let mut sids = vec![
+        Sid::well_known(WellKnown::Everyone),
+        Sid::well_known(WellKnown::AuthenticatedUsers),
+        Sid::well_known(WellKnown::Local),
+    ];
     sids.extend(logon_type_sids(logon_type));
     sids
 }
@@ -577,7 +686,10 @@ pub fn logon_type_sids(logon_type: LogonType) -> Vec<Sid> {
         LogonType::NewCredentials => &[],
     };
     // NT Authority (5), one sub-authority each.
-    sub_authorities.iter().filter_map(|sub_authority| Sid::build(5, &[*sub_authority]).ok()).collect()
+    sub_authorities
+        .iter()
+        .filter_map(|sub_authority| Sid::build(5, &[*sub_authority]).ok())
+        .collect()
 }
 
 /// The configured SDDL for `/run/logon.sock`, if a site has stated one, or why
@@ -587,11 +699,17 @@ pub fn logon_type_sids(logon_type: LogonType) -> Vec<Sid> {
 /// the socket when it is bound, and rereading a value that can no longer be
 /// applied would only misreport what is in force.
 pub fn logon_socket_descriptor() -> Result<Option<String>, String> {
-    let Ok(key) = Key::open(None, KEY, KeyAccess::QUERY_VALUE, OpenFlags::empty()) else { return Ok(None) };
-    let Ok(value) = key.query_value(LOGON_SOCKET_SD_VALUE.as_bytes(), None) else { return Ok(None) };
+    let Ok(key) = Key::open(None, KEY, KeyAccess::QUERY_VALUE, OpenFlags::empty()) else {
+        return Ok(None);
+    };
+    let Ok(value) = key.query_value(LOGON_SOCKET_SD_VALUE.as_bytes(), None) else {
+        return Ok(None);
+    };
     match sz(&value.ty, &value.data) {
         Some(text) => Ok(Some(text.to_string())),
-        None => Err(format!("{KEY}\\{LOGON_SOCKET_SD_VALUE} is not a REG_SZ; using the built-in descriptor")),
+        None => Err(format!(
+            "{KEY}\\{LOGON_SOCKET_SD_VALUE} is not a REG_SZ; using the built-in descriptor"
+        )),
     }
 }
 
@@ -657,9 +775,17 @@ pub fn resolve(name: &str) -> Option<Sid> {
 /// The same tolerance rule as privileges: an unknown name is dropped with a
 /// problem said rather than failing the list, because dropping one grants
 /// strictly less — the safe direction for a grant.
-fn logon_types_of(ty: &ValueType, data: &[u8], path: &str, problems: &mut Vec<String>) -> Option<LogonTypes> {
+fn logon_types_of(
+    ty: &ValueType,
+    data: &[u8],
+    path: &str,
+    problems: &mut Vec<String>,
+) -> Option<LogonTypes> {
     let Some(names) = multi_sz(ty, data) else {
-        problems.push(format!("{path}\\{LOGON_TYPES_VALUE} is not a REG_MULTI_SZ (type {:#x}); ignoring it", ty.0));
+        problems.push(format!(
+            "{path}\\{LOGON_TYPES_VALUE} is not a REG_MULTI_SZ (type {:#x}); ignoring it",
+            ty.0
+        ));
         return None;
     };
     Some(parse_logon_type_names(&names, path, problems))
@@ -692,7 +818,10 @@ pub const LOGON_TYPE_NAMES: &[(&str, LogonType)] = &[
 ];
 
 fn logon_type_by_name(name: &str) -> Option<LogonType> {
-    LOGON_TYPE_NAMES.iter().find(|(known, _)| *known == name).map(|(_, logon_type)| *logon_type)
+    LOGON_TYPE_NAMES
+        .iter()
+        .find(|(known, _)| *known == name)
+        .map(|(_, logon_type)| *logon_type)
 }
 
 /// Read a `REG_MULTI_SZ` of privilege names.
@@ -703,9 +832,18 @@ fn logon_type_by_name(name: &str) -> Option<LogonType> {
 /// name, and refusing the entire record would take away privileges the
 /// administrator did spell correctly. Dropping the one grants strictly less,
 /// which is the safe direction for a grant.
-fn privilege_list(ty: &ValueType, data: &[u8], path: &str, value_name: &str, problems: &mut Vec<String>) -> Option<Privileges> {
+fn privilege_list(
+    ty: &ValueType,
+    data: &[u8],
+    path: &str,
+    value_name: &str,
+    problems: &mut Vec<String>,
+) -> Option<Privileges> {
     let Some(names) = multi_sz(ty, data) else {
-        problems.push(format!("{path}\\{value_name} is not a REG_MULTI_SZ (type {:#x}); ignoring it", ty.0));
+        problems.push(format!(
+            "{path}\\{value_name} is not a REG_MULTI_SZ (type {:#x}); ignoring it",
+            ty.0
+        ));
         return None;
     };
     let mut privileges = Privileges::empty();
@@ -728,7 +866,12 @@ fn privilege_list(ty: &ValueType, data: &[u8], path: &str, value_name: &str, pro
 /// legal. A number that happens to equal a tier is accepted rather than refused
 /// in favour of the name — being clever there would only break a scripted
 /// writer.
-fn integrity_of(ty: &ValueType, data: &[u8], path: &str, problems: &mut Vec<String>) -> Option<IntegrityLevel> {
+fn integrity_of(
+    ty: &ValueType,
+    data: &[u8],
+    path: &str,
+    problems: &mut Vec<String>,
+) -> Option<IntegrityLevel> {
     if let Some(level) = dword(ty, data) {
         return Some(IntegrityLevel(level));
     }
@@ -756,13 +899,24 @@ fn integrity_of(ty: &ValueType, data: &[u8], path: &str, problems: &mut Vec<Stri
 /// logon. The kernel's own default applies instead, which is the same outcome
 /// as not configuring one — so a typo here costs the customisation, not the
 /// session.
-fn default_dacl_of(ty: &ValueType, data: &[u8], path: &str, problems: &mut Vec<String>) -> Option<DefaultDacl> {
+fn default_dacl_of(
+    ty: &ValueType,
+    data: &[u8],
+    path: &str,
+    problems: &mut Vec<String>,
+) -> Option<DefaultDacl> {
     let Some(text) = sz(ty, data) else {
-        problems.push(format!("{path}\\{DEFAULT_DACL_VALUE} is not a REG_SZ (type {:#x}); ignoring it", ty.0));
+        problems.push(format!(
+            "{path}\\{DEFAULT_DACL_VALUE} is not a REG_SZ (type {:#x}); ignoring it",
+            ty.0
+        ));
         return None;
     };
     match sddl::parse_acl(text) {
-        Ok(acl) => Some(DefaultDacl { sddl: text.to_string(), acl }),
+        Ok(acl) => Some(DefaultDacl {
+            sddl: text.to_string(),
+            acl,
+        }),
         Err(error) => {
             problems.push(format!(
                 "{path}\\{DEFAULT_DACL_VALUE} is not a usable SDDL DACL ({text:?}: {error}); tokens \
@@ -782,7 +936,10 @@ fn default_dacl_of(ty: &ValueType, data: &[u8], path: &str, problems: &mut Vec<S
 /// the principal and let authd do the conversion.
 fn owner_of(ty: &ValueType, data: &[u8], path: &str, problems: &mut Vec<String>) -> Option<Sid> {
     let Some(text) = sz(ty, data) else {
-        problems.push(format!("{path}\\{OWNER_VALUE} is not a REG_SZ (type {:#x}); ignoring it", ty.0));
+        problems.push(format!(
+            "{path}\\{OWNER_VALUE} is not a REG_SZ (type {:#x}); ignoring it",
+            ty.0
+        ));
         return None;
     };
     match resolve(text) {
@@ -799,12 +956,18 @@ fn owner_of(ty: &ValueType, data: &[u8], path: &str, problems: &mut Vec<String>)
 
 /// A tier by name, matched case-insensitively.
 pub fn tier(text: &str) -> Option<IntegrityLevel> {
-    TIERS.iter().find(|(name, _)| name.eq_ignore_ascii_case(text.trim())).map(|(_, level)| *level)
+    TIERS
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case(text.trim()))
+        .map(|(_, level)| *level)
 }
 
 /// What this machine calls an integrity level, for rendering one back.
 pub fn tier_name(level: IntegrityLevel) -> Option<&'static str> {
-    TIERS.iter().find(|(_, tier)| *tier == level).map(|(name, _)| *name)
+    TIERS
+        .iter()
+        .find(|(_, tier)| *tier == level)
+        .map(|(name, _)| *name)
 }
 
 #[cfg(test)]
@@ -815,20 +978,44 @@ mod tests {
         text.parse().expect("a well-formed SID")
     }
 
-    fn record(name: &str, privileges: Option<Privileges>, integrity: Option<IntegrityLevel>) -> Record {
-        Record { privileges, integrity, ..Record::empty(name, resolve(name).expect("a resolvable principal")) }
+    fn record(
+        name: &str,
+        privileges: Option<Privileges>,
+        integrity: Option<IntegrityLevel>,
+    ) -> Record {
+        Record {
+            privileges,
+            integrity,
+            ..Record::empty(name, resolve(name).expect("a resolvable principal"))
+        }
     }
 
     fn owning(name: &str, owner: &str) -> Record {
-        Record { owner: Some(resolve(owner).expect("a resolvable owner")), ..record(name, None, None) }
+        Record {
+            owner: Some(resolve(owner).expect("a resolvable owner")),
+            ..record(name, None, None)
+        }
     }
 
     fn policy(records: Vec<Record>, denied: Privileges) -> Policy {
-        Policy { configured: true, records, denied, problems: Vec::new() }
+        Policy {
+            configured: true,
+            records,
+            denied,
+            problems: Vec::new(),
+        }
     }
 
-    fn union(records: &[Record], user: &SidRef, groups: &[&SidRef], denied: Privileges) -> Privileges {
-        policy(records.to_vec(), denied).evaluate(user, groups).outcome.privileges
+    fn union(
+        records: &[Record],
+        user: &SidRef,
+        groups: &[&SidRef],
+        denied: Privileges,
+    ) -> Privileges {
+        policy(records.to_vec(), denied)
+            .evaluate(user, groups)
+            .outcome
+            .privileges
     }
 
     // -----------------------------------------------------------------------
@@ -851,7 +1038,14 @@ mod tests {
             record("Administrators", None, Some(IntegrityLevel::HIGH)),
             record("Everyone", None, Some(IntegrityLevel::LOW)),
         ];
-        assert_eq!(integrity(&records, user.as_ref(), &[admins.as_ref(), everyone.as_ref()]), IntegrityLevel::HIGH);
+        assert_eq!(
+            integrity(
+                &records,
+                user.as_ref(),
+                &[admins.as_ref(), everyone.as_ref()]
+            ),
+            IntegrityLevel::HIGH
+        );
     }
 
     /// The rule that makes lowering possible at all. Under a flat maximum this
@@ -881,7 +1075,10 @@ mod tests {
             record("S-1-5-21-1-2-3-1000", Some(Privileges::BACKUP), None),
             record("Administrators", None, Some(IntegrityLevel::HIGH)),
         ];
-        assert_eq!(integrity(&records, user.as_ref(), &[admins.as_ref()]), IntegrityLevel::HIGH);
+        assert_eq!(
+            integrity(&records, user.as_ref(), &[admins.as_ref()]),
+            IntegrityLevel::HIGH
+        );
     }
 
     /// The emergent property worth keeping: policy can be written against how a
@@ -891,7 +1088,10 @@ mod tests {
         let user = sid("S-1-5-21-1-2-3-1000");
         let network = sid("S-1-5-2");
         let records = [record("Network", None, Some(IntegrityLevel::LOW))];
-        assert_eq!(integrity(&records, user.as_ref(), &[network.as_ref()]), IntegrityLevel::LOW);
+        assert_eq!(
+            integrity(&records, user.as_ref(), &[network.as_ref()]),
+            IntegrityLevel::LOW
+        );
     }
 
     #[test]
@@ -916,10 +1116,19 @@ mod tests {
         let everyone = sid("S-1-1-0");
         let records = [
             record("Everyone", Some(Privileges::CHANGE_NOTIFY), None),
-            record("Administrators", Some(Privileges::BACKUP | Privileges::RESTORE), None),
+            record(
+                "Administrators",
+                Some(Privileges::BACKUP | Privileges::RESTORE),
+                None,
+            ),
         ];
         assert_eq!(
-            union(&records, user.as_ref(), &[admins.as_ref(), everyone.as_ref()], Privileges::empty()),
+            union(
+                &records,
+                user.as_ref(),
+                &[admins.as_ref(), everyone.as_ref()],
+                Privileges::empty()
+            ),
             Privileges::CHANGE_NOTIFY | Privileges::BACKUP | Privileges::RESTORE
         );
     }
@@ -930,15 +1139,34 @@ mod tests {
     fn denied_privileges_beat_every_record() {
         let user = sid("S-1-5-21-1-2-3-1000");
         let admins = sid("S-1-5-32-544");
-        let records = [record("Administrators", Some(Privileges::BACKUP | Privileges::DEBUG), None)];
-        assert_eq!(union(&records, user.as_ref(), &[admins.as_ref()], Privileges::DEBUG), Privileges::BACKUP);
+        let records = [record(
+            "Administrators",
+            Some(Privileges::BACKUP | Privileges::DEBUG),
+            None,
+        )];
+        assert_eq!(
+            union(
+                &records,
+                user.as_ref(),
+                &[admins.as_ref()],
+                Privileges::DEBUG
+            ),
+            Privileges::BACKUP
+        );
     }
 
     #[test]
     fn an_empty_privilege_list_grants_nothing() {
         let user = sid("S-1-5-21-1-2-3-1000");
-        let records = [record("S-1-5-21-1-2-3-1000", Some(Privileges::empty()), None)];
-        assert_eq!(union(&records, user.as_ref(), &[], Privileges::empty()), Privileges::empty());
+        let records = [record(
+            "S-1-5-21-1-2-3-1000",
+            Some(Privileges::empty()),
+            None,
+        )];
+        assert_eq!(
+            union(&records, user.as_ref(), &[], Privileges::empty()),
+            Privileges::empty()
+        );
     }
 
     /// What a program shows as applying is what was evaluated.
@@ -950,7 +1178,12 @@ mod tests {
             record("Administrators", Some(Privileges::BACKUP), None),
             record("Everyone", Some(Privileges::CHANGE_NOTIFY), None),
         ];
-        assert_eq!(policy(records, Privileges::empty()).evaluate(user.as_ref(), &[everyone.as_ref()]).applied, [1]);
+        assert_eq!(
+            policy(records, Privileges::empty())
+                .evaluate(user.as_ref(), &[everyone.as_ref()])
+                .applied,
+            [1]
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -965,7 +1198,13 @@ mod tests {
         let everyone = sid("S-1-1-0");
         let floor = Policy::floor();
         assert!(!floor.configured);
-        assert_eq!(floor.evaluate(user.as_ref(), &[everyone.as_ref()]).outcome.privileges, Privileges::CHANGE_NOTIFY);
+        assert_eq!(
+            floor
+                .evaluate(user.as_ref(), &[everyone.as_ref()])
+                .outcome
+                .privileges,
+            Privileges::CHANGE_NOTIFY
+        );
     }
 
     /// The floor is a floor, not a useful policy: no administrative power comes
@@ -975,7 +1214,10 @@ mod tests {
         let user = sid("S-1-5-21-1-2-3-1000");
         let admins = sid("S-1-5-32-544");
         let everyone = sid("S-1-1-0");
-        let granted = Policy::floor().evaluate(user.as_ref(), &[admins.as_ref(), everyone.as_ref()]).outcome.privileges;
+        let granted = Policy::floor()
+            .evaluate(user.as_ref(), &[admins.as_ref(), everyone.as_ref()])
+            .outcome
+            .privileges;
         for forbidden in [
             Privileges::BACKUP,
             Privileges::RESTORE,
@@ -984,13 +1226,21 @@ mod tests {
             Privileges::TCB,
             Privileges::CREATE_TOKEN,
         ] {
-            assert!(!granted.contains(forbidden), "the floor must not grant {:?}", forbidden.canonical_name());
+            assert!(
+                !granted.contains(forbidden),
+                "the floor must not grant {:?}",
+                forbidden.canonical_name()
+            );
         }
     }
 
     #[test]
     fn every_floor_entry_names_a_principal_that_resolves() {
-        assert_eq!(Policy::floor().records.len(), FLOOR.len(), "a floor entry did not resolve");
+        assert_eq!(
+            Policy::floor().records.len(),
+            FLOOR.len(),
+            "a floor entry did not resolve"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -999,10 +1249,19 @@ mod tests {
 
     #[test]
     fn every_logon_carries_everyone_authenticated_users_local_and_its_type() {
-        let derived: Vec<String> = derived_sids(LogonType::RemoteInteractive).iter().map(Sid::to_string).collect();
-        assert_eq!(derived, ["S-1-1-0", "S-1-5-11", "S-1-2-0", "S-1-5-4", "S-1-5-14"]);
+        let derived: Vec<String> = derived_sids(LogonType::RemoteInteractive)
+            .iter()
+            .map(Sid::to_string)
+            .collect();
+        assert_eq!(
+            derived,
+            ["S-1-1-0", "S-1-5-11", "S-1-2-0", "S-1-5-4", "S-1-5-14"]
+        );
         assert!(logon_type_sids(LogonType::NewCredentials).is_empty());
-        assert_eq!(logon_type_sids(LogonType::NetworkCleartext), logon_type_sids(LogonType::Network));
+        assert_eq!(
+            logon_type_sids(LogonType::NetworkCleartext),
+            logon_type_sids(LogonType::Network)
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -1038,10 +1297,24 @@ mod tests {
     #[test]
     fn an_integrity_is_read_as_a_name_or_a_number_and_anything_else_is_said() {
         let mut problems = Vec::new();
-        assert_eq!(integrity_of(&ValueType::SZ, b"Low\0", "p", &mut problems), Some(IntegrityLevel::LOW));
-        assert_eq!(integrity_of(&ValueType::DWORD, &8193u32.to_le_bytes(), "p", &mut problems), Some(IntegrityLevel(8193)));
+        assert_eq!(
+            integrity_of(&ValueType::SZ, b"Low\0", "p", &mut problems),
+            Some(IntegrityLevel::LOW)
+        );
+        assert_eq!(
+            integrity_of(
+                &ValueType::DWORD,
+                &8193u32.to_le_bytes(),
+                "p",
+                &mut problems
+            ),
+            Some(IntegrityLevel(8193))
+        );
         assert!(problems.is_empty());
-        assert_eq!(integrity_of(&ValueType::SZ, b"Meduim\0", "p", &mut problems), None);
+        assert_eq!(
+            integrity_of(&ValueType::SZ, b"Meduim\0", "p", &mut problems),
+            None
+        );
         assert!(problems[0].contains("Meduim"), "{problems:?}");
     }
 
@@ -1051,16 +1324,36 @@ mod tests {
     fn a_privilege_this_build_cannot_name_is_dropped_and_said() {
         let mut problems = Vec::new();
         let data = encode_multi_sz(["SeBackupPrivilege", "SeBackupPriviledge"]);
-        assert_eq!(privilege_list(&ValueType::MULTI_SZ, &data, "p", PRIVILEGES_VALUE, &mut problems), Some(Privileges::BACKUP));
+        assert_eq!(
+            privilege_list(
+                &ValueType::MULTI_SZ,
+                &data,
+                "p",
+                PRIVILEGES_VALUE,
+                &mut problems
+            ),
+            Some(Privileges::BACKUP)
+        );
         assert_eq!(problems.len(), 1);
         assert!(problems[0].contains("SeBackupPriviledge"));
     }
 
     #[test]
     fn a_record_name_resolves_by_well_known_name_or_by_sid() {
-        assert_eq!(resolve("Administrators").as_ref().map(|s| s.to_string()), Some("S-1-5-32-544".to_string()));
-        assert_eq!(resolve("S-1-5-32-544").as_ref().map(|s| s.to_string()), Some("S-1-5-32-544".to_string()));
-        assert_eq!(resolve("S-1-5-21-1-2-3-1000").as_ref().map(|s| s.to_string()), Some("S-1-5-21-1-2-3-1000".to_string()));
+        assert_eq!(
+            resolve("Administrators").as_ref().map(|s| s.to_string()),
+            Some("S-1-5-32-544".to_string())
+        );
+        assert_eq!(
+            resolve("S-1-5-32-544").as_ref().map(|s| s.to_string()),
+            Some("S-1-5-32-544".to_string())
+        );
+        assert_eq!(
+            resolve("S-1-5-21-1-2-3-1000")
+                .as_ref()
+                .map(|s| s.to_string()),
+            Some("S-1-5-21-1-2-3-1000".to_string())
+        );
     }
 
     /// Two keys for one principal are said once, naming both.
@@ -1073,7 +1366,11 @@ mod tests {
         ];
         let said = duplicates(&records);
         assert_eq!(said.len(), 1, "{said:?}");
-        assert!(said[0].contains("Policy\\Administrators and ") && said[0].contains("Policy\\S-1-5-32-544"), "{said:?}");
+        assert!(
+            said[0].contains("Policy\\Administrators and ")
+                && said[0].contains("Policy\\S-1-5-32-544"),
+            "{said:?}"
+        );
         assert!(duplicates(&records[..2]).is_empty());
     }
 
@@ -1082,7 +1379,11 @@ mod tests {
         assert_eq!(resolve("Administrtors"), None);
         assert_eq!(resolve("Domain Admins"), None);
         assert_eq!(resolve("BUILTIN\\Administrators"), None);
-        assert_eq!(resolve("developers"), None, "a local group's name means nothing here");
+        assert_eq!(
+            resolve("developers"),
+            None,
+            "a local group's name means nothing here"
+        );
         assert_eq!(resolve(""), None);
     }
 
@@ -1103,15 +1404,24 @@ mod tests {
         let user = sid("S-1-5-21-1-2-3-1000");
         let admins = sid("S-1-5-32-544");
         let records = [owning("Administrators", "Administrators")];
-        assert_eq!(owner(&records, user.as_ref(), &[admins.as_ref()], &mut Vec::new()), Some(sid("S-1-5-32-544")));
+        assert_eq!(
+            owner(&records, user.as_ref(), &[admins.as_ref()], &mut Vec::new()),
+            Some(sid("S-1-5-32-544"))
+        );
     }
 
     #[test]
     fn the_users_own_record_wins() {
         let user = sid("S-1-5-21-1-2-3-1000");
         let admins = sid("S-1-5-32-544");
-        let records = [owning("Administrators", "Administrators"), owning("S-1-5-21-1-2-3-1000", "Users")];
-        assert_eq!(owner(&records, user.as_ref(), &[admins.as_ref()], &mut Vec::new()), Some(sid("S-1-5-32-545")));
+        let records = [
+            owning("Administrators", "Administrators"),
+            owning("S-1-5-21-1-2-3-1000", "Users"),
+        ];
+        assert_eq!(
+            owner(&records, user.as_ref(), &[admins.as_ref()], &mut Vec::new()),
+            Some(sid("S-1-5-32-545"))
+        );
     }
 
     /// Groups have no order, so two disagreeing must not be resolved by
@@ -1121,10 +1431,18 @@ mod tests {
         let user = sid("S-1-5-21-1-2-3-1000");
         let admins = sid("S-1-5-32-544");
         let users = sid("S-1-5-32-545");
-        let records = [owning("Administrators", "Administrators"), owning("Users", "Users")];
+        let records = [
+            owning("Administrators", "Administrators"),
+            owning("Users", "Users"),
+        ];
         let mut problems = Vec::new();
         assert_eq!(
-            owner(&records, user.as_ref(), &[admins.as_ref(), users.as_ref()], &mut problems),
+            owner(
+                &records,
+                user.as_ref(),
+                &[admins.as_ref(), users.as_ref()],
+                &mut problems
+            ),
             None,
             "an ambiguous owner must not be resolved arbitrarily"
         );
@@ -1137,8 +1455,19 @@ mod tests {
         let user = sid("S-1-5-21-1-2-3-1000");
         let admins = sid("S-1-5-32-544");
         let users = sid("S-1-5-32-545");
-        let records = [owning("Administrators", "Administrators"), owning("Users", "Administrators")];
-        assert_eq!(owner(&records, user.as_ref(), &[admins.as_ref(), users.as_ref()], &mut Vec::new()), Some(sid("S-1-5-32-544")));
+        let records = [
+            owning("Administrators", "Administrators"),
+            owning("Users", "Administrators"),
+        ];
+        assert_eq!(
+            owner(
+                &records,
+                user.as_ref(),
+                &[admins.as_ref(), users.as_ref()],
+                &mut Vec::new()
+            ),
+            Some(sid("S-1-5-32-544"))
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -1147,7 +1476,10 @@ mod tests {
 
     fn with_dacl(name: &str, sddl_text: &str) -> Record {
         Record {
-            default_dacl: Some(DefaultDacl { sddl: sddl_text.into(), acl: sddl::parse_acl(sddl_text).expect("valid SDDL") }),
+            default_dacl: Some(DefaultDacl {
+                sddl: sddl_text.into(),
+                acl: sddl::parse_acl(sddl_text).expect("valid SDDL"),
+            }),
             ..record(name, None, None)
         }
     }
@@ -1163,7 +1495,8 @@ mod tests {
         let user = sid("S-1-5-21-1-2-3-1000");
         let admins = sid("S-1-5-32-544");
         let records = [with_dacl("Administrators", "D:(A;;GA;;;SY)(A;;GA;;;BA)")];
-        let chosen = default_dacl(&records, user.as_ref(), &[admins.as_ref()], &mut Vec::new()).expect("the group's DACL");
+        let chosen = default_dacl(&records, user.as_ref(), &[admins.as_ref()], &mut Vec::new())
+            .expect("the group's DACL");
         assert_eq!(chosen.view().expect("parseable").len(), 2);
     }
 
@@ -1171,8 +1504,12 @@ mod tests {
     fn the_users_own_default_dacl_wins() {
         let user = sid("S-1-5-21-1-2-3-1000");
         let admins = sid("S-1-5-32-544");
-        let records = [with_dacl("Administrators", "D:(A;;GA;;;SY)(A;;GA;;;BA)"), with_dacl("S-1-5-21-1-2-3-1000", "D:(A;;GA;;;SY)")];
-        let chosen = default_dacl(&records, user.as_ref(), &[admins.as_ref()], &mut Vec::new()).expect("the user's DACL");
+        let records = [
+            with_dacl("Administrators", "D:(A;;GA;;;SY)(A;;GA;;;BA)"),
+            with_dacl("S-1-5-21-1-2-3-1000", "D:(A;;GA;;;SY)"),
+        ];
+        let chosen = default_dacl(&records, user.as_ref(), &[admins.as_ref()], &mut Vec::new())
+            .expect("the user's DACL");
         assert_eq!(chosen.view().expect("parseable").len(), 1);
     }
 
@@ -1181,9 +1518,18 @@ mod tests {
         let user = sid("S-1-5-21-1-2-3-1000");
         let admins = sid("S-1-5-32-544");
         let users = sid("S-1-5-32-545");
-        let records = [with_dacl("Administrators", "D:(A;;GA;;;BA)"), with_dacl("Users", "D:(A;;GA;;;SY)")];
+        let records = [
+            with_dacl("Administrators", "D:(A;;GA;;;BA)"),
+            with_dacl("Users", "D:(A;;GA;;;SY)"),
+        ];
         assert!(
-            default_dacl(&records, user.as_ref(), &[admins.as_ref(), users.as_ref()], &mut Vec::new()).is_none(),
+            default_dacl(
+                &records,
+                user.as_ref(),
+                &[admins.as_ref(), users.as_ref()],
+                &mut Vec::new()
+            )
+            .is_none(),
             "an ambiguous default DACL must not be resolved arbitrarily"
         );
     }
@@ -1193,17 +1539,32 @@ mod tests {
         let user = sid("S-1-5-21-1-2-3-1000");
         let admins = sid("S-1-5-32-544");
         let users = sid("S-1-5-32-545");
-        let records = [with_dacl("Administrators", "D:(A;;GA;;;SY)"), with_dacl("Users", "D:(A;;GA;;;SY)")];
-        assert!(default_dacl(&records, user.as_ref(), &[admins.as_ref(), users.as_ref()], &mut Vec::new()).is_some());
+        let records = [
+            with_dacl("Administrators", "D:(A;;GA;;;SY)"),
+            with_dacl("Users", "D:(A;;GA;;;SY)"),
+        ];
+        assert!(
+            default_dacl(
+                &records,
+                user.as_ref(),
+                &[admins.as_ref(), users.as_ref()],
+                &mut Vec::new()
+            )
+            .is_some()
+        );
     }
 
     /// A conditional ACE in a default DACL must keep its expression — the whole
     /// reason `sddl::parse_acl` rebuilds rather than transcribes.
     #[test]
     fn a_conditional_ace_in_a_default_dacl_survives() {
-        let acl = sddl::parse_acl("D:(XA;;GA;;;WD;(@USER.Department == \"Engineering\"))").expect("valid conditional SDDL");
+        let acl = sddl::parse_acl("D:(XA;;GA;;;WD;(@USER.Department == \"Engineering\"))")
+            .expect("valid conditional SDDL");
         let view = acl.view().expect("parseable");
-        assert!(view.ace(0).and_then(|ace| ace.app_data()).is_some(), "the condition must survive into the token's default DACL");
+        assert!(
+            view.ace(0).and_then(|ace| ace.app_data()).is_some(),
+            "the condition must survive into the token's default DACL"
+        );
     }
 
     #[test]
@@ -1211,8 +1572,12 @@ mod tests {
         let mut problems = Vec::new();
         assert!(default_dacl_of(&ValueType::SZ, b"D:(nonsense)\0", "p", &mut problems).is_none());
         assert_eq!(problems.len(), 1);
-        let kept = default_dacl_of(&ValueType::SZ, b"D:(A;;GA;;;SY)\0", "p", &mut problems).expect("parses");
-        assert_eq!(kept.sddl, "D:(A;;GA;;;SY)", "the SDDL as written is kept, to show and edit");
+        let kept = default_dacl_of(&ValueType::SZ, b"D:(A;;GA;;;SY)\0", "p", &mut problems)
+            .expect("parses");
+        assert_eq!(
+            kept.sddl, "D:(A;;GA;;;SY)",
+            "the SDDL as written is kept, to show and edit"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -1237,10 +1602,16 @@ mod tests {
             if !candidate.starts_with("Se") || !candidate.ends_with("Privilege") {
                 continue;
             }
-            assert!(Privileges::parse_name(candidate).is_some(), "authd-policy.reg names {candidate:?}, which is not a privilege");
+            assert!(
+                Privileges::parse_name(candidate).is_some(),
+                "authd-policy.reg names {candidate:?}, which is not a privilege"
+            );
             checked += 1;
         }
-        assert!(checked > 10, "expected the seed to name privileges; found {checked}, so the scan is broken");
+        assert!(
+            checked > 10,
+            "expected the seed to name privileges; found {checked}, so the scan is broken"
+        );
     }
 
     /// The seed names a default DACL on Everyone, and it has to be one the
@@ -1260,8 +1631,14 @@ mod tests {
 
         let acl = sddl::parse_acl(value).expect("the seed's DefaultDacl is valid SDDL");
         assert!(!acl.as_bytes().is_empty());
-        assert!(value.contains("S-1-3-4"), "the default DACL must grant the owner through OWNER RIGHTS: {value}");
-        assert!(!value.contains("S-1-3-0") && !value.contains(";CO)"), "CREATOR OWNER is never substituted in a default DACL: {value}");
+        assert!(
+            value.contains("S-1-3-4"),
+            "the default DACL must grant the owner through OWNER RIGHTS: {value}"
+        );
+        assert!(
+            !value.contains("S-1-3-0") && !value.contains(";CO)"),
+            "CREATOR OWNER is never substituted in a default DACL: {value}"
+        );
     }
 
     /// The seed must never hand out the privileges that would make every other
@@ -1275,7 +1652,11 @@ mod tests {
             if !line.starts_with('"') || !line.ends_with("\",") && !line.ends_with('"') {
                 continue;
             }
-            for reserved in ["SeCreateTokenPrivilege", "SeTcbPrivilege", "SeAssignPrimaryTokenPrivilege"] {
+            for reserved in [
+                "SeCreateTokenPrivilege",
+                "SeTcbPrivilege",
+                "SeAssignPrimaryTokenPrivilege",
+            ] {
                 assert_ne!(
                     line.trim_matches(|c| c == '"' || c == ','),
                     reserved,
@@ -1291,7 +1672,10 @@ mod tests {
     /// repair it.
     #[test]
     fn the_seed_grants_administrators_change_notify_directly() {
-        let administrators = SEED.split("Policy\\\\Administrators").nth(1).expect("the seed must carry an Administrators record");
+        let administrators = SEED
+            .split("Policy\\\\Administrators")
+            .nth(1)
+            .expect("the seed must carry an Administrators record");
         assert!(
             administrators.contains("SeChangeNotifyPrivilege"),
             "Administrators must hold SeChangeNotifyPrivilege directly, so a botched edit to the \
@@ -1305,7 +1689,11 @@ mod tests {
 
     #[test]
     fn logon_type_names_parse_to_the_bitmask() {
-        let types = parse_logon_type_names(&["Interactive", "Network", "RemoteInteractive"], "test", &mut Vec::new());
+        let types = parse_logon_type_names(
+            &["Interactive", "Network", "RemoteInteractive"],
+            "test",
+            &mut Vec::new(),
+        );
         assert!(types.bits() & (1 << LogonType::Interactive as u32) != 0);
         assert!(types.bits() & (1 << LogonType::Network as u32) != 0);
         assert!(types.bits() & (1 << LogonType::RemoteInteractive as u32) != 0);
@@ -1360,9 +1748,18 @@ mod tests {
     /// default, which may grant more than the site wrote.
     #[test]
     fn an_unusable_session_end_descriptor_is_an_error_not_the_default() {
-        let wrong_type = session_end_descriptor_of(&ValueType::MULTI_SZ, &encode_multi_sz(["O:SYG:SYD:"]));
-        assert!(wrong_type.as_ref().is_err_and(|why| why.contains("not a REG_SZ")), "{wrong_type:?}");
+        let wrong_type =
+            session_end_descriptor_of(&ValueType::MULTI_SZ, &encode_multi_sz(["O:SYG:SYD:"]));
+        assert!(
+            wrong_type
+                .as_ref()
+                .is_err_and(|why| why.contains("not a REG_SZ")),
+            "{wrong_type:?}"
+        );
         let empty = session_end_descriptor_of(&ValueType::SZ, &encode_sz(""));
-        assert!(empty.as_ref().is_err_and(|why| why.contains("empty")), "{empty:?}");
+        assert!(
+            empty.as_ref().is_err_and(|why| why.contains("empty")),
+            "{empty:?}"
+        );
     }
 }

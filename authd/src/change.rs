@@ -589,7 +589,11 @@ mod tests {
         serve_enroll(&registry, &server, &peer, &enroll_start(), deadline).expect("served");
 
         let enroll = fake_source.join().expect("the fake source");
-        assert_eq!(enroll.principal, peer.as_ref().as_bytes(), "the peer, from the socket");
+        assert_eq!(
+            enroll.principal,
+            peer.as_ref().as_bytes(),
+            "the peer, from the socket"
+        );
         assert_eq!(enroll.start, enroll_start(), "the opening, nested whole");
         let (msg_type, no_descriptor) = answering.join().expect("the client");
         assert_eq!(msg_type, MSG_CREDENTIAL_CHANGED);

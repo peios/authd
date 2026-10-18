@@ -5,7 +5,7 @@ libpeios_source=$(realpath "${1:?libpeios source directory required}")
 uapi=$(realpath "${2:?kernel UAPI directory required}")
 output=$(realpath -m "${3:?SDK output directory required}")
 if [[ -e "$output" ]]; then
-    echo 'Use a new output directory so SDK versions cannot be mixed.' >&2
+    echo "Use a new output directory so SDK versions cannot be mixed." >&2
     exit 1
 fi
 [[ -f "$libpeios_source/Cargo.lock" && -f "$uapi/pkm/access.h" ]]
@@ -19,5 +19,5 @@ cp -a "$libpeios_source/include/." "$output/include/"
 cp -a "$uapi/pkm" "$output/include/"
 install -m 755 "$output/build/debug/libpeios.so" "$output/lib/libpeios.so.0"
 ln -s libpeios.so.0 "$output/lib/libpeios.so"
-sha256sum "$output/lib/libpeios.so.0" > "$output/library.sha256"
+sha256sum "$output/lib/libpeios.so.0" >"$output/library.sha256"
 printf 'Development SDK: %s\n' "$output"

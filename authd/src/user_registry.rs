@@ -3,6 +3,8 @@
 use peios::registry::{CreateFlags, Disposition, Key, KeyAccess, SecInfo, Transaction};
 use peios::security::{SidRef, sddl};
 
+/// Create a protected registry root if absent; preserve an existing root.
+/// Provisioning failure is logged and does not reject the authenticated logon.
 pub fn ensure(user: &SidRef) {
     if let Err(error) = create(user) {
         crate::log::warn(format_args!(

@@ -70,7 +70,7 @@ use core::ffi::{c_char, c_int, c_long};
 use auth_core::ident::{Fields, Kind, Key};
 
 use crate::buffer::Packer;
-use crate::client::{Client, Found};
+use crate::client::{Client, Lookup};
 
 /// glibc's `enum nss_status`.
 #[repr(i32)]
@@ -87,18 +87,18 @@ pub enum NssStatus {
 /// # Safety
 ///
 /// `errnop` must be a valid pointer, as glibc always provides.
-unsafe fn status_of(found: &Found, errnop: *mut c_int) -> NssStatus {
+unsafe fn status_of(found: &Lookup, errnop: *mut c_int) -> NssStatus {
     match found {
-        Found::Record(_) => NssStatus::Success,
-        Found::NotFound => NssStatus::NotFound,
-        Found::TryAgain => {
+        Lookup::Record(_) => NssStatus::Success,
+        Lookup::NotFound => NssStatus::NotFound,
+        Lookup::TryAgain => {
             // `EAGAIN` rather than `ERANGE`: the distinction tells glibc to
             // retry the *call*, where `ERANGE` would have it retry with a
             // larger buffer and get the same answer forever.
             unsafe { errnop.write(libc::EAGAIN) };
             NssStatus::TryAgain
         }
-        Found::Unavailable => NssStatus::Unavail,
+        Lookup::Unavailable => NssStatus::Unavail,
     }
 }
 
@@ -131,7 +131,8 @@ unsafe fn out_of_room(errnop: *mut c_int) -> NssStatus {
 ///
 /// # Safety
 ///
-/// `pointer` must be NUL-terminated or null.
+/// `pointer` must be null or reference a readable NUL-terminated string.
+/// The string must remain live and unmodified for the returned borrow’s lifetime.
 unsafe fn borrow<'a>(pointer: *const c_char) -> Option<&'a str> {
     if pointer.is_null() {
         return None;
@@ -192,7 +193,7 @@ unsafe fn passwd_lookup(
     };
     let found = client.lookup(key, Kind::Principal, Fields::PASSWD);
     let status = unsafe { status_of(&found, errnop) };
-    let Found::Record(record) = found else {
+    let Lookup::Record(record) = found else {
         return status;
     };
 
@@ -258,7 +259,7 @@ unsafe fn group_lookup(
     // turn one `getgrnam` into one call per member.
     let found = client.lookup(key, Kind::Group, Fields::GROUP);
     let status = unsafe { status_of(&found, errnop) };
-    let Found::Record(record) = found else {
+    let Lookup::Record(record) = found else {
         return status;
     };
 
@@ -309,7 +310,7 @@ pub unsafe extern "C" fn _nss_peios_initgroups_dyn(
         Fields::GROUPS | Fields::PRIMARY_GROUP,
     );
     let status = unsafe { status_of(&found, errnop) };
-    let Found::Record(record) = found else {
+    let Lookup::Record(record) = found else {
         return status;
     };
 

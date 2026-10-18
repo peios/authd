@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Generate matching C and Rust layouts from the reviewed ABI declaration list."""
+
 import json
-from pathlib import Path
 import re
 import subprocess
+from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 PRIMITIVES = {
@@ -17,17 +18,20 @@ PRIMITIVES = {
 }
 
 
-def c_name(name):
+def c_name(name: str) -> str:
+    """Translate a Rust layout name into its stable public C name."""
     return "peios_auth_" + re.sub(r"(?<!^)(?=[A-Z])", "_", name).lower()
 
 
-def c_type(name):
+def c_type(name: str) -> str:
+    """Translate a schema type, retaining pointer constness."""
     if name.startswith("*const "):
         return "const " + c_type(name[7:]) + " *"
     return PRIMITIVES.get(name, c_name(name))
 
 
-def main():
+def main() -> None:
+    """Regenerate layouts in schema order without changing the ABI."""
     declarations = json.loads((ROOT / "tools/auth-abi.json").read_text())
     rust = [
         "//! Shared C layouts. Use peios-auth for safe, owned Rust interfaces.",
@@ -45,15 +49,28 @@ def main():
         rust.extend(f"    pub {field}: {kind}," for field, kind in fields)
         rust.append("}")
         header.append("typedef struct " + c_name(name) + " {")
-        header.extend(f"    {c_type(kind)} {field};" for field, kind in fields)
+        header.extend(
+            "    " + c_type(kind) + ("" if c_type(kind).endswith("*") else " ") + field + ";"
+            for field, kind in fields
+        )
         header.append("} " + c_name(name) + ";")
     header.append("#endif")
     rust_file = ROOT / "auth-abi/src/lib.rs"
     rust_file.write_text("\n".join(rust) + "\n")
     (ROOT / "libauth/include/peios/auth-types.h").write_text("\n".join(header) + "\n")
-    subprocess.run([
-        "rustfmt", "--config-path", str(ROOT / "tools/rustfmt.toml"), str(rust_file)
-    ], check=True)
+    subprocess.run(
+        ["rustfmt", "--config-path", str(ROOT / "tools/rustfmt.toml"), str(rust_file)], check=True
+    )
+
+    subprocess.run(
+        [
+            "clang-format",
+            "--style=file:" + str(ROOT / "tools/clang-format.yaml"),
+            "-i",
+            str(ROOT / "libauth/include/peios/auth-types.h"),
+        ],
+        check=True,
+    )
 
 
 if __name__ == "__main__":

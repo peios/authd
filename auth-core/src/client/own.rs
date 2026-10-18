@@ -73,14 +73,13 @@ impl Own {
     }
 
     fn ask(&self, request: Result<Vec<u8>, WireError>) -> Result<Vec<u8>, Refusal> {
-        let request = request.map_err(|error| {
-            unreached(format!("could not encode the request: {error:?}"))
-        })?;
+        let request = request
+            .map_err(|error| unreached(format!("could not encode the request: {error:?}")))?;
         let at = self.path.display();
         let stream = UnixStream::connect(&self.path).map_err(|error| match error.kind() {
-            io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused => {
-                unreached(format!("cannot reach lpsd on {at}: it does not appear to be running"))
-            }
+            io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused => unreached(format!(
+                "cannot reach lpsd on {at}: it does not appear to be running"
+            )),
             io::ErrorKind::PermissionDenied => Refusal {
                 failure: Some(Failure::Denied),
                 reason: format!("cannot reach lpsd on {at}: permission denied"),
@@ -206,7 +205,10 @@ mod tests {
         });
         let refusal = own.show().unwrap_err();
         assert_eq!(refusal.failure, Some(Failure::NotFound));
-        assert_eq!(refusal.to_string(), "This account is not one this machine holds.");
+        assert_eq!(
+            refusal.to_string(),
+            "This account is not one this machine holds."
+        );
         std::fs::remove_dir_all(dir).unwrap();
     }
 

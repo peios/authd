@@ -68,7 +68,6 @@ mod derive;
 mod domain;
 mod end;
 mod home;
-mod user_registry;
 mod ident;
 mod log;
 mod peer;
@@ -77,6 +76,7 @@ mod resolve;
 mod service_sid;
 mod source;
 mod unix_id;
+mod user_registry;
 mod well_known;
 
 use std::fs;

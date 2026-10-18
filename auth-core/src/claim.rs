@@ -311,9 +311,9 @@ pub(crate) fn read_claim(r: &mut Reader<'_>) -> Result<Claim, WireError> {
         TYPE_INT64 => Values::Int64(r.array(MAX_VALUES, |v| Ok(v.u64()? as i64))?),
         TYPE_UINT64 => Values::Uint64(r.array(MAX_VALUES, |v| v.u64())?),
         TYPE_BOOLEAN => Values::Boolean(r.array(MAX_VALUES, |v| Ok(v.u64()? != 0))?),
-        TYPE_STRING => Values::String(r.array(MAX_VALUES, |v| {
-            Ok(v.string(MAX_STRING_BYTES)?.to_owned())
-        })?),
+        TYPE_STRING => {
+            Values::String(r.array(MAX_VALUES, |v| Ok(v.string(MAX_STRING_BYTES)?.to_owned()))?)
+        }
         TYPE_SID => Values::Sid(r.array(MAX_VALUES, |v| Ok(v.bytes(MAX_SID_BYTES)?.to_vec()))?),
         TYPE_OCTET => {
             Values::Octet(r.array(MAX_VALUES, |v| Ok(v.bytes(MAX_OCTET_BYTES)?.to_vec()))?)
@@ -414,8 +414,14 @@ mod tests {
     /// A claim with no values is not the same as no claim, and §3.9 says so.
     #[test]
     fn an_empty_claim_survives_a_round_trip_with_its_type() {
-        assert_eq!(round_trip(Values::String(Vec::new())), Values::String(Vec::new()));
-        assert_eq!(round_trip(Values::Int64(Vec::new())), Values::Int64(Vec::new()));
+        assert_eq!(
+            round_trip(Values::String(Vec::new())),
+            Values::String(Vec::new())
+        );
+        assert_eq!(
+            round_trip(Values::Int64(Vec::new())),
+            Values::Int64(Vec::new())
+        );
     }
 
     /// KACS normalises any non-zero to true. A decoder that compared against 1

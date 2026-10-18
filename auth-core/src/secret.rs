@@ -76,10 +76,12 @@ impl Secret {
         &mut self.buf
     }
 
+    /// Number of bytes in the secret buffer.
     pub fn len(&self) -> usize {
         self.buf.len()
     }
 
+    /// Whether the buffer contains no bytes.
     pub fn is_empty(&self) -> bool {
         self.buf.is_empty()
     }
@@ -91,6 +93,7 @@ impl Drop for Secret {
         // prove is never read again, plus a fence to stop them being sunk past
         // the deallocation that follows.
         for byte in self.buf.iter_mut() {
+            // SAFETY: byte is an exclusive reference into the still-live allocation.
             unsafe { core::ptr::write_volatile(byte, 0) };
         }
         compiler_fence(Ordering::SeqCst);

@@ -7,7 +7,10 @@ def _sdk_repository_impl(ctx):
         # or source-package targets. Fail when an SDK target is actually analysed.
         ctx.file("missing.bzl", """
 def _missing_impl(_ctx):
-    fail("Set PEIOS_SDK to an absolute SDK directory containing include/peios.h, include/pkm and lib/libpeios.so.0. See docs/learn for SDK setup.")
+    fail(
+        "Set PEIOS_SDK to an absolute SDK directory containing include/peios.h, " +
+        "include/pkm and lib/libpeios.so.0. See docs/building.md for SDK setup.",
+    )
 missing_sdk = rule(implementation = _missing_impl)
 """)
         ctx.file("BUILD.bazel", """
@@ -40,14 +43,26 @@ cc_import(
     hdrs = glob(["include/**"]),
     includes = ["include"],
 )
-""" % (ctx.attr.native_config, ctx.attr.package_config, ctx.attr.native_config, ctx.attr.package_config))
+""" % (
+        ctx.attr.native_config,
+        ctx.attr.package_config,
+        ctx.attr.native_config,
+        ctx.attr.package_config,
+    ))
 
 sdk_repository = repository_rule(
+    doc = "Import PEIOS_SDK headers and libpeios; defer missing-SDK failure until target analysis.",
     implementation = _sdk_repository_impl,
     environ = ["PEIOS_SDK"],
     attrs = {
-        "native_config": attr.label(default = Label("//build:native")),
-        "package_config": attr.label(default = Label("//build:packaged")),
+        "native_config": attr.label(
+            default = Label("//build:native"),
+            doc = "Native runtime selection.",
+        ),
+        "package_config": attr.label(
+            default = Label("//build:packaged"),
+            doc = "Installed package selection.",
+        ),
     },
     local = True,
     configure = True,

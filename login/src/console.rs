@@ -1,6 +1,8 @@
 //! Managed-console preparation; authentication remains entirely PGSS Logon.
 use peios::registry::{Key, KeyAccess, OpenFlags};
 
+const SETUP_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
+
 pub(super) fn prepare() -> Result<(), String> {
     reset_terminal()?;
     let mut announced = false;
@@ -19,7 +21,7 @@ pub(super) fn prepare() -> Result<(), String> {
             println!("First-boot setup is in progress on the system console.");
             announced = true;
         }
-        std::thread::sleep(std::time::Duration::from_secs(1));
+        std::thread::sleep(SETUP_POLL_INTERVAL);
     }
     // Discard input typed while setup was still running.
     reset_terminal()
@@ -35,15 +37,19 @@ fn setup_pending(mut exists: impl FnMut(&str) -> Result<bool, String>) -> Result
 }
 
 fn reset_terminal() -> Result<(), String> {
+    // SAFETY: termios contains integer fields and arrays that permit zeroes.
     let mut settings: libc::termios = unsafe { std::mem::zeroed() };
-    if unsafe { libc::tcgetattr(0, &mut settings) } != 0 {
+    // SAFETY: settings is a live output buffer; libc validates stdin.
+    if unsafe { libc::tcgetattr(libc::STDIN_FILENO, &mut settings) } != 0 {
         return Err(format!(
             "read console settings: {}",
             std::io::Error::last_os_error()
         ));
     }
     sane(&mut settings);
-    if unsafe { libc::tcsetattr(0, libc::TCSAFLUSH, &settings) } != 0 {
+    // SAFETY: settings was initialized by tcgetattr and only its flag and
+    // control-character fields were changed; the pointer remains valid.
+    if unsafe { libc::tcsetattr(libc::STDIN_FILENO, libc::TCSAFLUSH, &settings) } != 0 {
         return Err(format!(
             "reset console settings: {}",
             std::io::Error::last_os_error()
@@ -59,6 +65,9 @@ fn sane(t: &mut libc::termios) {
     t.c_oflag |= libc::OPOST | libc::ONLCR;
     t.c_lflag |= libc::ISIG | libc::ICANON | libc::IEXTEN | libc::ECHO | libc::ECHOE | libc::ECHOK;
     t.c_lflag &= !(libc::ECHONL | libc::NOFLSH | libc::TOSTOP | libc::EXTPROC);
+    // Conventional terminal control characters: Ctrl-C, Ctrl-\, DEL, Ctrl-U,
+    // Ctrl-D, Ctrl-Q, Ctrl-S, Ctrl-Z, Ctrl-V, Ctrl-W, and Ctrl-R, respectively.
+    // VMIN/VTIME retain a one-byte minimum with no read timer.
     for (index, value) in [
         (libc::VINTR, 3),
         (libc::VQUIT, 28),
@@ -90,6 +99,7 @@ mod tests {
     }
     #[test]
     fn raw_noecho_terminal_returns_to_login_mode_without_changing_serial_speed() {
+        // SAFETY: termios contains integer fields and arrays that permit zeroes.
         let mut t: libc::termios = unsafe { std::mem::zeroed() };
         t.c_cflag = libc::B115200 | libc::CS8 | libc::CREAD;
         let framing = t.c_cflag;

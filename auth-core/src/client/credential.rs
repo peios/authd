@@ -43,9 +43,8 @@ use crate::LOGON_SOCKET_PATH;
 use crate::Secret;
 use crate::transport::{recv_message_with_fd, send_message};
 use crate::wire::{
-    self, Answer, CredentialChangeStart, CredentialEnrollStart, CredentialResponse,
-    CredentialType, Denial, EnrollAction, MSG_ACCESS_DENIED, MSG_CREDENTIAL_CHANGED,
-    MSG_CREDENTIAL_REQUEST,
+    self, Answer, CredentialChangeStart, CredentialEnrollStart, CredentialResponse, CredentialType,
+    Denial, EnrollAction, MSG_ACCESS_DENIED, MSG_CREDENTIAL_CHANGED, MSG_CREDENTIAL_REQUEST,
 };
 
 pub use crate::wire::MessageSeverity;
@@ -211,7 +210,10 @@ impl fmt::Display for Refusal {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Refusal::Unreachable(error) => {
-                write!(f, "cannot reach the authority at {LOGON_SOCKET_PATH}: {error}")
+                write!(
+                    f,
+                    "cannot reach the authority at {LOGON_SOCKET_PATH}: {error}"
+                )
             }
             Refusal::Unsent(what) | Refusal::Unrenderable(what) => f.write_str(what),
             Refusal::Abandoned {
@@ -342,11 +344,12 @@ pub fn converse(
 
         match message_type {
             MSG_CREDENTIAL_REQUEST => {
-                let request = wire::decode_credential_request(message.expose()).map_err(|error| {
-                    Refusal::Unrenderable(format!(
-                        "the authority sent a request this cannot render: {error:?}"
-                    ))
-                })?;
+                let request =
+                    wire::decode_credential_request(message.expose()).map_err(|error| {
+                        Refusal::Unrenderable(format!(
+                            "the authority sent a request this cannot render: {error:?}"
+                        ))
+                    })?;
                 // Checked before anything is shown or asked: a client that
                 // cannot render a prompt fails rather than guessing (§2.8).
                 if request
@@ -391,10 +394,12 @@ pub fn converse(
                 // Abandoning is closing the connection without answering,
                 // which the caller does by dropping it: nothing changes on a
                 // conversation that never sent its last answer.
-                let secrets = collector.round(&round).map_err(|abandon| Refusal::Abandoned {
-                    reason: abandon.reason,
-                    last_error: last_error.clone(),
-                })?;
+                let secrets = collector
+                    .round(&round)
+                    .map_err(|abandon| Refusal::Abandoned {
+                        reason: abandon.reason,
+                        last_error: last_error.clone(),
+                    })?;
                 if secrets.len() != round.prompts.len() {
                     return Err(Refusal::Abandoned {
                         reason: format!(
@@ -415,11 +420,9 @@ pub fn converse(
                     })
                     .collect();
                 let encoded = wire::encode_credential_response(&CredentialResponse { answers })
-                    .map_err(|error| {
-                        Refusal::Abandoned {
-                            reason: format!("could not encode the answers: {error:?}"),
-                            last_error: last_error.clone(),
-                        }
+                    .map_err(|error| Refusal::Abandoned {
+                        reason: format!("could not encode the answers: {error:?}"),
+                        last_error: last_error.clone(),
                     })?;
                 send_message(stream, encoded.expose())
                     .map_err(|error| Refusal::Unknown(format!("lost the authority: {error}")))?;
@@ -536,7 +539,8 @@ mod tests {
                     };
                     let (message_type, _) = wire::decode_header(reply.expose()).expect("a header");
                     assert_eq!(message_type, MSG_CREDENTIAL_RESPONSE);
-                    let response = wire::decode_credential_response(reply.expose()).expect("decodes");
+                    let response =
+                        wire::decode_credential_response(reply.expose()).expect("decodes");
                     answered.push(
                         response
                             .answers
@@ -592,7 +596,10 @@ mod tests {
 
         let (opening, answered) = authority.join().expect("the authority");
         let start = wire::decode_credential_change_start(&opening).expect("decodes");
-        assert_eq!(start.supported_credential_types, vec![CredentialType::Password]);
+        assert_eq!(
+            start.supported_credential_types,
+            vec![CredentialType::Password]
+        );
         assert_eq!(answered[0], vec![(1, b"old".to_vec())]);
         assert_eq!(
             answered[1],
@@ -723,7 +730,11 @@ mod tests {
     /// A stand-in logon socket at a fresh path, for the public methods.
     fn stand_in(
         script: Vec<Vec<u8>>,
-    ) -> (Credentials, PathBuf, thread::JoinHandle<(Vec<u8>, Answered)>) {
+    ) -> (
+        Credentials,
+        PathBuf,
+        thread::JoinHandle<(Vec<u8>, Answered)>,
+    ) {
         use std::sync::atomic::{AtomicU32, Ordering};
         static NEXT: AtomicU32 = AtomicU32::new(0);
         let dir = std::env::temp_dir().join(format!(
@@ -757,7 +768,10 @@ mod tests {
         assert_eq!(start.action, EnrollAction::Add);
         assert_eq!(start.credential_type, CredentialType::SshPublicKey);
         assert_eq!(start.material, line);
-        assert_eq!(start.supported_credential_types, vec![CredentialType::Password]);
+        assert_eq!(
+            start.supported_credential_types,
+            vec![CredentialType::Password]
+        );
         assert_eq!(answered, vec![vec![(1, b"old".to_vec())]]);
         std::fs::remove_dir_all(dir).unwrap();
     }

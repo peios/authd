@@ -5,7 +5,7 @@
 //! `/run/lpsd/admin.sock` that lpsd decides whether to honour.
 //!
 //! That is the whole design, and it is worth saying why rather than editing the
-//! store file directly. The store's descriptor grants `LocalSystem` alone, so
+//! store file directly. The descriptor grants the lpsd service and SYSTEM, so
 //! that the machine's credential verifiers are readable by as few principals as
 //! possible. A tool that wrote the file would need that descriptor widened to
 //! whatever the tool runs as — undoing the one thing it exists to do. Going
@@ -40,6 +40,10 @@ use std::process::ExitCode;
 use auth_core::claim::{self, Claim, Values};
 use auth_core::lps::{self, Failure};
 use auth_core::client::admin::{Admin, Refusal};
+
+// Read one byte beyond the accepted key-line bound so an oversized file is
+// rejected by the daemon rather than silently accepted as a truncated key.
+const PUBLIC_KEY_READ_LIMIT_BYTES: u64 = 16_385;
 
 const USAGE: &str = "\
 usage: lps <command> [arguments]
@@ -193,8 +197,8 @@ fn run(arguments: &[&str]) -> Result<(), Failed> {
             lps::encode_group_delete(&named(name)),
             &format!("deleted the group {name}"),
         ),
-        ["group", "add", name, group] => membership(name, group, true),
-        ["group", "remove", name, group] => membership(name, group, false),
+        ["group", "add", name, group] => membership(name, group, MembershipChange::Add),
+        ["group", "remove", name, group] => membership(name, group, MembershipChange::Remove),
 
         ["claim", "set", name, claim, kind, values @ ..] => set_claim(name, claim, kind, values),
         ["claim", "remove", name, claim] => simple(
@@ -323,13 +327,15 @@ fn parse_logon_types(words: &[&str]) -> Result<lps::LogonTypes, Failed> {
             "name at least one logon type, or `default`".into(),
         )),
         ["default"] => Ok(lps::LogonTypes::UNSTATED),
-        words => words.iter().try_fold(lps::LogonTypes::UNSTATED, |types, word| {
-            format::LOGON_TYPES
-                .iter()
-                .find(|(_, known)| known == word)
-                .map(|(logon_type, _)| types.with(*logon_type))
-                .ok_or_else(|| Failed::Usage(format!("unknown logon type {word:?}")))
-        }),
+        words => words
+            .iter()
+            .try_fold(lps::LogonTypes::UNSTATED, |types, word| {
+                format::LOGON_TYPES
+                    .iter()
+                    .find(|(_, known)| known == word)
+                    .map(|(logon_type, _)| types.with(*logon_type))
+                    .ok_or_else(|| Failed::Usage(format!("unknown logon type {word:?}")))
+            }),
     }
 }
 
@@ -414,7 +420,7 @@ fn parse_values(type_code: u32, values: &[&str]) -> Result<Values, Failed> {
 
 /// Parse an even-length hexadecimal string.
 fn hex(text: &str) -> Option<Vec<u8>> {
-    if text.len() % 2 != 0 {
+    if !text.len().is_multiple_of(2) {
         return None;
     }
     (0..text.len())
@@ -432,12 +438,17 @@ fn set_enabled(name: &str, enabled: bool) -> Result<(), Failed> {
     simple(message, &format!("{done} {name}"))
 }
 
-fn membership(name: &str, group: &str, add: bool) -> Result<(), Failed> {
+enum MembershipChange {
+    Add,
+    Remove,
+}
+
+fn membership(name: &str, group: &str, change: MembershipChange) -> Result<(), Failed> {
     let membership = lps::Membership {
         name: name.to_string(),
         group: group.to_string(),
     };
-    let (message, done) = if add {
+    let (message, done) = if matches!(change, MembershipChange::Add) {
         (
             lps::encode_group_add(&membership),
             format!("added {name} to {group}"),
@@ -480,20 +491,89 @@ pub fn describe(failure: Failure, reason: &str) -> String {
     }
 }
 
+fn key_list(name: &str) -> Result<(), Failed> {
+    let (policy, keys) = Admin::new().keys(name)?;
+    print!("{}", format::keys(policy, &keys));
+    Ok(())
+}
+fn key_add(name: &str, path: &str, label: &str) -> Result<(), Failed> {
+    use std::io::Read;
+    let mut public_key = String::new();
+    std::fs::File::open(path)
+        .and_then(|f| {
+            f.take(PUBLIC_KEY_READ_LIMIT_BYTES)
+                .read_to_string(&mut public_key)
+        })
+        .map_err(|e| Failed::Refused(e.to_string()))?;
+    simple(
+        lps::encode_key_request(&lps::KeyRequest::Add {
+            name: name.into(),
+            public_key,
+            label: label.into(),
+        }),
+        "key enrolled; credential policy unchanged",
+    )
+}
+fn key_remove(name: &str, text: &str) -> Result<(), Failed> {
+    if text.len() != 32 || !text.is_ascii() {
+        return Err(Failed::Usage("key ID must be 32 hexadecimal digits".into()));
+    }
+    let mut id = [0; 16];
+    for (i, b) in id.iter_mut().enumerate() {
+        *b = u8::from_str_radix(&text[i * 2..i * 2 + 2], 16)
+            .map_err(|_| Failed::Usage("invalid key ID".into()))?;
+    }
+    simple(
+        lps::encode_key_request(&lps::KeyRequest::Remove {
+            name: name.into(),
+            id,
+        }),
+        "key removed",
+    )
+}
+fn credential_policy(name: &str, mode: &str) -> Result<(), Failed> {
+    let Some(&(policy, _)) = format::POLICIES.iter().find(|(_, word)| *word == mode) else {
+        return Err(Failed::Usage(
+            "policy must be password, key, either, none, or denied".into(),
+        ));
+    };
+    simple(
+        lps::encode_key_request(&lps::KeyRequest::Policy {
+            name: name.into(),
+            policy,
+        }),
+        "credential policy updated",
+    )
+}
+
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use auth_core::claim::{self, Values};
+    use auth_core::client::admin::Refusal;
+    use auth_core::lps::{self, Failure};
+    use auth_core::wire::LogonType;
+
+    use super::{Failed, hex, parse_logon_types, parse_values, value_for};
 
     /// A refusal from lpsd, or from its socket, says what administering the
     /// store needs; one that never reached lpsd says only what went wrong.
     #[test]
     fn a_refusal_says_what_administering_the_store_needs() {
-        let denied = Refusal { failure: Some(Failure::Denied), reason: "cannot reach lpsd on /run/lpsd/admin.sock: permission denied".into() };
+        let denied = Refusal {
+            failure: Some(Failure::Denied),
+            reason: "cannot reach lpsd on /run/lpsd/admin.sock: permission denied".into(),
+        };
         match Failed::from(denied) {
-            Failed::Refused(said) => assert!(said.ends_with("requires membership of BUILTIN\\Administrators."), "{said}"),
+            Failed::Refused(said) => assert!(
+                said.ends_with("requires membership of BUILTIN\\Administrators."),
+                "{said}"
+            ),
             Failed::Usage(_) => panic!("a refusal is not a usage error"),
         }
-        let unreached = Refusal { failure: None, reason: "lpsd did not answer in time".into() };
+        let unreached = Refusal {
+            failure: None,
+            reason: "lpsd did not answer in time".into(),
+        };
         match Failed::from(unreached) {
             Failed::Refused(said) => assert_eq!(said, "lpsd did not answer in time"),
             Failed::Usage(_) => panic!("a refusal is not a usage error"),
@@ -564,8 +644,10 @@ mod tests {
 
     #[test]
     fn logon_types_parse_from_their_words() {
-        use auth_core::wire::LogonType;
-        assert_eq!(parse_logon_types(&["default"]).unwrap(), lps::LogonTypes::UNSTATED);
+        assert_eq!(
+            parse_logon_types(&["default"]).unwrap(),
+            lps::LogonTypes::UNSTATED
+        );
         assert_eq!(
             parse_logon_types(&["network", "batch"]).unwrap(),
             lps::LogonTypes::UNSTATED
@@ -573,7 +655,10 @@ mod tests {
                 .with(LogonType::Batch)
         );
         assert!(matches!(parse_logon_types(&[]), Err(Failed::Usage(_))));
-        assert!(matches!(parse_logon_types(&["console"]), Err(Failed::Usage(_))));
+        assert!(matches!(
+            parse_logon_types(&["console"]),
+            Err(Failed::Usage(_))
+        ));
         // `default` is a word of its own, not one type among others.
         assert!(matches!(
             parse_logon_types(&["default", "service"]),
@@ -583,62 +668,10 @@ mod tests {
 
     #[test]
     fn an_option_without_a_value_says_which_one() {
-        let error = value_for("--home", &[]).err().expect("must fail");
+        let error = value_for("--home", &[]).expect_err("must fail");
         match error {
             Failed::Usage(message) => assert!(message.contains("--home"), "{message}"),
             Failed::Refused(_) => panic!("a missing value is a usage error"),
         }
     }
-}
-
-fn key_list(name: &str) -> Result<(), Failed> {
-    let (policy, keys) = Admin::new().keys(name)?;
-    print!("{}", format::keys(policy, &keys));
-    Ok(())
-}
-fn key_add(name: &str, path: &str, label: &str) -> Result<(), Failed> {
-    use std::io::Read;
-    let mut public_key = String::new();
-    std::fs::File::open(path)
-        .and_then(|f| f.take(16385).read_to_string(&mut public_key))
-        .map_err(|e| Failed::Refused(e.to_string()))?;
-    simple(
-        lps::encode_key_request(&lps::KeyRequest::Add {
-            name: name.into(),
-            public_key,
-            label: label.into(),
-        }),
-        "key enrolled; credential policy unchanged",
-    )
-}
-fn key_remove(name: &str, text: &str) -> Result<(), Failed> {
-    if text.len() != 32 || !text.is_ascii() {
-        return Err(Failed::Usage("key ID must be 32 hexadecimal digits".into()));
-    }
-    let mut id = [0; 16];
-    for (i, b) in id.iter_mut().enumerate() {
-        *b = u8::from_str_radix(&text[i * 2..i * 2 + 2], 16)
-            .map_err(|_| Failed::Usage("invalid key ID".into()))?;
-    }
-    simple(
-        lps::encode_key_request(&lps::KeyRequest::Remove {
-            name: name.into(),
-            id,
-        }),
-        "key removed",
-    )
-}
-fn credential_policy(name: &str, mode: &str) -> Result<(), Failed> {
-    let Some(&(policy, _)) = format::POLICIES.iter().find(|(_, word)| *word == mode) else {
-        return Err(Failed::Usage(
-            "policy must be password, key, either, none, or denied".into(),
-        ));
-    };
-    simple(
-        lps::encode_key_request(&lps::KeyRequest::Policy {
-            name: name.into(),
-            policy,
-        }),
-        "credential policy updated",
-    )
 }

@@ -45,21 +45,21 @@ use crate::log;
 use crate::store::{Store, StoreError};
 
 /// How many self-socket connections may be open at once.
-pub const MAX_CONNECTIONS: usize = 32;
+const MAX_CONNECTIONS: usize = 32;
 
 /// How many of them one user may hold. Keyed on the token's user SID, so a
 /// principal with many sessions is still one caller.
-pub const MAX_PER_PEER: usize = 4;
+const MAX_PER_PEER: usize = 4;
 
 /// From accept to the last byte of the answer.
-pub const DEADLINE: Duration = Duration::from_secs(5);
+const DEADLINE: Duration = Duration::from_secs(5);
 
 /// The socket's descriptor: SYSTEM and Administrators, and every
 /// authenticated principal with what a connect needs (`FILE_WRITE_DATA`,
 /// `READ_ATTRIBUTES`, `SYNCHRONIZE`) — the mask authd grants on
 /// `/run/logon.sock`, for the same reason. Protected, so `/run/lpsd`'s
 /// inheritance can neither widen nor narrow it.
-pub const SOCKET_SDDL: &str = "D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;0x100082;;;AU)";
+const SOCKET_SDDL: &str = "D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;0x100082;;;AU)";
 
 /// Bind the self socket, non-blocking, and stamp its descriptor.
 ///
@@ -102,9 +102,13 @@ fn protect(path: &Path) {
             return;
         }
     };
-    if let Err(error) =
-        peios::file::set_sd(None, path, SecInfo::DACL, &descriptor, libc::AT_SYMLINK_NOFOLLOW)
-    {
+    if let Err(error) = peios::file::set_sd(
+        None,
+        path,
+        SecInfo::DACL,
+        &descriptor,
+        libc::AT_SYMLINK_NOFOLLOW,
+    ) {
         log::error(format_args!(
             "self: could not set a descriptor on {}: {error}; {consequence}",
             path.display()
@@ -172,7 +176,9 @@ impl Table {
                 }
             };
             if let Err(error) = stream.set_nonblocking(true) {
-                log::warn(format_args!("self: could not make a connection non-blocking: {error}"));
+                log::warn(format_args!(
+                    "self: could not make a connection non-blocking: {error}"
+                ));
                 continue;
             }
             let peer = match peios::token::Token::open_peer(stream.as_fd()).and_then(|t| t.user()) {
@@ -192,13 +198,7 @@ impl Table {
     pub fn admit(&mut self, stream: UnixStream, peer: Sid, now: Instant) -> bool {
         let refusal = if self.connections.len() >= MAX_CONNECTIONS {
             Some("lpsd is busy. Try again shortly.")
-        } else if self
-            .connections
-            .iter()
-            .filter(|c| c.peer == peer)
-            .count()
-            >= MAX_PER_PEER
-        {
+        } else if self.connections.iter().filter(|c| c.peer == peer).count() >= MAX_PER_PEER {
             Some("You have too many requests open to lpsd at once.")
         } else {
             None
@@ -321,7 +321,10 @@ fn step(
 /// request is whole in `buffer`. `Ok(Some(Err(reply)))`: refused from its
 /// header, with the reply to send. `Err`: the peer went away, or the
 /// connection failed.
-fn read_request(stream: &UnixStream, buffer: &mut Vec<u8>) -> io::Result<Option<Result<(), Vec<u8>>>> {
+fn read_request(
+    stream: &UnixStream,
+    buffer: &mut Vec<u8>,
+) -> io::Result<Option<Result<(), Vec<u8>>>> {
     loop {
         // Never read past the header until the header has said how much
         // follows, and never past that: one request a connection, and no
@@ -378,8 +381,7 @@ fn failed(failure: Failure, reason: &str) -> Result<Vec<u8>, auth_core::WireErro
 }
 
 /// What a principal no source here holds is told.
-const NOT_HELD: &str =
-    "This account is not one this machine's local principal store holds, so it has nothing here to \
+const NOT_HELD: &str = "This account is not one this machine's local principal store holds, so it has nothing here to \
      show or change.";
 
 /// Answer one request from `peer`. The peer is the subject of every request;
@@ -401,7 +403,10 @@ pub fn answer(
         },
         // The admin socket's requests among them: each socket refuses the
         // other's range.
-        Ok(_) => failed(Failure::Invalid, "This socket does not answer that request."),
+        Ok(_) => failed(
+            Failure::Invalid,
+            "This socket does not answer that request.",
+        ),
         Err(_) => failed(Failure::Invalid, "Malformed request."),
     };
     reply.unwrap_or_else(|_| {
@@ -530,7 +535,12 @@ mod tests {
         let mut store = store_with(&["alice", "bob"]);
         store.set_display_name("alice", "Alice Liddell").unwrap();
         let alice = sid(&store, "alice");
-        let reply = answer(&mut store, alice.as_ref(), &lps::encode_show_self().unwrap(), &mut saves());
+        let reply = answer(
+            &mut store,
+            alice.as_ref(),
+            &lps::encode_show_self().unwrap(),
+            &mut saves(),
+        );
         let account = lps::decode_self(&reply).expect("an account");
         assert_eq!(account.name, "alice");
         assert_eq!(account.display_name, "Alice Liddell");
@@ -550,9 +560,18 @@ mod tests {
             .unwrap();
         store.add_key("alice", &line, "").unwrap();
         let alice = sid(&store, "alice");
-        let reply = answer(&mut store, alice.as_ref(), &lps::encode_show_self().unwrap(), &mut saves());
+        let reply = answer(
+            &mut store,
+            alice.as_ref(),
+            &lps::encode_show_self().unwrap(),
+            &mut saves(),
+        );
         let key = &lps::decode_self(&reply).unwrap().keys[0];
-        assert!(key.fingerprint.starts_with("SHA256:"), "{}", key.fingerprint);
+        assert!(
+            key.fingerprint.starts_with("SHA256:"),
+            "{}",
+            key.fingerprint
+        );
         assert_eq!(key.algorithm, "ssh-ed25519");
         assert_eq!(key.label, "laptop");
     }
@@ -564,7 +583,12 @@ mod tests {
         let mut store = store_with(&["alice"]);
         for other in ["S-1-5-18", "S-1-5-21-9-9-9-1000"] {
             let other: Sid = other.parse().unwrap();
-            let reply = answer(&mut store, other.as_ref(), &lps::encode_show_self().unwrap(), &mut saves());
+            let reply = answer(
+                &mut store,
+                other.as_ref(),
+                &lps::encode_show_self().unwrap(),
+                &mut saves(),
+            );
             let refusal = decode_failure(&reply);
             assert_eq!(refusal.failure, Failure::NotFound);
             assert_eq!(refusal.reason, NOT_HELD);
@@ -588,7 +612,11 @@ mod tests {
         // The same again changes nothing, and saves nothing.
         lps::decode_done(&answer(&mut store, alice.as_ref(), &request, &mut save)).unwrap();
         assert_eq!(saved, 1);
-        assert_eq!(store.record("alice").unwrap().display_name, "Alice", "trimmed, as SetProfile");
+        assert_eq!(
+            store.record("alice").unwrap().display_name,
+            "Alice",
+            "trimmed, as SetProfile"
+        );
         assert_eq!(store.record("bob").unwrap().display_name, "");
 
         // One record, for the change that happened; the principal both asked
@@ -638,7 +666,10 @@ mod tests {
     fn a_disabled_account_cannot_change_its_display_name() {
         let mut store = store_with(&["alice", "admin"]);
         store
-            .add_membership("admin", Sid::well_known(peios::security::WellKnown::Administrators))
+            .add_membership(
+                "admin",
+                Sid::well_known(peios::security::WellKnown::Administrators),
+            )
             .unwrap();
         store.set_enabled("alice", false).unwrap();
         let alice = sid(&store, "alice");
@@ -656,7 +687,10 @@ mod tests {
     fn an_admin_request_is_refused() {
         let mut store = store_with(&["alice"]);
         let alice = sid(&store, "alice");
-        let request = lps::encode_show(&lps::Named { name: "alice".into() }).unwrap();
+        let request = lps::encode_show(&lps::Named {
+            name: "alice".into(),
+        })
+        .unwrap();
         let refusal = decode_failure(&answer(&mut store, alice.as_ref(), &request, &mut saves()));
         assert_eq!(refusal.failure, Failure::Invalid);
     }
@@ -733,7 +767,10 @@ mod tests {
         pump(&mut table, &mut store, now);
         let reply = recv_message(&lps::FRAMING, &client).unwrap();
         assert_eq!(lps::decode_self(reply.expose()).unwrap().name, "bob");
-        assert!(started.elapsed() < Duration::from_secs(1), "nothing waited on the silent peer");
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "nothing waited on the silent peer"
+        );
         assert_eq!(table.len(), 1, "the silent one is still within its time");
         assert_eq!(table.next_deadline(), Some(now + DEADLINE));
 
@@ -750,16 +787,25 @@ mod tests {
         let mut held = Vec::new();
         for _ in 0..MAX_PER_PEER {
             let (client, server) = connection();
-            assert!(table.admit(server, alice.clone(), now));
+            assert!(table.admit(server, alice, now));
             held.push(client);
         }
         let (refused, server) = connection();
-        assert!(!table.admit(server, alice.clone(), now), "one over the per-peer bound");
+        assert!(
+            !table.admit(server, alice, now),
+            "one over the per-peer bound"
+        );
         let reply = recv_message(&lps::FRAMING, &refused).unwrap();
-        assert!(lps::decode_failed(reply.expose()).is_ok(), "told, not just closed");
+        assert!(
+            lps::decode_failed(reply.expose()).is_ok(),
+            "told, not just closed"
+        );
 
         let (_other, server) = connection();
-        assert!(table.admit(server, bob, now), "another user is not counted against alice");
+        assert!(
+            table.admit(server, bob, now),
+            "another user is not counted against alice"
+        );
     }
 
     #[test]
@@ -811,7 +857,9 @@ mod tests {
         let (client, server) = connection();
         let now = Instant::now();
         table.admit(server, alice, now);
-        (&client).write_all(&lps::encode_show_self().unwrap()[..5]).unwrap();
+        (&client)
+            .write_all(&lps::encode_show_self().unwrap()[..5])
+            .unwrap();
         drop(client);
         pump(&mut table, &mut store, now);
         assert_eq!(table.len(), 0);
