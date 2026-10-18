@@ -1,0 +1,38 @@
+load("@crates//:crates.bzl", "all_crate_deps")
+load("@rules_rust//rust:defs.bzl", "rust_shared_library", "rust_test")
+load("//build:version.bzl", "VERSION")
+
+package(default_visibility = ["//visibility:public"])
+
+exports_files([
+    "BUILD.bazel",
+    "Cargo.toml",
+])
+
+filegroup(
+    name = "sources",
+    srcs = glob(["src/**/*.rs"]) + glob(
+        ["tests/**/*.rs"],
+        allow_empty = True,
+    ),
+)
+
+rust_shared_library(
+    name = "nss",
+    srcs = glob(["src/**/*.rs"]),
+    crate_name = "nss_peios",
+    crate_root = "src/lib.rs",
+    edition = "2024",
+    rustc_flags = [
+        "-Clink-arg=-Wl,-soname,libnss_peios.so.2",
+        "-lstatic:+whole-archive=gcc_eh",
+    ],
+    version = VERSION,
+    deps = ["//auth-core:client"] + all_crate_deps(normal = True),
+)
+
+rust_test(
+    name = "tests",
+    size = "small",
+    crate = ":nss",
+)

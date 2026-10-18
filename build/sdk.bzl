@@ -1,0 +1,35 @@
+"""Import an explicit, installed Peios development SDK into the build graph."""
+
+def _sdk_repository_impl(ctx):
+    sdk = ctx.os.environ.get("PEIOS_SDK")
+    if not sdk or not sdk.startswith("/"):
+        fail("Set PEIOS_SDK to an absolute SDK directory containing include/peios.h, include/pkm and lib/libpeios.so.0. See docs/learn for SDK setup.")
+    for name in ["include/peios.h", "include/pkm", "lib/libpeios.so.0"]:
+        if not ctx.path(sdk + "/" + name).exists:
+            fail("Missing Peios SDK input: " + sdk + "/" + name)
+    ctx.symlink(sdk + "/include", "include")
+    ctx.symlink(sdk + "/lib/libpeios.so.0", "lib/libpeios.so.0")
+    ctx.symlink("lib/libpeios.so.0", "lib/libpeios.so")
+    ctx.file("root", "")
+    ctx.file("BUILD.bazel", """
+load("@rules_cc//cc:defs.bzl", "cc_import")
+package(default_visibility = ["//visibility:public"])
+exports_files(["root"])
+filegroup(name = "files", srcs = glob(["include/**", "lib/**"]))
+cc_import(
+    name = "peios",
+    shared_library = select({"%s": None, "//conditions:default": "lib/libpeios.so.0"}),
+    interface_library = "lib/libpeios.so",
+    system_provided = select({"%s": True, "//conditions:default": False}),
+    hdrs = glob(["include/**"]),
+    includes = ["include"],
+)
+""" % (ctx.attr.native_config, ctx.attr.native_config))
+
+sdk_repository = repository_rule(
+    implementation = _sdk_repository_impl,
+    environ = ["PEIOS_SDK"],
+    attrs = {"native_config": attr.label(default = Label("//build:native"))},
+    local = True,
+    configure = True,
+)

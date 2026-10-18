@@ -39,21 +39,37 @@ Three ideas carry most of the design.
 
 ## Building
 
-The shared authentication client builds on Linux without a Peios kernel SDK:
+Use the checked-in Bazel wrapper on x86-64 Linux. It downloads and verifies
+Bazel 8.4.2; the build pins Rust 1.96.0 and uses `Cargo.lock` for external
+Rust dependencies.
+
+The authentication client SDK needs no Peios kernel SDK:
 
 ```sh
-cargo build -p libauth --locked
-sh tools/install-auth-sdk.sh target/debug /tmp/auth-sdk /usr/lib
-export PEIOS_AUTH_LIB_DIR=/tmp/auth-sdk/usr/lib
-export LD_LIBRARY_PATH="$PEIOS_AUTH_LIB_DIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-cargo test -p libauth -p peios-auth --locked
-python3 tools/check-auth-abi.py "$PEIOS_AUTH_LIB_DIR"
+./bazel build //:sdk
+./bazel test //libauth:tests //peios-auth:client-test //:abi-test
 ```
 
-The full workspace also needs a compatible `libpeios` SDK and kernel UAPI
-headers, discoverable through `pkg-config` or the SDK's explicit environment
-overrides. With those installed and the library staged as above, run
-`cargo test --workspace --locked`. Socket tests require local Unix sockets.
+The SDK archive is `bazel-bin/auth-sdk.tar.gz`. For all daemons, programs,
+and tests, provide a compatible development SDK:
+
+```sh
+export PEIOS_SDK=/absolute/path/to/peios-sdk
+./bazel build //:artifacts
+./bazel test //...
+```
+
+The SDK contains `include/peios.h`, `include/peios/`, `include/pkm/`, and
+`lib/libpeios.so.0`. Install a host C compiler, libclang, Python 3, and
+binutils. Socket tests require local Unix sockets. See
+[Building Authentication](docs/learn/authd.product/1--development.shelf/2--building.topic/100--building.md)
+for SDK preparation, individual targets, and dependency updates.
+
+Cargo manifests remain available for Rust tooling and consumers. Bazel builds
+and tests both development and native release artifacts. The Pekit recipe
+uses `--config=peios` with the installed Peios Rust toolchain and offline
+vendored dependencies, then applies package splitting, debug-source checks,
+and signing. The default Linux configuration produces development outputs.
 
 Regenerate the C/Rust layouts and export declarations with
 `python3 tools/generate-auth-abi.py` and

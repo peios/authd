@@ -21,7 +21,11 @@ fn offending(dir: &Path, hits: &mut Vec<String>) {
         let path = entry.path();
         if path.is_dir() {
             let name = entry.file_name();
-            if name != "target" && name != "out" && name != ".git" {
+            if name != "target"
+                && name != "out"
+                && name != ".git"
+                && !(path.is_symlink() && name.as_encoded_bytes().starts_with(b"bazel-"))
+            {
                 offending(&path, hits);
             }
         } else if path.extension().is_some_and(|ext| ext == "rs")
@@ -41,7 +45,12 @@ fn offending(dir: &Path, hits: &mut Vec<String>) {
 #[test]
 fn no_source_file_cites_the_retired_psd_series() {
     let mut hits = Vec::new();
-    offending(&workspace_root(), &mut hits);
+    let root = workspace_root();
+    assert!(
+        root.join("auth-core/src/lib.rs").is_file(),
+        "source tree is unavailable"
+    );
+    offending(&root, &mut hits);
     assert!(
         hits.is_empty(),
         "stale PSD-NNN citations (the series was retired; cite PCSA books or the TRMs):\n{}",

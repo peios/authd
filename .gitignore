@@ -8,3 +8,6 @@
 __pycache__/
 /docs/learn/dist/
 .trail-cache/
+
+/bazel-*
+/.ci-sdk/

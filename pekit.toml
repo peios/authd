@@ -20,6 +20,19 @@ cargo vendor --locked "$PEKIT_OUT/vendor" > "$PEKIT_OUT/cargo-config.toml"
 test -s "$PEKIT_OUT/cargo-config.toml"
 test -n "$(find "$PEKIT_OUT/vendor" -mindepth 1 -maxdepth 1 -type d -print -quit)"
 
+. tools/pekit-bazel.sh
+prepare_native_sdk
+# Acquisition is the only networked phase. Preserve a verified Bazel executable
+# and a complete external-repository snapshot for the offline workers.
+export XDG_CACHE_HOME="$PEKIT_OUT/tool-cache"
+./bazel --batch --output_base="$PEKIT_OUT/bazel-output" vendor \
+  --config=peios --vendor_dir="$PEKIT_OUT/bazel-vendor" //...
+python3 tools/bazel-vendor.py freeze "$PEKIT_OUT/bazel-vendor"
+mkdir -p "$PEKIT_OUT/tools"
+cp "$XDG_CACHE_HOME/peios/bazel/$(cat .bazelversion)/bazel" "$PEKIT_OUT/tools/bazel"
+cp MODULE.bazel.lock "$PEKIT_OUT/MODULE.bazel.lock"
+
+
 '''
 
 [build.vendor.dependencies.peipkg]
@@ -28,6 +41,18 @@ test -n "$(find "$PEKIT_OUT/vendor" -mindepth 1 -maxdepth 1 -type d -print -quit
 "com.git-scm.git"    = ">= 2.55.0"
 "dev.peios.peiosutils" = "*"
 "org.gnu.findutils"  = "*"
+
+"org.gnu.bash" = "*"
+"org.gnu.tar" = "*"
+"se.curl.curl" = "*"
+"org.pkgconf.pkgconf" = "*"
+"org.gnu.binutils" = "*"
+"org.gnu.grep" = "*"
+"org.gnu.sed" = "*"
+"org.gnu.gzip" = "*"
+"org.llvm.clang" = ">= 22"
+"dev.peios.libpeios-devel" = ">= 0.5.8"
+"dev.peios.kernel-headers" = "*"
 
 [build.main]
 needs = ["vendor"]
@@ -40,7 +65,7 @@ export CARGO_HOME="$PEKIT_OUT/cargo-home"
 mkdir -p "$CARGO_HOME"
 cp "$PEKIT_VENDOR_OUT/cargo-config.toml" "$CARGO_HOME/config.toml"
 
-for tool in cargo rustc gcc pkg-config python3 objcopy strip readelf debugedit; do
+for tool in cargo rustc gcc bash tar pkg-config python3 objcopy strip readelf debugedit; do
   command -v "$tool" >/dev/null || {
     echo "authd: missing required build tool: $tool" >&2
     exit 1
@@ -64,35 +89,25 @@ export BINDGEN_EXTRA_CLANG_ARGS="-isystem $(gcc -print-file-name=include) ${BIND
 # artifacts.
 cargo metadata --locked --offline --no-deps --format-version 1 |
   python3 -c '
-import json, os, sys
+import json, os, pathlib, re, sys
 metadata = json.load(sys.stdin)
 members = set(metadata["workspace_members"])
 versions = sorted({p["version"] for p in metadata["packages"] if p["id"] in members})
 expected = os.environ["PEKIT_VERSION"]
+bazel_version = re.search(r"^VERSION = \"([^\"]+)\"$", pathlib.Path("build/version.bzl").read_text(), re.M)
+if not bazel_version or bazel_version.group(1) != expected:
+    raise SystemExit("authd: Bazel source-family version does not match PEKIT_VERSION")
 if versions != [expected]:
     raise SystemExit(f"authd: workspace versions {versions!r} do not equal package version {expected!r}")
 '
 
-# Stable DWARF names keep checkout and build-root paths out of the binaries.
-# Put broad mappings first so the more specific source/vendor mappings win.
-export RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }--remap-path-prefix=$PEKIT_WORKSPACE_ROOT=/usr/src/debug/dev.peios.authd/.workspace --remap-path-prefix=$PEKIT_OUT_BASE=/usr/src/debug/dev.peios.authd/.build --remap-path-prefix=$SRC=/usr/src/debug/dev.peios.authd --remap-path-prefix=$PEKIT_VENDOR_OUT/vendor=/usr/src/debug/dev.peios.authd/vendor"
-# Control-flow protection (PEI-1155). Peios' libstd is built with LLVM's CET
-# instrumentation (org.rust-lang.rust); stable rustc applies it to other
-# crates only under -Zcf-protection, so every crate here gets ENDBR landing
-# pads and the IBT/SHSTK property survives the link. The bootstrap escape
-# hatch is the one the Rust recipe itself uses for the same flag.
-export RUSTC_BOOTSTRAP=1
-RUSTFLAGS="$RUSTFLAGS -Zcf-protection=full"
-
-# The exact locked graph is exercised by the gated test target below.
-cargo build --release --locked --offline \
-  --bin authd --bin lpsd --bin lps --bin login \
-  --target-dir "$PEKIT_OUT/target"
-cargo build --release --locked --offline -p nss_peios --target-dir "$PEKIT_OUT/target"
-cargo build --release --locked --offline -p libauth --target-dir "$PEKIT_OUT/target"
-export PEIOS_AUTH_LIB_DIR="$PEKIT_OUT/target/release"
-cargo build --release --locked --offline -p peios-auth --target-dir "$PEKIT_OUT/target"
-sh tools/install-auth-sdk.sh "$PEKIT_OUT/target/release" "$PEKIT_OUT"
+. tools/pekit-bazel.sh
+prepare_native_sdk
+cp "$PEKIT_VENDOR_OUT/MODULE.bazel.lock" MODULE.bazel.lock
+native_bazel build //:artifacts
+BAZEL_BIN=$(native_bazel info bazel-bin)
+BAZEL_EXECROOT=$(native_bazel info execution_root)
+sh tools/install-auth-sdk.sh "$BAZEL_BIN/libauth" "$PEKIT_OUT"
 
 # Each binary links its own crate closure, so each package ships that
 # closure's notices and declares its conjunction of licences; the expression
@@ -145,10 +160,10 @@ collect_licences debugsource "authd lpsd lps login nss_peios libauth" \
   dev.peios.authd-debugsource
 
 mkdir -p "$PEKIT_OUT/usr/sbin" "$PEKIT_OUT/usr/bin" "$PEKIT_OUT/var/state/lpsd"
-cp "$PEKIT_OUT/target/release/authd" "$PEKIT_OUT/usr/sbin/authd"
-cp "$PEKIT_OUT/target/release/lpsd" "$PEKIT_OUT/usr/sbin/lpsd"
-cp "$PEKIT_OUT/target/release/login" "$PEKIT_OUT/usr/bin/login"
-cp "$PEKIT_OUT/target/release/lps" "$PEKIT_OUT/usr/bin/lps"
+cp "$BAZEL_BIN/authd/authd" "$PEKIT_OUT/usr/sbin/authd"
+cp "$BAZEL_BIN/lpsd/lpsd" "$PEKIT_OUT/usr/sbin/lpsd"
+cp "$BAZEL_BIN/login/login" "$PEKIT_OUT/usr/bin/login"
+cp "$BAZEL_BIN/lps/lps" "$PEKIT_OUT/usr/bin/lps"
 test -x "$PEKIT_OUT/usr/sbin/authd"
 test -x "$PEKIT_OUT/usr/sbin/lpsd"
 test -x "$PEKIT_OUT/usr/bin/login"
@@ -165,7 +180,7 @@ gzip -n -9 -c "$SRC/man/lpsd.8" > "$PEKIT_OUT/usr/share/man/man8/lpsd.8.gz"
 
 # glibc loads this exact NSS ABI name from its configured triplet libdir.
 mkdir -p "$PEKIT_OUT/usr/lib/x86_64-linux-peios"
-cp "$PEKIT_OUT/target/release/libnss_peios.so" \
+cp "$BAZEL_BIN/nss/libnss_peios.so" \
   "$PEKIT_OUT/usr/lib/x86_64-linux-peios/libnss_peios.so.2"
 test -s "$PEKIT_OUT/usr/lib/x86_64-linux-peios/libnss_peios.so.2"
 
@@ -189,11 +204,9 @@ test -x "$PEKIT_OUT/usr/libexec/lpsd/first-account"
 # Split each independently installable ELF's symbols separately, while sharing
 # one exact debug-source tree for the source release and vendored Rust closure.
 # This stays local rather than using /usr/libexec/peios-packaging/split-debug:
-# each component's symbols go to their own debuginfo package tree, and the
-# RUSTFLAGS remap already rewrote the vendor target's crates (a separate
-# output tree) to the vendor/ prefix, which split-debug, copying only sources
-# under one build root, would drop; the loop below resolves them back to
-# $PEKIT_VENDOR_OUT.
+# each component's symbols go to their own debuginfo package tree.
+# Bazel's native toolchain maps source paths into the shared debug-source
+# prefix. Resolve external crates and generated files through its execroot.
 : > "$PEKIT_OUT/.debug-sources"
 split_debug() {
   component=$1
@@ -229,6 +242,7 @@ tr '\0' '\n' < "$PEKIT_OUT/.debug-sources" | LC_ALL=C sort -u | while IFS= read 
   [ -n "$rel" ] || continue
   case "$rel" in */) continue ;; esac
   case "$rel" in
+    external/*|bazel-out/*) origin="$BAZEL_EXECROOT/$rel" ;;
     vendor/*) origin="$PEKIT_VENDOR_OUT/$rel" ;;
     *)        origin="$SRC/$rel" ;;
   esac
@@ -247,6 +261,8 @@ test -n "$(find "$DEBUG_ROOT" -type f -print -quit)"
 "usr/sbin/authd" = "tcb.priv"
 
 [build.main.dependencies.peipkg]
+"org.gnu.bash" = "*"
+"org.gnu.tar" = "*"
 "org.git.kernel.dash"         = "*"
 "dev.peios.peiosutils"        = "*"
 "org.gnu.findutils"           = "*"
@@ -280,12 +296,12 @@ pkg-config --atleast-version=0.5.8 peios || {
 readelf -dW "$(pkg-config --variable=libdir peios)/libpeios.so" |
   grep -E '\(SONAME\).*\[libpeios\.so\.0\]' >/dev/null
 export BINDGEN_EXTRA_CLANG_ARGS="-isystem $(gcc -print-file-name=include) ${BINDGEN_EXTRA_CLANG_ARGS:-}"
-# The tests run with the same control-flow protection as build.main (PEI-1155).
-export RUSTC_BOOTSTRAP=1
-export RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }-Zcf-protection=full"
+. tools/pekit-bazel.sh
+prepare_native_sdk
+cp "$PEKIT_VENDOR_OUT/MODULE.bazel.lock" MODULE.bazel.lock
 export PEIOS_AUTH_LIB_DIR="$PEKIT_MAIN_OUT/usr/lib/x86_64-linux-peios"
 export LD_LIBRARY_PATH="$PEIOS_AUTH_LIB_DIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-cargo test --release --workspace --locked --offline --target-dir "$PEKIT_OUT/target"
+native_bazel test //...
 python3 tools/check-auth-abi.py "$PEIOS_AUTH_LIB_DIR"
 
 # Validate the exact staged package output produced by build.main.
@@ -307,6 +323,7 @@ do
 
   readelf -h "$elf" | grep -Eq 'Type:[[:space:]]+DYN'
   readelf -lW "$elf" | grep -q 'GNU_RELRO'
+  readelf -n "$elf" | grep -Eq 'x86 feature:.*IBT.*SHSTK'
   readelf -lW "$elf" | grep -Eq 'GNU_STACK[[:space:]].*RW[[:space:]]'
   readelf -dW "$elf" | grep -q 'BIND_NOW'
   readelf -dW "$elf" | grep -q 'RELR'
@@ -417,6 +434,8 @@ rm -f "$PEKIT_OUT/lps-help" "$PEKIT_OUT/login-out" "$PEKIT_OUT/login-err"
 '''
 
 [test.dependencies.peipkg]
+"org.gnu.bash" = "*"
+"org.gnu.tar" = "*"
 "org.git.kernel.dash"         = "*"
 "dev.peios.peiosutils"        = "*"
 "org.gnu.findutils"           = "*"

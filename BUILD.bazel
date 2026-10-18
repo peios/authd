@@ -1,0 +1,150 @@
+load("//build:checks.bzl", "host_test")
+
+package(default_visibility = ["//visibility:public"])
+
+exports_files([
+    "BUILD.bazel",
+    "Cargo.toml",
+    "Cargo.lock",
+])
+
+filegroup(
+    name = "registry-seeds",
+    srcs = glob(["registry.d/*.reg"]),
+)
+
+filegroup(
+    name = "rust-sources",
+    srcs = [
+        "//auth-abi:sources",
+        "//auth-core:sources",
+        "//auth-policy:sources",
+        "//authd:sources",
+        "//libauth:sources",
+        "//login:sources",
+        "//lps:sources",
+        "//lpsd:sources",
+        "//nss:sources",
+        "//peios-auth:sources",
+        "//session-preferences:sources",
+        "//terminal-input:sources",
+    ],
+)
+
+filegroup(
+    name = "artifacts",
+    srcs = [
+        "//authd",
+        "//libauth:shared",
+        "//login",
+        "//lps",
+        "//lpsd",
+        "//nss",
+        "//peios-auth",
+    ],
+)
+
+# A development SDK archive. Production package layout remains a packaging choice.
+genrule(
+    name = "sdk",
+    srcs = [
+        "//libauth:shared",
+        "//libauth:headers",
+        "//libauth:Cargo.toml",
+    ],
+    outs = ["auth-sdk.tar.gz"],
+    cmd = """
+set -eu
+stage=$$(mktemp -d "$(@D)/sdk.XXXXXX")
+trap 'rm -rf "$$stage"' EXIT
+sh $(execpath //tools:install-auth-sdk.sh) $$(dirname $(execpath //libauth:shared)) "$$stage" /usr/lib
+tar --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner -C "$$stage" -cf - . | gzip -n > $@
+""",
+    tools = ["//tools:install-auth-sdk.sh"],
+)
+
+host_test(
+    name = "abi-test",
+    size = "small",
+    command = """
+stage="${TEST_TMPDIR:?}/sdk"
+mkdir "$stage"
+tar -xf auth-sdk.tar.gz -C "$stage"
+exec python3 tools/check-auth-abi.py "$stage/usr/lib"
+""",
+    data = [
+        ":sdk",
+        "//auth-abi:sources",
+        "//libauth:exports.txt",
+        "//libauth:headers",
+        "//tools:check-auth-abi.py",
+    ],
+    tags = [
+        "external",
+        "no-remote",
+    ],
+)
+
+filegroup(
+    name = "build-files",
+    srcs = [
+        "BUILD.bazel",
+        "MODULE.bazel",
+        "//build:starlark",
+    ] + [
+        "//auth-abi:BUILD.bazel",
+        "//auth-core:BUILD.bazel",
+        "//auth-policy:BUILD.bazel",
+        "//authd:BUILD.bazel",
+        "//build:BUILD.bazel",
+        "//libauth:BUILD.bazel",
+        "//login:BUILD.bazel",
+        "//lps:BUILD.bazel",
+        "//lpsd:BUILD.bazel",
+        "//nss:BUILD.bazel",
+        "//peios-auth:BUILD.bazel",
+        "//session-preferences:BUILD.bazel",
+        "//terminal-input:BUILD.bazel",
+        "//tools:BUILD.bazel",
+    ],
+)
+
+genrule(
+    name = "build-format-check",
+    srcs = [":build-files"],
+    outs = ["build-format-check.stamp"],
+    cmd = "$(execpath @buildifier//file) -mode=check -lint=warn $(execpaths :build-files) && touch $@",
+    tools = ["@buildifier//file"],
+)
+
+host_test(
+    name = "nss-linkage-test",
+    size = "small",
+    command = """
+dynamic=$(readelf -d nss/libnss_peios.so)
+grep -Fq '[libnss_peios.so.2]' <<< "$dynamic"
+if grep -Eq 'NEEDED.*(libpeios|libgcc_s)|RPATH|RUNPATH' <<< "$dynamic"; then
+    echo 'NSS must not acquire SDK/unwind dependencies or runtime search paths.' >&2
+    exit 1
+fi
+""",
+    data = ["//nss"],
+    tags = [
+        "external",
+        "no-remote",
+    ],
+)
+
+host_test(
+    name = "vendor-test",
+    size = "small",
+    command = "exec python3 tools/test-bazel-vendor.py",
+    data = [
+        "//tools:bazel-vendor.py",
+        "//tools:test-bazel-vendor.py",
+    ],
+    tags = [
+        "external",
+        "no-remote",
+    ],
+)

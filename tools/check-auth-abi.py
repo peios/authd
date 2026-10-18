@@ -7,7 +7,7 @@ import subprocess
 import sys
 import tempfile
 
-root = Path(__file__).resolve().parents[1]
+root = Path(__file__).absolute().parents[1]
 library = Path(sys.argv[1]).resolve()
 
 def run(*args, **kwargs):
@@ -39,7 +39,7 @@ with tempfile.TemporaryDirectory(prefix="auth-abi-") as directory:
     (tmp / "layout.c").write_text("\n".join(c_lines))
     (tmp / "layout.rs").write_text("\n".join(rust_lines))
     run("cc", "-std=c11", "-Wall", "-Wextra", "-Werror", "-I" + str(root / "libauth/include"), str(tmp / "layout.c"), "-o", str(tmp / "layout-c"))
-    run("rustc", "--edition=2024", str(tmp / "layout.rs"), "-o", str(tmp / "layout-rust"))
+    run(os.environ.get("RUSTC", "rustc"), "--edition=2024", str(tmp / "layout.rs"), "-o", str(tmp / "layout-rust"))
     assert run(str(tmp / "layout-c")) == run(str(tmp / "layout-rust")), "C/Rust layout mismatch"
     (tmp / "caller.c").write_text(r'''
 #include <assert.h>

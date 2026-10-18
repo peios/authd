@@ -1,0 +1,35 @@
+load("@crates//:crates.bzl", "all_crate_deps")
+load("@rules_rust//rust:defs.bzl", "rust_binary", "rust_test")
+load("//build:version.bzl", "VERSION")
+
+package(default_visibility = ["//visibility:public"])
+
+exports_files([
+    "BUILD.bazel",
+    "Cargo.toml",
+])
+
+filegroup(
+    name = "sources",
+    srcs = glob(["src/**/*.rs"]) + glob(
+        ["tests/**/*.rs"],
+        allow_empty = True,
+    ),
+)
+
+rust_binary(
+    name = "lpsd",
+    srcs = glob(["src/**/*.rs"]),
+    compile_data = [] + glob(["tests/fixtures/**"]),
+    crate_name = "lpsd",
+    crate_root = "src/main.rs",
+    edition = "2024",
+    version = VERSION,
+    deps = ["//auth-core"] + all_crate_deps(normal = True),
+)
+
+rust_test(
+    name = "tests",
+    size = "small",
+    crate = ":lpsd",
+)
