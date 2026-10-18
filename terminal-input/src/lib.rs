@@ -155,26 +155,47 @@ fn write_prompt(prompt: &str) -> io::Result<()> {
 /// hold several lines and consuming more than one would swallow input intended
 /// for whatever asks next.
 ///
-/// The intermediate buffer is wiped before it is dropped, for the same reason
-/// [`prompt_secret`] reads into a [`Secret`]: a credential left in freed memory
-/// is a credential leaked, whichever buffer it was in.
+/// Intermediate chunks are self-wiping [`Secret`] buffers, including when a
+/// partial read fails. No growing plaintext allocation can leave an unwiped
+/// previous allocation behind when the input line grows.
 pub fn read_line_secret() -> io::Result<Secret> {
-    let mut buffer = Vec::new();
-    io::stdin().lock().read_until(b'\n', &mut buffer)?;
+    read_secret_line(&mut io::stdin().lock())
+}
 
-    let end = buffer
-        .iter()
-        .position(|byte| *byte == b'\n' || *byte == b'\r')
-        .unwrap_or(buffer.len());
-    let secret = Secret::from_slice(&buffer[..end]);
-
-    for byte in buffer.iter_mut() {
-        // SAFETY: `buffer` is live and exclusively borrowed. Volatile so the
-        // store is not elided as dead.
-        unsafe { core::ptr::write_volatile(byte, 0) };
+fn read_secret_line(reader: &mut impl BufRead) -> io::Result<Secret> {
+    let mut chunks = Vec::new();
+    loop {
+        let available = match reader.fill_buf() {
+            Ok(available) => available,
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(error),
+        };
+        if available.is_empty() {
+            break;
+        }
+        let newline = available.iter().position(|byte| *byte == b'\n');
+        let consumed = newline.map_or(available.len(), |index| index + 1);
+        chunks.push(Secret::from_slice(&available[..consumed]));
+        reader.consume(consumed);
+        if newline.is_some() {
+            break;
+        }
     }
-    core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
 
+    // Consume through LF even if CR trimmed the answer earlier, matching the
+    // one-line input contract. Only Secret handles move when chunks grows.
+    let length = chunks
+        .iter()
+        .flat_map(|chunk| chunk.expose())
+        .take_while(|byte| **byte != b'\r' && **byte != b'\n')
+        .count();
+    let mut secret = Secret::zeroed(length);
+    let mut offset = 0;
+    for chunk in chunks {
+        let copied = chunk.len().min(length - offset);
+        secret.expose_mut()[offset..offset + copied].copy_from_slice(&chunk.expose()[..copied]);
+        offset += copied;
+    }
     Ok(secret)
 }
 
@@ -185,4 +206,162 @@ pub fn read_line_secret() -> io::Result<Secret> {
 /// line of whatever is driving the tool.
 pub fn stdin_is_a_terminal() -> bool {
     io::IsTerminal::is_terminal(&io::stdin())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::alloc::{GlobalAlloc, Layout, System};
+    use std::cell::Cell;
+    use std::io::{self, BufRead, BufReader, Cursor, Read};
+
+    use super::{MAX_ANSWER_BYTES, read_secret_line};
+
+    // Only the requesting test thread tracks a single exact-sized allocation.
+    // Observe bytes while the allocation is still valid, immediately before
+    // returning it to System. This tests wiping without reading freed memory.
+    thread_local! {
+        static TRACK_BYTES: Cell<usize> = const { Cell::new(0) };
+        static TRACK_POINTER: Cell<*mut u8> = const { Cell::new(std::ptr::null_mut()) };
+        static OBSERVED_WIPE: Cell<Option<bool>> = const { Cell::new(None) };
+    }
+
+    struct ObservingAllocator;
+
+    // SAFETY: all allocation operations delegate to System with unchanged
+    // layouts. Observation reads only the live allocation passed to dealloc.
+    unsafe impl GlobalAlloc for ObservingAllocator {
+        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+            // SAFETY: GlobalAlloc supplies a valid layout, forwarded unchanged.
+            let pointer = unsafe { System.alloc(layout) };
+            let _ = TRACK_BYTES.try_with(|size| {
+                if size.get() == layout.size() && !pointer.is_null() {
+                    let _ = TRACK_POINTER.try_with(|tracked| {
+                        if tracked.get().is_null() {
+                            tracked.set(pointer);
+                        }
+                    });
+                }
+            });
+            pointer
+        }
+
+        unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
+            let _ = TRACK_POINTER.try_with(|tracked| {
+                if tracked.get() == pointer {
+                    // SAFETY: this allocation remains live until System.dealloc;
+                    // the tracked credential buffer initialized all its bytes.
+                    let bytes = unsafe { std::slice::from_raw_parts(pointer, layout.size()) };
+                    let _ = OBSERVED_WIPE.try_with(|result| {
+                        result.set(Some(bytes.iter().all(|byte| *byte == 0)));
+                    });
+                    tracked.set(std::ptr::null_mut());
+                }
+            });
+            // SAFETY: pointer and layout come unchanged from the allocator contract.
+            unsafe { System.dealloc(pointer, layout) };
+        }
+    }
+
+    #[global_allocator]
+    static ALLOCATOR: ObservingAllocator = ObservingAllocator;
+
+    struct PartialFailure {
+        remaining: &'static [u8],
+        interrupted: bool,
+    }
+
+    impl Read for PartialFailure {
+        fn read(&mut self, output: &mut [u8]) -> io::Result<usize> {
+            let available = self.fill_buf()?;
+            let count = available.len().min(output.len());
+            output[..count].copy_from_slice(&available[..count]);
+            self.consume(count);
+            Ok(count)
+        }
+    }
+
+    impl BufRead for PartialFailure {
+        fn fill_buf(&mut self) -> io::Result<&[u8]> {
+            if self.interrupted {
+                self.interrupted = false;
+                return Err(io::ErrorKind::Interrupted.into());
+            }
+            if self.remaining.is_empty() {
+                return Err(io::ErrorKind::PermissionDenied.into());
+            }
+            Ok(self.remaining)
+        }
+
+        fn consume(&mut self, count: usize) {
+            self.remaining = &self.remaining[count..];
+        }
+    }
+
+    struct WipeObservation;
+
+    impl WipeObservation {
+        fn start(bytes: usize) -> Self {
+            OBSERVED_WIPE.set(None);
+            TRACK_POINTER.set(std::ptr::null_mut());
+            TRACK_BYTES.set(bytes);
+            Self
+        }
+    }
+
+    impl Drop for WipeObservation {
+        fn drop(&mut self) {
+            TRACK_BYTES.set(0);
+            TRACK_POINTER.set(std::ptr::null_mut());
+        }
+    }
+
+    #[test]
+    fn partial_read_error_wipes_the_owned_credential_buffer() {
+        const CREDENTIAL: &[u8] = b"partial-credential-data!";
+        let mut reader = PartialFailure {
+            remaining: CREDENTIAL,
+            interrupted: false,
+        };
+        let observation = WipeObservation::start(CREDENTIAL.len());
+        let result = read_secret_line(&mut reader);
+        let wiped = OBSERVED_WIPE.get();
+        drop(observation);
+        assert_eq!(
+            result.expect_err("injected read failure").kind(),
+            io::ErrorKind::PermissionDenied
+        );
+        assert_eq!(
+            wiped,
+            Some(true),
+            "credential allocation must be wiped before release"
+        );
+        assert!(
+            reader.remaining.is_empty(),
+            "the failure follows partial input"
+        );
+    }
+
+    #[test]
+    fn fragmented_input_leaves_the_next_line_unread() {
+        let mut reader = BufReader::with_capacity(3, Cursor::new(b"password\rignored\nsecond\n"));
+        assert_eq!(read_secret_line(&mut reader).unwrap().expose(), b"password");
+        assert_eq!(read_secret_line(&mut reader).unwrap().expose(), b"second");
+        assert!(read_secret_line(&mut reader).unwrap().is_empty());
+    }
+
+    #[test]
+    fn interrupted_input_retries_without_losing_the_line() {
+        let mut reader = PartialFailure {
+            remaining: b"secret\n",
+            interrupted: true,
+        };
+        assert_eq!(read_secret_line(&mut reader).unwrap().expose(), b"secret");
+    }
+
+    #[test]
+    fn eof_preserves_an_unterminated_line_without_a_new_size_limit() {
+        let bytes = vec![b'x'; MAX_ANSWER_BYTES + 1];
+        let mut reader = BufReader::with_capacity(31, Cursor::new(&bytes));
+        assert_eq!(read_secret_line(&mut reader).unwrap().expose(), bytes);
+    }
 }

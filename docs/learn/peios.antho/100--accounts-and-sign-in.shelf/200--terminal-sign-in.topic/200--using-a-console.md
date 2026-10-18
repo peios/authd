@@ -23,6 +23,11 @@ Follow these steps:
 The terminal client supports password prompts. Accounts restricted to SSH
 public-key authentication need a client that supports that exchange.
 
+Credential input uses buffers that erase their contents when released. This
+also applies to partial input when reading a credential from a pipe fails.
+The input source and any copies made by the caller remain their owners'
+responsibility.
+
 If the account's home is unavailable, `login` reports the failure and starts
 in `/`. A successful sign-in does not prove that the recorded home or shell is
 usable. A shell that cannot be executed causes the client to fail.
