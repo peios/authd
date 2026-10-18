@@ -52,6 +52,10 @@ starting a process are separate, explicit actions through the Peios software
 development kit (SDK).
 Destroying an operation closes any token it still owns.
 
+The shared protocol transport accepts at most one descriptor per message.
+It rejects extra descriptors and truncated ancillary data, closing received
+descriptors if it cannot accept the complete message.
+
 A service manager requests a service token through a distinct attestation
 operation. Self-service credential changes identify the caller from the
 connection; they do not accept a target username.

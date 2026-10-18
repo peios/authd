@@ -39,6 +39,16 @@ use crate::secret::Secret;
 /// exists so the header can be read into the stack rather than a heap buffer.
 const MAX_HEADER_BYTES: usize = 32;
 
+// SAFETY: CMSG_SPACE computes storage size; the argument is one descriptor.
+const CONTROL_BYTES: usize = unsafe { libc::CMSG_SPACE(size_of::<libc::c_int>() as u32) } as usize;
+
+/// A byte buffer whose alignment is explicitly that of an ancillary header.
+#[repr(C)]
+union ControlBuffer<const N: usize> {
+    bytes: [u8; N],
+    alignment: libc::cmsghdr,
+}
+
 /// Write a complete message.
 pub fn send_message(sock: &UnixStream, message: &[u8]) -> io::Result<()> {
     (&mut &*sock).write_all(message)
@@ -61,19 +71,24 @@ pub fn send_message_with_fd(
     }
 
     // Ancillary buffer for exactly one descriptor.
-    let mut control = [0u8; unsafe { libc::CMSG_SPACE(size_of::<libc::c_int>() as u32) } as usize];
+    let mut control = ControlBuffer {
+        bytes: [0; CONTROL_BYTES],
+    };
 
     let mut iov = libc::iovec {
         iov_base: message.as_ptr() as *mut libc::c_void,
         iov_len: message.len(),
     };
 
+    // SAFETY: zero initializes the optional pointers and lengths; required fields follow.
     let mut msg: libc::msghdr = unsafe { std::mem::zeroed() };
     msg.msg_iov = &mut iov;
     msg.msg_iovlen = 1;
-    msg.msg_control = control.as_mut_ptr() as *mut libc::c_void;
-    msg.msg_controllen = control.len() as _;
+    msg.msg_control = (&mut control as *mut ControlBuffer<CONTROL_BYTES>).cast();
+    msg.msg_controllen = CONTROL_BYTES as _;
 
+    // SAFETY: control is aligned for cmsghdr and has CMSG_SPACE bytes for one FD.
+    // The borrowed descriptor stays open throughout sendmsg.
     unsafe {
         let cmsg = libc::CMSG_FIRSTHDR(&msg);
         (*cmsg).cmsg_level = libc::SOL_SOCKET;
@@ -82,6 +97,7 @@ pub fn send_message_with_fd(
         std::ptr::write_unaligned(libc::CMSG_DATA(cmsg) as *mut libc::c_int, fd.as_raw_fd());
     }
 
+    // SAFETY: message, control, and iov stay valid for the duration of the call.
     let sent = unsafe { libc::sendmsg(sock.as_raw_fd(), &msg, libc::MSG_NOSIGNAL) };
     if sent < 0 {
         return Err(io::Error::last_os_error());
@@ -105,6 +121,9 @@ pub fn recv_message(framing: &Framing, sock: &UnixStream) -> io::Result<Secret> 
 }
 
 /// Read one complete message, collecting a descriptor if the peer attached one.
+///
+/// Reject extra descriptors, unexpected ancillary data, and truncated input.
+/// Close every received descriptor if the message cannot be returned successfully.
 pub fn recv_message_with_fd(
     framing: &Framing,
     sock: &UnixStream,
@@ -131,51 +150,91 @@ fn recv_header(
 
     match fd_out {
         None => (&mut &*sock).read_exact(header)?,
-        Some(slot) => {
-            let mut control =
-                [0u8; unsafe { libc::CMSG_SPACE(size_of::<libc::c_int>() as u32) } as usize];
-            let mut iov = libc::iovec {
-                iov_base: header.as_mut_ptr() as *mut libc::c_void,
-                iov_len: header.len(),
-            };
-            let mut msg: libc::msghdr = unsafe { std::mem::zeroed() };
-            msg.msg_iov = &mut iov;
-            msg.msg_iovlen = 1;
-            msg.msg_control = control.as_mut_ptr() as *mut libc::c_void;
-            msg.msg_controllen = control.len() as _;
-
-            // MSG_CMSG_CLOEXEC: a token descriptor must not survive exec.
-            let got = unsafe {
-                libc::recvmsg(
-                    sock.as_raw_fd(),
-                    &mut msg,
-                    libc::MSG_CMSG_CLOEXEC | libc::MSG_WAITALL,
-                )
-            };
-            if got < 0 {
-                return Err(io::Error::last_os_error());
-            }
-            if (got as usize) < header.len() {
-                return Err(io::ErrorKind::UnexpectedEof.into());
-            }
-
-            unsafe {
-                let cmsg = libc::CMSG_FIRSTHDR(&msg);
-                if !cmsg.is_null()
-                    && (*cmsg).cmsg_level == libc::SOL_SOCKET
-                    && (*cmsg).cmsg_type == libc::SCM_RIGHTS
-                {
-                    let raw = std::ptr::read_unaligned(libc::CMSG_DATA(cmsg) as *const libc::c_int);
-                    *slot = Some(OwnedFd::from_raw_fd(raw));
-                }
-            }
-        }
+        Some(slot) => *slot = recv_header_with_fd(sock, header)?,
     }
 
     let (_, total_len) = decode_header(framing, header).map_err(wire_to_io)?;
     let mut buf = Secret::zeroed(total_len);
     buf.expose_mut()[..framing.header_bytes].copy_from_slice(header);
     Ok(buf)
+}
+
+/// Adopt every received descriptor before any framing or truncation check.
+fn recv_header_with_fd(sock: &UnixStream, header: &mut [u8]) -> io::Result<Option<OwnedFd>> {
+    let mut control = ControlBuffer {
+        bytes: [0; CONTROL_BYTES],
+    };
+    let mut iov = libc::iovec {
+        iov_base: header.as_mut_ptr().cast(),
+        iov_len: header.len(),
+    };
+    // SAFETY: zero initializes optional pointers and lengths; required fields follow.
+    let mut message: libc::msghdr = unsafe { std::mem::zeroed() };
+    message.msg_iov = &mut iov;
+    message.msg_iovlen = 1;
+    message.msg_control = (&mut control as *mut ControlBuffer<CONTROL_BYTES>).cast();
+    message.msg_controllen = CONTROL_BYTES as _;
+    // SAFETY: all buffers are writable, correctly aligned, and live through the call.
+    // MSG_CMSG_CLOEXEC prevents received descriptors from surviving exec.
+    let received = unsafe {
+        libc::recvmsg(
+            sock.as_raw_fd(),
+            &mut message,
+            libc::MSG_CMSG_CLOEXEC | libc::MSG_WAITALL,
+        )
+    };
+    if received < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: recvmsg initialized message and the ancillary data in control.
+    // Ownership is transferred exactly once, before any early error return.
+    let descriptor = unsafe { take_descriptor(&message) }?;
+    if (received as usize) < header.len() {
+        return Err(io::ErrorKind::UnexpectedEof.into());
+    }
+    Ok(descriptor)
+}
+
+/// Take ownership of the descriptors in a successful recvmsg result.
+///
+/// # Safety
+///
+/// The message must reference live, aligned ancillary storage filled by recvmsg.
+/// No descriptor in it can have been adopted or closed already.
+unsafe fn take_descriptor(message: &libc::msghdr) -> io::Result<Option<OwnedFd>> {
+    let mut descriptor = None;
+    let mut unexpected = false;
+    // SAFETY: the caller supplies kernel-initialized ancillary storage. CMSG_NXTHDR
+    // bounds traversal. Every SCM_RIGHTS integer is a newly owned, valid descriptor.
+    unsafe {
+        let mut header = libc::CMSG_FIRSTHDR(message);
+        while !header.is_null() {
+            if (*header).cmsg_level == libc::SOL_SOCKET && (*header).cmsg_type == libc::SCM_RIGHTS {
+                let payload = (*header).cmsg_len as usize - libc::CMSG_LEN(0) as usize;
+                for index in 0..payload / size_of::<libc::c_int>() {
+                    let raw = std::ptr::read_unaligned(
+                        libc::CMSG_DATA(header).cast::<libc::c_int>().add(index),
+                    );
+                    let received = OwnedFd::from_raw_fd(raw);
+                    if descriptor.is_some() {
+                        unexpected = true;
+                    } else {
+                        descriptor = Some(received);
+                    }
+                }
+            } else {
+                unexpected = true;
+            }
+            header = libc::CMSG_NXTHDR(message, header);
+        }
+    }
+    if unexpected || message.msg_flags & (libc::MSG_CTRUNC | libc::MSG_TRUNC) != 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "unexpected ancillary data",
+        ));
+    }
+    Ok(descriptor)
 }
 
 fn fill_body(framing: &Framing, sock: &UnixStream, buf: &mut Secret) -> io::Result<()> {
@@ -304,6 +363,7 @@ mod tests {
         let (_, fd) = recv_message_with_fd(&wire::FRAMING, &b).expect("recv with fd");
 
         let fd = fd.expect("descriptor");
+        // SAFETY: fd is live and F_GETFD takes no additional argument.
         let flags = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_GETFD) };
         assert!(flags >= 0, "fcntl failed");
         assert_eq!(
@@ -325,6 +385,95 @@ mod tests {
 
         let (_, fd) = recv_message_with_fd(&wire::FRAMING, &b).expect("recv");
         assert!(fd.is_none());
+    }
+
+    /// Send duplicate references to the same socket endpoint. The peer reaches
+    /// EOF only once the receiver has closed every received reference.
+    fn send_descriptors(sock: &UnixStream, payload: &[u8], fd: BorrowedFd<'_>, count: usize) {
+        const TEST_CONTROL_BYTES: usize = 128;
+        let mut control = ControlBuffer {
+            bytes: [0; TEST_CONTROL_BYTES],
+        };
+        let descriptor_bytes = (count * size_of::<libc::c_int>()) as u32;
+        // SAFETY: this computes the ancillary storage requirement for count FDs.
+        let control_bytes = unsafe { libc::CMSG_SPACE(descriptor_bytes) } as usize;
+        assert!(control_bytes <= TEST_CONTROL_BYTES);
+        let mut iov = libc::iovec {
+            iov_base: payload.as_ptr().cast_mut().cast(),
+            iov_len: payload.len(),
+        };
+        // SAFETY: zero initializes optional message fields; buffers are set below.
+        let mut message: libc::msghdr = unsafe { std::mem::zeroed() };
+        message.msg_iov = &mut iov;
+        message.msg_iovlen = 1;
+        message.msg_control = (&mut control as *mut ControlBuffer<TEST_CONTROL_BYTES>).cast();
+        message.msg_controllen = control_bytes as _;
+        // SAFETY: the aligned control buffer has space for every descriptor, and
+        // fd remains borrowed throughout sendmsg. All buffers outlive the call.
+        unsafe {
+            let header = libc::CMSG_FIRSTHDR(&message);
+            (*header).cmsg_level = libc::SOL_SOCKET;
+            (*header).cmsg_type = libc::SCM_RIGHTS;
+            (*header).cmsg_len = libc::CMSG_LEN(descriptor_bytes) as _;
+            for index in 0..count {
+                std::ptr::write_unaligned(
+                    libc::CMSG_DATA(header).cast::<libc::c_int>().add(index),
+                    fd.as_raw_fd(),
+                );
+            }
+            assert_eq!(
+                libc::sendmsg(sock.as_raw_fd(), &message, libc::MSG_NOSIGNAL),
+                payload.len() as isize,
+            );
+        }
+    }
+
+    fn rejected_message_closes_descriptors(payload: &[u8], count: usize, kind: io::ErrorKind) {
+        let (sender, receiver) = UnixStream::pair().expect("message socketpair");
+        let (descriptor, mut peer) = UnixStream::pair().expect("descriptor socketpair");
+        send_descriptors(&sender, payload, descriptor.as_fd(), count);
+        drop(descriptor);
+        drop(sender);
+        let error = recv_message_with_fd(&wire::FRAMING, &receiver).expect_err("invalid message");
+        assert_eq!(error.kind(), kind);
+        peer.set_nonblocking(true).expect("nonblocking peer");
+        assert_eq!(
+            peer.read(&mut [0])
+                .expect("a leaked descriptor keeps the peer open"),
+            0,
+        );
+    }
+
+    #[test]
+    fn multiple_descriptors_are_rejected_and_closed() {
+        let payload = encode_logon_start(&start()).expect("valid message");
+        rejected_message_closes_descriptors(&payload, 2, io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn truncated_ancillary_data_is_rejected_and_closed() {
+        let payload = encode_logon_start(&start()).expect("valid message");
+        rejected_message_closes_descriptors(&payload, 8, io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn short_header_closes_received_descriptor() {
+        rejected_message_closes_descriptors(b"P", 1, io::ErrorKind::UnexpectedEof);
+    }
+
+    #[test]
+    fn malformed_header_closes_received_descriptor() {
+        rejected_message_closes_descriptors(b"XXXXXXXXXXXX", 1, io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn short_body_closes_received_descriptor() {
+        let payload = encode_logon_start(&start()).expect("valid message");
+        rejected_message_closes_descriptors(
+            &payload[..wire::FRAMING.header_bytes],
+            1,
+            io::ErrorKind::UnexpectedEof,
+        );
     }
 
     #[test]
