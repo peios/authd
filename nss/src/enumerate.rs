@@ -29,7 +29,7 @@
 use core::ffi::{c_char, c_int};
 use std::sync::Mutex;
 
-use libauthd::ident::{Fields, Kind, Record};
+use auth_core::ident::{Fields, Kind, Record};
 
 use crate::buffer::Packer;
 use crate::client::{Client, Paged};

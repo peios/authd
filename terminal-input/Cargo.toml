@@ -1,5 +1,5 @@
 [package]
-name = "libtty"
+name = "terminal-input"
 version = "0.0.24"
 edition = "2024"
 license = "MIT"
@@ -15,5 +15,5 @@ publish = false
 # is deliberately tiny: if it ever grows into somewhere convenient to put things,
 # that is the signal it has stopped being one.
 [dependencies]
-libauthd = { path = "../libauthd" }
+auth-core = { path = "../auth-core" }
 libc = "0.2"

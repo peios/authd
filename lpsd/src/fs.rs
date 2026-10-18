@@ -39,7 +39,7 @@
 use std::io;
 use std::path::{Path, PathBuf};
 
-use libauthd::Secret;
+use auth_core::Secret;
 use peios::security::SecurityDescriptor;
 
 /// Suffix for the file a replacement is staged in. Same directory as the target

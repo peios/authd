@@ -17,7 +17,7 @@
 //!
 //! It stops short of the kernel. Turning a `Claim` into
 //! `peios::token::ClaimValues` happens once, in authd, at the boundary where the
-//! security library enters: libauthd is deliberately inert and has no dependency
+//! security library enters: auth-core is deliberately inert and has no dependency
 //! on it, which is why SIDs here are opaque bytes.
 //!
 //! # Bounds
@@ -99,7 +99,7 @@ pub enum Values {
     Boolean(Vec<bool>),
     /// UTF-8 here; transcoded to UTF-16LE when it reaches the kernel.
     String(Vec<String>),
-    /// Binary SIDs. Structurally unvalidated — libauthd has no security
+    /// Binary SIDs. Structurally unvalidated — auth-core has no security
     /// library — so the recipient must check before believing one.
     Sid(Vec<Vec<u8>>),
     Octet(Vec<Vec<u8>>),

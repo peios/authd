@@ -67,7 +67,7 @@ mod render;
 
 use core::ffi::{c_char, c_int, c_long};
 
-use libauthd::ident::{Fields, Kind, Key};
+use auth_core::ident::{Fields, Kind, Key};
 
 use crate::buffer::Packer;
 use crate::client::{Client, Found};

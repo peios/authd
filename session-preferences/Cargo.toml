@@ -1,5 +1,5 @@
 [package]
-name = "libsession"
+name = "session-preferences"
 version = "0.0.24"
 edition = "2024"
 license = "MIT"

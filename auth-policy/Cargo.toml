@@ -1,5 +1,5 @@
 [package]
-name = "libauthd-policy"
+name = "auth-policy"
 version = "0.0.24"
 edition = "2024"
 license = "MIT"
@@ -7,7 +7,7 @@ description = "What this machine grants a principal: the local policy authd mint
 publish = false
 
 [dependencies]
-libauthd = { path = "../libauthd" }
+auth-core = { path = "../auth-core" }
 peios = { git = "https://github.com/peios/peios-rs.git", rev = "f8c84930f2b71763bcf0550df0b1420a0f63b21e" }
 # Deriving a service's SID from its name: records are keyed by them, and a
 # program naming a record's service derives it as authd does. Pure

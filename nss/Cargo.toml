@@ -13,14 +13,13 @@ publish = false
 name = "nss_peios"
 crate-type = ["cdylib"]
 
-# libauthd, its client and libc, and nothing else. This object is loaded into
+# auth-core, its client and libc, and nothing else. This object is loaded into
 # *every* process on the system, including setuid ones and ones running at
 # Untrusted integrity, so its dependency list is the surface every one of them
-# inherits. libauthd-client adds nothing to it: it is the identity socket's
-# client every program shares, std and libauthd alone. Note what is absent:
+# inherits. auth-core/client adds nothing to it: it is the identity socket's
+# client every program shares, std and auth-core alone. Note what is absent:
 # libpeios. The shim never handles a SID as anything but opaque bytes, and
 # never needs to.
 [dependencies]
-libauthd = { path = "../libauthd" }
-libauthd-client = { path = "../libauthd-client" }
+auth-core = { path = "../auth-core", features = ["client"] }
 libc = "0.2"

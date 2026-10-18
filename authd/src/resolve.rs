@@ -37,8 +37,8 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use libauthd::ident::{Fields, Kind, Outcome, Reference, Value, Withheld, WithheldReason};
-use libauthd::psi;
+use auth_core::ident::{Fields, Kind, Outcome, Reference, Value, Withheld, WithheldReason};
+use auth_core::psi;
 use peios::security::SidRef;
 
 use crate::log;
@@ -65,7 +65,7 @@ const KNOWN: Fields = Fields::KNOWN;
 /// What a lookup produced.
 pub struct Answer {
     pub outcome: Outcome,
-    pub record: Option<libauthd::ident::Record>,
+    pub record: Option<auth_core::ident::Record>,
 }
 
 impl Answer {
@@ -84,7 +84,7 @@ impl Answer {
 /// Resolve one key.
 pub fn lookup(
     registry: &Registry,
-    key: &libauthd::ident::Key,
+    key: &auth_core::ident::Key,
     kind: Kind,
     fields: Fields,
 ) -> Answer {
@@ -93,12 +93,12 @@ pub fn lookup(
     // (§2.14, obligation 31).
     let deadline = std::time::Instant::now() + QUERY_TIMEOUT;
     match key {
-        libauthd::ident::Key::Name(name) => by_name(registry, name, kind, fields, deadline),
-        libauthd::ident::Key::Sid(bytes) => match SidRef::from_bytes(bytes) {
+        auth_core::ident::Key::Name(name) => by_name(registry, name, kind, fields, deadline),
+        auth_core::ident::Key::Sid(bytes) => match SidRef::from_bytes(bytes) {
             Some(sid) => by_sid(registry, sid, kind, fields, deadline),
             None => Answer::of(Outcome::Malformed),
         },
-        libauthd::ident::Key::UnixId(id) => by_unix_id(registry, *id, kind, fields, deadline),
+        auth_core::ident::Key::UnixId(id) => by_unix_id(registry, *id, kind, fields, deadline),
     }
 }
 
@@ -450,12 +450,12 @@ fn well_known_by_unix_id(registry: &Registry, id: u32, kind: Kind, fields: Field
 
 /// The well-known group `of` names, if its membership is recorded: a
 /// `BUILTIN` group, whose members are walked across every source.
-fn recorded_well_known(of: &libauthd::ident::Key) -> Option<peios::security::Sid> {
+fn recorded_well_known(of: &auth_core::ident::Key) -> Option<peios::security::Sid> {
     let sid = match of {
-        libauthd::ident::Key::Sid(bytes) => SidRef::from_bytes(bytes)?.to_sid(),
-        libauthd::ident::Key::Name(name) if name_is_usable(name) => well_known::by_name(name)?,
-        libauthd::ident::Key::Name(_) => return None,
-        libauthd::ident::Key::UnixId(id) => well_known::by_unix_id(*id)?,
+        auth_core::ident::Key::Sid(bytes) => SidRef::from_bytes(bytes)?.to_sid(),
+        auth_core::ident::Key::Name(name) if name_is_usable(name) => well_known::by_name(name)?,
+        auth_core::ident::Key::Name(_) => return None,
+        auth_core::ident::Key::UnixId(id) => well_known::by_unix_id(*id)?,
     };
     well_known::recorded(sid.as_ref()).then_some(sid)
 }
@@ -467,7 +467,7 @@ fn recorded_well_known(of: &libauthd::ident::Key) -> Option<peios::security::Sid
 /// where a source in the order couldn't or wouldn't say: a list missing one
 /// source's members would look complete, and is a wrong answer rather than a
 /// smaller one (§2.16).
-fn recorded_members(registry: &Registry, sid: &SidRef, deadline: std::time::Instant) -> Result<Vec<libauthd::ident::Reference>, WithheldReason> {
+fn recorded_members(registry: &Registry, sid: &SidRef, deadline: std::time::Instant) -> Result<Vec<auth_core::ident::Reference>, WithheldReason> {
     if !registry.complete() {
         return Err(WithheldReason::Declined);
     }
@@ -491,10 +491,10 @@ fn recorded_members(registry: &Registry, sid: &SidRef, deadline: std::time::Inst
                         Some(Value::UnixId(id)) => *id,
                         _ => 0,
                     };
-                    members.push(libauthd::ident::Reference { sid: record.sid, name: record.qualified_name, unix_id });
+                    members.push(auth_core::ident::Reference { sid: record.sid, name: record.qualified_name, unix_id });
                 }
             }
-            if members.len() > libauthd::ident::MAX_MEMBERS {
+            if members.len() > auth_core::ident::MAX_MEMBERS {
                 return Err(WithheldReason::TooLarge);
             }
             if page.next.is_empty() {
@@ -561,7 +561,7 @@ fn well_known_answer(registry: &Registry, sid: &SidRef, kind: Kind, fields: Fiel
 
     Some(Answer {
         outcome: Outcome::Found,
-        record: Some(libauthd::ident::Record {
+        record: Some(auth_core::ident::Record {
             sid: sid.as_bytes().to_vec(),
             qualified_name: name.to_string(),
             kind_found: Kind::Group,
@@ -795,7 +795,7 @@ fn found(source: &Arc<Source>, entry: &psi::QueryEntry, wanted: Kind, fields: Fi
 
     Answer {
         outcome: Outcome::Found,
-        record: Some(libauthd::ident::Record {
+        record: Some(auth_core::ident::Record {
             sid: entry.sid.clone(),
             qualified_name: qualify(source, &entry.canonical_name),
             kind_found: entry.kind,
@@ -924,7 +924,7 @@ fn qualify(_source: &Arc<Source>, canonical: &str) -> String {
 /// once realms exist.
 fn name_is_usable(name: &str) -> bool {
     !name.is_empty()
-        && name.len() <= libauthd::ident::MAX_NAME_BYTES
+        && name.len() <= auth_core::ident::MAX_NAME_BYTES
         && name.bytes().all(|b| (0x20..=0x7e).contains(&b))
         && !name.bytes().any(|b| RESERVED_IN_NAME.contains(&b))
         && name.trim() == name
@@ -942,7 +942,7 @@ const RESERVED_IN_NAME: &[u8] = b"@\\/:,";
 /// it, so a walk crosses sources one at a time and each source's paging stays
 /// its own. authd never constructs or parses what a source issued.
 pub struct Page {
-    pub entries: Vec<libauthd::ident::Record>,
+    pub entries: Vec<auth_core::ident::Record>,
     pub next: Vec<u8>,
     /// Sources that declined or could not be reached. A short list that looks
     /// complete is what this exists to prevent.
@@ -1094,7 +1094,7 @@ fn walk(
 /// table is, and a source that didn't answer is said to be `incomplete`.
 pub fn enumerate_members(
     registry: &Registry,
-    of: &libauthd::ident::Key,
+    of: &auth_core::ident::Key,
     kind: Kind,
     fields: Fields,
     cursor: &[u8],
@@ -1178,11 +1178,11 @@ pub fn enumerate_members(
 /// key.
 fn owning_group_source(
     registry: &Registry,
-    of: &libauthd::ident::Key,
+    of: &auth_core::ident::Key,
     deadline: std::time::Instant,
 ) -> Result<(Arc<Source>, psi::Key), Outcome> {
     let (source, key) = match of {
-        libauthd::ident::Key::Name(name) => {
+        auth_core::ident::Key::Name(name) => {
             if !name_is_usable(name) {
                 return Err(Outcome::Malformed);
             }
@@ -1207,7 +1207,7 @@ fn owning_group_source(
             }
             return Err(Outcome::NotFound);
         }
-        libauthd::ident::Key::Sid(bytes) => {
+        auth_core::ident::Key::Sid(bytes) => {
             let Some(sid) = SidRef::from_bytes(bytes) else {
                 return Err(Outcome::Malformed);
             };
@@ -1217,7 +1217,7 @@ fn owning_group_source(
                 None => return Err(Outcome::Unavailable),
             }
         }
-        libauthd::ident::Key::UnixId(id) => match registry.rebasing(*id) {
+        auth_core::ident::Key::UnixId(id) => match registry.rebasing(*id) {
             Some((source, relative)) => (source, psi::Key::RelativeId(relative)),
             None => {
                 return Err(match registry.configured_range(*id) {
@@ -1307,7 +1307,7 @@ fn split_cursor(cursor: &[u8]) -> Option<(Option<String>, &[u8])> {
 /// Emitted by authd itself, and only where a caller asked for groups: every one
 /// of them that carries a number is a group, and `getgrent` would otherwise
 /// never see `Everyone` at all.
-pub fn well_known_page(registry: &Registry, kind: Kind, fields: Fields) -> Vec<libauthd::ident::Record> {
+pub fn well_known_page(registry: &Registry, kind: Kind, fields: Fields) -> Vec<auth_core::ident::Record> {
     if kind != Kind::Group {
         return Vec::new();
     }
@@ -1325,8 +1325,8 @@ mod tests {
     use super::*;
     use crate::source::pump_for_test;
     use crate::unix_id;
-    use libauthd::ident::{Key, Value};
-    use libauthd::transport::{recv_message, send_message};
+    use auth_core::ident::{Key, Value};
+    use auth_core::transport::{recv_message, send_message};
     use peios::security::Sid;
     use std::os::unix::net::UnixStream;
     use std::thread;
@@ -2405,7 +2405,7 @@ mod tests {
             1,
             Some(entry("S-1-5-21-1-2-3-513", "devs", 5)),
         );
-        let of = libauthd::ident::Key::Name("devs".into());
+        let of = auth_core::ident::Key::Name("devs".into());
         let page = enumerate_members(&registry, &of, Kind::Principal, Fields::PASSWD, b"")
             .expect("a page");
         assert_eq!(page.entries.len(), 1);
@@ -2416,7 +2416,7 @@ mod tests {
     #[test]
     fn members_of_a_group_nobody_holds_is_not_found() {
         let registry = stub("only", DOMAIN, 1, None);
-        let of = libauthd::ident::Key::Name("ghosts".into());
+        let of = auth_core::ident::Key::Name("ghosts".into());
         match enumerate_members(&registry, &of, Kind::Principal, Fields::PASSWD, b"") {
             Err(Outcome::NotFound) => {}
             Ok(_) => panic!("expected NotFound, got a page"),
@@ -2432,7 +2432,7 @@ mod tests {
             ("second", 2, Some(range())),
         ]));
         add_stub(&registry, "first", DOMAIN, 1, None);
-        let of = libauthd::ident::Key::Name("devs".into());
+        let of = auth_core::ident::Key::Name("devs".into());
         match enumerate_members(&registry, &of, Kind::Principal, Fields::PASSWD, b"") {
             Err(Outcome::Unavailable) => {}
             Ok(_) => panic!("expected Unavailable, got a page"),
@@ -2450,13 +2450,13 @@ mod tests {
         let record = answer.record.expect("a record");
         assert_eq!(
             record.value(Fields::MEMBERS),
-            Some(&Value::Members(vec![libauthd::ident::Reference {
+            Some(&Value::Members(vec![auth_core::ident::Reference {
                 sid: sid("S-1-5-21-1-2-3-1000").as_ref().as_bytes().to_vec(),
                 name: "jack".into(),
                 unix_id: BASE + 1000,
             }]))
         );
-        let of = libauthd::ident::Key::Name("Administrators".into());
+        let of = auth_core::ident::Key::Name("Administrators".into());
         let page = enumerate_members(&registry, &of, Kind::Principal, Fields::PASSWD, b"").expect("a page");
         assert_eq!(page.entries.len(), 1);
         assert!(page.incomplete.is_empty());
@@ -2484,7 +2484,7 @@ mod tests {
         let registry = stub("corp", DOMAIN, 1, Some(entry("S-1-5-21-1-2-3-1000", "jack", 1000)));
         let record = lookup(&registry, &Key::Name("Administrators".into()), Kind::Group, Fields::MEMBERS).record.expect("a record");
         assert_eq!(record.value(Fields::MEMBERS), Some(&Value::Members(Vec::new())));
-        let of = libauthd::ident::Key::Name("Administrators".into());
+        let of = auth_core::ident::Key::Name("Administrators".into());
         let page = enumerate_members(&registry, &of, Kind::Principal, Fields::PASSWD, b"").expect("a page");
         assert!(page.entries.is_empty() && page.incomplete.is_empty());
     }
@@ -2501,7 +2501,7 @@ mod tests {
     #[test]
     fn an_unusable_of_name_is_malformed() {
         let registry = stub("only", DOMAIN, 1, None);
-        let of = libauthd::ident::Key::Name(" devs ".into());
+        let of = auth_core::ident::Key::Name(" devs ".into());
         match enumerate_members(&registry, &of, Kind::Principal, Fields::PASSWD, b"") {
             Err(Outcome::Malformed) => {}
             Ok(_) => panic!("expected Malformed, got a page"),

@@ -1,5 +1,5 @@
 [package]
-name = "libauthd"
+name = "auth-core"
 version = "0.0.24"
 edition = "2024"
 license = "MIT"
@@ -16,3 +16,7 @@ publish = false
 # expose on stable. Bindings to syscalls, not logic.
 [dependencies]
 libc = "0.2"
+
+[features]
+default = []
+client = []

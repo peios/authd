@@ -87,7 +87,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
 
-use libauthd::{IDENT_SOCKET_PATH, LOGON_SOCKET_PATH, PSI_SOCKET_PATH};
+use auth_core::{IDENT_SOCKET_PATH, LOGON_SOCKET_PATH, PSI_SOCKET_PATH};
 use peios::file::{self, SecInfo};
 use peios::security::sddl;
 
@@ -123,8 +123,8 @@ const MAX_IDENT_CONNECTIONS: usize = 256;
 fn main() -> ExitCode {
     log::info(format_args!(
         "starting (PGSS Logon v{}, PSI v{})",
-        libauthd::wire::VERSION,
-        libauthd::psi::VERSION
+        auth_core::wire::VERSION,
+        auth_core::psi::VERSION
     ));
 
     let logon = match listen(Path::new(LOGON_SOCKET_PATH)) {

@@ -56,15 +56,15 @@ use std::io;
 use std::os::fd::AsFd;
 use std::os::unix::net::UnixStream;
 
-use libauthd::transport::{send_message, send_message_with_fd};
-use libauthd::wire::{
+use auth_core::transport::{send_message, send_message_with_fd};
+use auth_core::wire::{
     AccessDenied, AccessGranted, Denial, Profile, ServiceAttest, encode_access_denied,
     encode_access_granted,
 };
 use peios::security::{Sid, SidRef};
 
-use libauthd::ident::{Fields, Key, Kind, Outcome};
-use libauthd::wire::{LogonType, LogonTypes};
+use auth_core::ident::{Fields, Key, Kind, Outcome};
+use auth_core::wire::{LogonType, LogonTypes};
 
 use crate::source::Registry;
 use crate::unix_id::Projection;
@@ -260,7 +260,7 @@ fn resolve_service_principal(registry: &Registry, identity: &str) -> Option<Reso
     // source too old to hold the property refuses here rather than defaulting
     // its way into the dangerous answer.
     let permitted = match record.values.iter().find_map(|value| match value {
-        libauthd::ident::Value::LogonTypes(types) => Some(*types),
+        auth_core::ident::Value::LogonTypes(types) => Some(*types),
         _ => None,
     }) {
         Some(types) => types,
@@ -279,7 +279,7 @@ fn resolve_service_principal(registry: &Registry, identity: &str) -> Option<Reso
         .values
         .iter()
         .find_map(|value| match value {
-            libauthd::ident::Value::Groups(refs) => Some(refs),
+            auth_core::ident::Value::Groups(refs) => Some(refs),
             _ => None,
         })
         .map(|refs| {

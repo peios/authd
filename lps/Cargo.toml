@@ -14,7 +14,6 @@ path = "src/main.rs"
 # privilege of its own — everything it does is a request lpsd decides whether to
 # honour, which is why the store's descriptor can stay as narrow as it is.
 [dependencies]
-libauthd = { path = "../libauthd" }
-libauthd-client = { path = "../libauthd-client" }
-libtty = { path = "../libtty" }
+auth-core = { path = "../auth-core", features = ["client"] }
+terminal-input = { path = "../terminal-input" }
 peios = { git = "https://github.com/peios/peios-rs.git", rev = "f8c84930f2b71763bcf0550df0b1420a0f63b21e" }

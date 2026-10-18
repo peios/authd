@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 fn workspace_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
-        .expect("libauthd sits in the workspace root")
+        .expect("auth-core sits in the workspace root")
         .to_path_buf()
 }
 

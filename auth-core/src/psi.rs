@@ -330,7 +330,7 @@ pub struct Group {
 #[derive(Debug, Default)]
 pub struct Assertion {
     pub authenticated_credential_type: Option<crate::wire::CredentialType>,
-    /// Binary SID bytes. Structurally unvalidated here — libauthd deliberately
+    /// Binary SID bytes. Structurally unvalidated here — auth-core deliberately
     /// has no dependency on the security library — so the *recipient* must
     /// validate before treating it as identity.
     pub user_sid: Vec<u8>,

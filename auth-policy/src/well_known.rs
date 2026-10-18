@@ -368,7 +368,7 @@ mod tests {
         for entry in WELL_KNOWN {
             let built = entry.sid().expect("a buildable SID");
             let said = description_of(built.as_ref()).unwrap_or_default();
-            assert!(!said.is_empty() && said.len() <= libauthd::wire::MAX_DESCRIPTION_BYTES, "{}", entry.name);
+            assert!(!said.is_empty() && said.len() <= auth_core::wire::MAX_DESCRIPTION_BYTES, "{}", entry.name);
         }
         assert_eq!(description_of(sid("S-1-5-21-1-2-3-1000").as_ref()), None);
     }

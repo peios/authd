@@ -1,4 +1,4 @@
-//! **libauthd** — the wire protocols of Peios' authentication stack.
+//! **auth-core** — the wire protocols of Peios' authentication stack.
 //!
 //! Three protocols live here, and the distinctions between them are
 //! load-bearing:
@@ -151,3 +151,7 @@ pub const LPSD_SELF_SOCKET_PATH: &str = "/run/lpsd/self.sock";
 
 pub mod credential;
 pub mod ssh;
+
+/// Client helpers for applications; disabled in daemon builds.
+#[cfg(feature = "client")]
+pub mod client;

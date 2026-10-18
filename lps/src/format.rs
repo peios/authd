@@ -8,10 +8,10 @@
 //! output is as likely to be read over a serial console during a bad morning as
 //! in a terminal that renders anything clever.
 
-use libauthd::claim::{Claim, Values};
-use libauthd::credential::Policy;
-use libauthd::lps::{Detail, GroupRef, GroupSummary, KeyInfo, LogonTypes, Summary};
-use libauthd::wire::LogonType;
+use auth_core::claim::{Claim, Values};
+use auth_core::credential::Policy;
+use auth_core::lps::{Detail, GroupRef, GroupSummary, KeyInfo, LogonTypes, Summary};
+use auth_core::wire::LogonType;
 use peios::security::SidRef;
 
 /// Render a SID, or say plainly that it could not be read.

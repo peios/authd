@@ -89,9 +89,9 @@
 use std::io;
 use std::path::Path;
 
-use libauthd::claim::{self, Claim, Values};
-use libauthd::credential::{MAX_KEYS, MAX_LABEL, Policy, PublicKey};
-use libauthd::wire::{LogonType, LogonTypes};
+use auth_core::claim::{self, Claim, Values};
+use auth_core::credential::{MAX_KEYS, MAX_LABEL, Policy, PublicKey};
+use auth_core::wire::{LogonType, LogonTypes};
 use peios::security::{Sid, SidRef, WellKnown};
 
 use crate::codec::{self, CodecError, Reader, Writer};
@@ -138,7 +138,7 @@ const MAX_NAME_BYTES: usize = 256;
 const MAX_GROUPS: usize = 128;
 const MAX_PATH_BYTES: usize = 4096;
 const MAX_DISPLAY_NAME_BYTES: usize = 256;
-const MAX_DESCRIPTION_BYTES: usize = libauthd::wire::MAX_DESCRIPTION_BYTES;
+const MAX_DESCRIPTION_BYTES: usize = auth_core::wire::MAX_DESCRIPTION_BYTES;
 
 /// Characters a principal or group name may not contain.
 ///
@@ -1705,7 +1705,7 @@ impl Store {
             .map(|p| (p.rid, p.credential_generation))
     }
 
-    pub fn key_eligible(&self, identifier: &[u8], offer: &libauthd::ssh::Offer) -> bool {
+    pub fn key_eligible(&self, identifier: &[u8], offer: &auth_core::ssh::Offer) -> bool {
         self.principals
             .iter()
             .find(|p| p.matches(identifier))
@@ -1719,8 +1719,8 @@ impl Store {
 
     pub fn authenticate_key(
         &self,
-        binding: &libauthd::ssh::Binding,
-        offer: &libauthd::ssh::Offer,
+        binding: &auth_core::ssh::Binding,
+        offer: &auth_core::ssh::Offer,
         generation: Option<(u32, u64)>,
     ) -> Option<Identity> {
         let p = self
@@ -1740,8 +1740,8 @@ impl Store {
     /// account it was — for the audit trail, and never for the wire.
     pub fn verify_key(
         &self,
-        binding: &libauthd::ssh::Binding,
-        offer: &libauthd::ssh::Offer,
+        binding: &auth_core::ssh::Binding,
+        offer: &auth_core::ssh::Offer,
         generation: Option<(u32, u64)>,
     ) -> Verification {
         let Some(p) = self
@@ -2384,7 +2384,7 @@ fn check_description(description: &str) -> Result<String, StoreError> {
 // Claims, in the store's own codec
 // ---------------------------------------------------------------------------
 //
-// Deliberately not the wire encoding. `libauthd` frames a claim for a protocol
+// Deliberately not the wire encoding. `auth-core` frames a claim for a protocol
 // that has to survive a peer of a different vintage; the store has a version
 // number on the file and refuses anything it does not recognise, so it can use
 // the simpler codec the rest of this file uses. The *type* is shared, which is
@@ -2512,7 +2512,7 @@ mod tests {
         store
     }
 
-    fn ssh_fixture() -> (String, libauthd::ssh::Binding, libauthd::ssh::Offer) {
+    fn ssh_fixture() -> (String, auth_core::ssh::Binding, auth_core::ssh::Offer) {
         use signature::Signer;
         use ssh_key::{
             PublicKey, Signature,
@@ -2520,12 +2520,12 @@ mod tests {
         };
         let pair = Ed25519Keypair::from(Ed25519PrivateKey::from_bytes(&[7; 32]));
         let key = PublicKey::new(pair.public.into(), "test key");
-        let binding = libauthd::ssh::Binding {
+        let binding = auth_core::ssh::Binding {
             connection: [1; 16],
             session: vec![2; 32],
             username: "alice".into(),
         };
-        let mut offer = libauthd::ssh::Offer {
+        let mut offer = auth_core::ssh::Offer {
             algorithm: "ssh-ed25519".into(),
             key: key.to_bytes().unwrap(),
             signature: vec![],
@@ -2909,7 +2909,7 @@ mod tests {
     /// interactive sign-on it should never allow.
     #[test]
     fn permitted_logon_types_round_trip_through_the_codec() {
-        use libauthd::wire::LogonType;
+        use auth_core::wire::LogonType;
         let mut store = Store::provision().expect("must provision");
         store
             .add(

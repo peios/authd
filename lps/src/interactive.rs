@@ -24,8 +24,8 @@
 //! nothing itself. An empty answer means "whatever you would have chosen", which
 //! travels as an absent field rather than as a guess this side made.
 
-use libauthd::lps;
-use libauthd_client::admin::Admin;
+use auth_core::lps;
+use auth_core::client::admin::Admin;
 
 use crate::Failed;
 
@@ -57,7 +57,7 @@ struct Requested {
 pub fn add(options: &[&str]) -> Result<(), Failed> {
     let mut requested = parse(options)?;
 
-    let interactive = libtty::stdin_is_a_terminal() && !requested.no_prompt;
+    let interactive = terminal_input::stdin_is_a_terminal() && !requested.no_prompt;
 
     let name = match requested.name.take() {
         Some(name) => name,
@@ -244,7 +244,7 @@ fn prompt(question: &str, default: &str) -> Result<String, Failed> {
     } else {
         format!("{question} [{default}]: ")
     };
-    libtty::prompt_line(&label)
+    terminal_input::prompt_line(&label)
         .map(|answer| answer.trim().to_string())
         .map_err(|error| Failed::Refused(format!("could not read an answer: {error}")))
 }
@@ -277,10 +277,10 @@ fn confirm(question: &str) -> Result<bool, Failed> {
 /// Empty is not a way to spell "no password": `--no-password` is, and the
 /// message says so, because the two produce accounts that behave differently
 /// and an operator who wanted the second should not get the first.
-pub fn confirmed_password(label: &str) -> Result<libauthd::Secret, Failed> {
+pub fn confirmed_password(label: &str) -> Result<auth_core::Secret, Failed> {
     let read =
         |error: std::io::Error| Failed::Refused(format!("could not read a password: {error}"));
-    let refuse_empty = |secret: libauthd::Secret| {
+    let refuse_empty = |secret: auth_core::Secret| {
         if secret.expose().is_empty() {
             return Err(Failed::Refused(
                 "an empty password is not a password: pass --no-password to create a principal \
@@ -291,12 +291,12 @@ pub fn confirmed_password(label: &str) -> Result<libauthd::Secret, Failed> {
         Ok(secret)
     };
 
-    if !libtty::stdin_is_a_terminal() {
-        return refuse_empty(libtty::read_line_secret().map_err(read)?);
+    if !terminal_input::stdin_is_a_terminal() {
+        return refuse_empty(terminal_input::read_line_secret().map_err(read)?);
     }
 
-    let first = libtty::prompt_secret(label).map_err(read)?;
-    let again = libtty::prompt_secret("Again: ").map_err(read)?;
+    let first = terminal_input::prompt_secret(label).map_err(read)?;
+    let again = terminal_input::prompt_secret("Again: ").map_err(read)?;
 
     if first.expose() != again.expose() {
         return Err(Failed::Refused("the passwords did not match".into()));

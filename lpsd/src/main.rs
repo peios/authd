@@ -78,10 +78,10 @@ use std::process::ExitCode;
 use crate::fs::{Fs, RealFs};
 use crate::store::{Store, StoreError};
 
-use libauthd::PSI_SOCKET_PATH;
-use libauthd::psi;
-use libauthd::transport::{recv_message, send_message};
-use libauthd::wire::{
+use auth_core::PSI_SOCKET_PATH;
+use auth_core::psi;
+use auth_core::transport::{recv_message, send_message};
+use auth_core::wire::{
     CredentialRequest, CredentialResponse, CredentialType, Denial, EnrollAction, IdentifierType,
     Message, MessageSeverity, Prompt,
 };
@@ -119,7 +119,7 @@ const MAX_CONVERSATIONS: usize = 256;
 /// What lpsd remembers between asking and being answered.
 enum Pending {
     Ssh {
-        binding: libauthd::ssh::Binding,
+        binding: auth_core::ssh::Binding,
         generation: Option<(u32, u64)>,
         credential_ref: u32,
         submissions: u8,
@@ -241,7 +241,7 @@ fn main() -> ExitCode {
         Err(error) => {
             log::error(format_args!(
                 "could not listen on {}: {error}",
-                libauthd::LPSD_ADMIN_SOCKET_PATH
+                auth_core::LPSD_ADMIN_SOCKET_PATH
             ));
             return ExitCode::FAILURE;
         }
@@ -254,7 +254,7 @@ fn main() -> ExitCode {
         Err(error) => {
             log::error(format_args!(
                 "could not listen on {}: {error}; principals cannot read their own accounts",
-                libauthd::LPSD_SELF_SOCKET_PATH
+                auth_core::LPSD_SELF_SOCKET_PATH
             ));
             None
         }
@@ -944,7 +944,7 @@ fn answer(
                     "Authentication failed.",
                 );
             }
-            let Ok(offer) = libauthd::ssh::Offer::decode(response.answers[0].data.expose()) else {
+            let Ok(offer) = auth_core::ssh::Offer::decode(response.answers[0].data.expose()) else {
                 return refuse(
                     stream,
                     conversation,
@@ -1818,7 +1818,7 @@ fn assert_identity(
             // which is the same division as every other field here.
             permitted_logon_types: identity.permitted_logon_types,
             primary_group: identity.primary_group.sid.as_ref().as_bytes().to_vec(),
-            profile: libauthd::wire::Profile {
+            profile: auth_core::wire::Profile {
                 home: identity.home.clone(),
                 shell: identity.shell.clone(),
                 display_name: identity.display_name.clone(),
@@ -1863,8 +1863,8 @@ mod tests {
 
     use super::*;
     use crate::store::NewPrincipal;
-    use libauthd::Secret;
-    use libauthd::wire::{Answer, CredentialChangeStart};
+    use auth_core::Secret;
+    use auth_core::wire::{Answer, CredentialChangeStart};
 
     const CONVERSATION: u64 = 7;
 
@@ -1920,7 +1920,7 @@ mod tests {
             let message = psi::encode_enroll_credential(
                 CONVERSATION,
                 &psi::EnrollCredential {
-                    start: libauthd::wire::CredentialEnrollStart {
+                    start: auth_core::wire::CredentialEnrollStart {
                         supported_credential_types: vec![CredentialType::Password],
                         action,
                         credential_type: CredentialType::SshPublicKey,
@@ -2430,7 +2430,7 @@ mod tests {
     /// or has a policy naming a password it does not have.
     #[test]
     fn an_account_with_no_password_to_prove_is_sent_to_an_administrator() {
-        use libauthd::credential::Policy;
+        use auth_core::credential::Policy;
 
         let mut key_only = Harness::with("erin", Some(b"pw"));
         key_only.store.add_key("erin", &key_line(3, ""), "").unwrap();
@@ -2540,7 +2540,7 @@ fn ask_key(
             credential_ref,
             credential_type: CredentialType::SshPublicKey,
             credential_name: "SSH public key".into(),
-            parameters: libauthd::ssh::disposition(disposition)
+            parameters: auth_core::ssh::disposition(disposition)
                 .map_err(|_| io::Error::other("invalid probe disposition"))?,
         }],
     };

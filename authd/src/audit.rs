@@ -25,7 +25,7 @@
 
 use std::sync::OnceLock;
 
-use libauthd::wire::Denial;
+use auth_core::wire::Denial;
 use peios::event::{EventPolicy, Tier};
 use peios::msgpack::Writer;
 use peios::security::SidRef;

@@ -39,16 +39,16 @@ use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use libauthd::LOGON_SOCKET_PATH;
-use libauthd::Secret;
-use libauthd::transport::{recv_message_with_fd, send_message};
-use libauthd::wire::{
+use crate::LOGON_SOCKET_PATH;
+use crate::Secret;
+use crate::transport::{recv_message_with_fd, send_message};
+use crate::wire::{
     self, Answer, CredentialChangeStart, CredentialEnrollStart, CredentialResponse,
     CredentialType, Denial, EnrollAction, MSG_ACCESS_DENIED, MSG_CREDENTIAL_CHANGED,
     MSG_CREDENTIAL_REQUEST,
 };
 
-pub use libauthd::wire::MessageSeverity;
+pub use crate::wire::MessageSeverity;
 
 /// How long the authority is given to send its next message. It waits on the
 /// principal source for at most half a minute a round; this leaves room. Time
@@ -306,7 +306,7 @@ impl Credentials {
 
     fn converse(
         &self,
-        start: Result<Vec<u8>, libauthd::WireError>,
+        start: Result<Vec<u8>, crate::WireError>,
         collector: &mut dyn Collector,
     ) -> Result<(), Refusal> {
         let start = start
@@ -455,8 +455,8 @@ pub fn converse(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use libauthd::transport::recv_message;
-    use libauthd::wire::{
+    use crate::transport::recv_message;
+    use crate::wire::{
         AccessDenied, CredentialChanged, CredentialRequest, MSG_CREDENTIAL_CHANGE_START,
         MSG_CREDENTIAL_ENROLL_START, MSG_CREDENTIAL_RESPONSE, Message, Prompt,
     };
@@ -703,7 +703,7 @@ mod tests {
     fn an_unrenderable_prompt_ends_it() {
         let (client, server) = UnixStream::pair().expect("socketpair");
         let key_prompt = Prompt {
-            parameters: libauthd::ssh::disposition(0).unwrap(),
+            parameters: crate::ssh::disposition(0).unwrap(),
             credential_ref: 1,
             credential_type: CredentialType::SshPublicKey,
             credential_name: "SSH public key".into(),
@@ -727,7 +727,7 @@ mod tests {
         use std::sync::atomic::{AtomicU32, Ordering};
         static NEXT: AtomicU32 = AtomicU32::new(0);
         let dir = std::env::temp_dir().join(format!(
-            "libauthd-client-credential-{}-{}",
+            "auth-core/client-credential-{}-{}",
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));

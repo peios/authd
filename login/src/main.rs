@@ -35,10 +35,10 @@ use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Command, ExitCode};
 
-use libauthd::LOGON_SOCKET_PATH;
-use libauthd::ident;
-use libauthd::transport::{recv_message, recv_message_with_fd, send_message};
-use libauthd::wire::{
+use auth_core::LOGON_SOCKET_PATH;
+use auth_core::ident;
+use auth_core::transport::{recv_message, recv_message_with_fd, send_message};
+use auth_core::wire::{
     self, Answer, CredentialResponse, CredentialType, Denial, IdentifierType, LogonStart,
     LogonType, MSG_ACCESS_DENIED, MSG_ACCESS_GRANTED, MSG_CREDENTIAL_REQUEST, Profile,
     decode_access_denied, decode_access_granted, decode_credential_request, decode_header,
@@ -49,7 +49,7 @@ use libauthd::wire::{
 /// Short: it runs before a prompt, and a login that appears to hang is worse
 /// than one that falls through to asking for a name.
 const IDENT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
-use libtty as tty;
+use terminal_input as tty;
 use peios::token::Token;
 
 /// The shell handed to a successful logon.
@@ -513,7 +513,7 @@ enum Existence {
 /// home directory this program will not use would invite the authority to
 /// withhold a field and turn a two-state answer into three.
 fn existence(name: &str) -> Existence {
-    let Ok(socket) = UnixStream::connect(libauthd::IDENT_SOCKET_PATH) else {
+    let Ok(socket) = UnixStream::connect(auth_core::IDENT_SOCKET_PATH) else {
         return Existence::Unknown;
     };
     let _ = socket.set_read_timeout(Some(IDENT_TIMEOUT));
@@ -695,10 +695,10 @@ fn exec_shell(username: &str, profile: &Profile, preserve_environment: bool) -> 
     // Locale is session policy, including with -p: do not inherit an LC_ALL
     // or category override from the service which hosted the login prompt.
     command.env_remove("LC_ALL").env_remove("LANGUAGE");
-    for category in libsession::locale::CATEGORIES {
+    for category in session_preferences::locale::CATEGORIES {
         command.env_remove(category);
     }
-    command.envs(libsession::locale::current());
+    command.envs(session_preferences::locale::current());
 
     // Only returns on failure.
     Err(format!("could not start {shell}: {}", command.exec()))

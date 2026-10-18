@@ -10,7 +10,7 @@
 
 use std::io::{self, BufRead, Read, Write};
 
-use libauthd::Secret;
+use auth_core::Secret;
 
 /// The longest single answer accepted from a terminal.
 ///
@@ -22,7 +22,7 @@ use libauthd::Secret;
 /// anywhere saying why — and the remainder stayed in the terminal's input
 /// queue to be read by whatever ran next, which after a failed logon is
 /// usually a shell.
-const MAX_ANSWER_BYTES: usize = libauthd::wire::MAX_CREDENTIAL_BYTES;
+const MAX_ANSWER_BYTES: usize = auth_core::wire::MAX_CREDENTIAL_BYTES;
 
 /// Restores the terminal's echo setting when dropped.
 ///

@@ -1,6 +1,6 @@
 use super::*;
 use crate::source::pump_for_test;
-use libauthd::transport::{recv_message, send_message};
+use auth_core::transport::{recv_message, send_message};
 use peios::security::Sid;
 use std::net::Shutdown;
 use std::os::unix::net::UnixStream;

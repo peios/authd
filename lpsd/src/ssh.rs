@@ -1,5 +1,5 @@
 //! SSH key parsing and proof verification in the credential owner.
-use libauthd::ssh::{Binding, MAX_KEY, Offer};
+use auth_core::ssh::{Binding, MAX_KEY, Offer};
 use signature::Verifier;
 use ssh_key::{Algorithm, HashAlg, PublicKey, Signature};
 

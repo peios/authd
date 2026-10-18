@@ -3,7 +3,7 @@
 //! Everything lossy about the shim happens here, and each loss is a property of
 //! `struct passwd` and `struct group` rather than of the protocol.
 
-use libauthd::ident::{Fields, Record, Value};
+use auth_core::ident::{Fields, Record, Value};
 
 use crate::buffer::Packer;
 
@@ -62,7 +62,7 @@ pub fn passwd(record: &Record, packer: &mut Packer) -> Option<libc::passwd> {
 /// a `gr_mem` listing this machine's principals for `Everyone` would be a wrong
 /// answer rather than a partial one.
 pub fn group(record: &Record, packer: &mut Packer) -> Option<libc::group> {
-    let members: &[libauthd::ident::Reference] = match record.value(Fields::MEMBERS) {
+    let members: &[auth_core::ident::Reference] = match record.value(Fields::MEMBERS) {
         Some(Value::Members(refs)) => refs,
         _ => &[],
     };
@@ -139,7 +139,7 @@ pub fn read(pointer: *mut core::ffi::c_char) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use libauthd::ident::{Kind, Reference, Withheld, WithheldReason};
+    use auth_core::ident::{Kind, Reference, Withheld, WithheldReason};
 
     fn reference(name: &str, unix_id: u32) -> Reference {
         Reference {

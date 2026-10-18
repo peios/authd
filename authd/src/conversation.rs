@@ -52,8 +52,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
-use libauthd::transport::{recv_message, send_message, send_message_with_fd};
-use libauthd::wire::{
+use auth_core::transport::{recv_message, send_message, send_message_with_fd};
+use auth_core::wire::{
     self, AccessDenied, AccessGranted, CredentialChangeStart, CredentialEnrollStart,
     CredentialRequest, CredentialResponse, CredentialType, Denial, LogonStart, LogonType,
     MSG_CREDENTIAL_CHANGE_START, MSG_CREDENTIAL_ENROLL_START, MSG_CREDENTIAL_RESPONSE,
@@ -196,7 +196,7 @@ impl Purpose {
 /// has already sent.
 pub(crate) enum Ended {
     /// The source said who the principal is. Only ever for [`Purpose::Logon`].
-    Asserted(libauthd::psi::Assertion),
+    Asserted(auth_core::psi::Assertion),
     /// The source changed the credential. Only ever for [`Purpose::Change`]
     /// and [`Purpose::Enroll`].
     Changed,
@@ -929,7 +929,7 @@ fn grant(
     stream: &UnixStream,
     start: &LogonStart,
     conversation: &Conversation,
-    assertion: &libauthd::psi::Assertion,
+    assertion: &auth_core::psi::Assertion,
     attempt: &mut Attempt,
 ) -> io::Result<()> {
     let source_name = conversation.source_name();
@@ -947,7 +947,7 @@ fn grant(
         );
     }
     // A source's assertion is bytes until proven otherwise. Validating the SID
-    // here — before it becomes identity — is why libauthd carries it untyped:
+    // here — before it becomes identity — is why auth-core carries it untyped:
     // the codec has no business knowing what a SID is, and the process that
     // mints tokens has every business checking.
     let Some(user) = SidRef::from_bytes(&assertion.user_sid) else {
@@ -1434,7 +1434,7 @@ fn may_request(peer: &Sid, logon_type: LogonType) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use libauthd::wire::{CredentialType, IdentifierType, Prompt};
+    use auth_core::wire::{CredentialType, IdentifierType, Prompt};
 
     fn start_supporting(types: Vec<CredentialType>) -> LogonStart {
         LogonStart {
@@ -1768,7 +1768,7 @@ mod tests {
 
     fn opening_of(bytes: &[u8]) -> Result<Opening, (Denial, &'static str)> {
         let (client, server) = UnixStream::pair().expect("socketpair");
-        libauthd::transport::send_message(&client, bytes).expect("sends");
+        auth_core::transport::send_message(&client, bytes).expect("sends");
         read_opening(&server)
     }
 
@@ -1776,9 +1776,9 @@ mod tests {
     /// malformed rather than read as something else.
     #[test]
     fn an_enrolment_opens_as_itself() {
-        let start = libauthd::wire::CredentialEnrollStart {
+        let start = auth_core::wire::CredentialEnrollStart {
             supported_credential_types: vec![CredentialType::Password],
-            action: libauthd::wire::EnrollAction::Remove,
+            action: auth_core::wire::EnrollAction::Remove,
             credential_type: CredentialType::SshPublicKey,
             material: "SHA256:abc".into(),
         };
@@ -1821,7 +1821,7 @@ mod tests {
             }))
         ));
         // An authority's message is no opening, however it is framed.
-        let ended = wire::encode_session_ended(&libauthd::wire::SessionEnded::default()).unwrap();
+        let ended = wire::encode_session_ended(&auth_core::wire::SessionEnded::default()).unwrap();
         assert!(matches!(
             opening_of(&ended),
             Err((Denial::MalformedRequest, _))

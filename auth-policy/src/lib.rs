@@ -11,7 +11,7 @@
 //! Manager shows it, says what it comes to for a person, and edits it. Both
 //! read it here, so a record authd ignores is one the window shows as
 //! ignored, and what the window says someone gets is what authd would mint.
-//! It sits beside libauthd rather than in it: libauthd is inert, with no
+//! It sits beside auth-core rather than in it: auth-core is inert, with no
 //! dependency on the security library, and this reads the registry and builds
 //! SIDs and ACLs.
 //!
@@ -68,7 +68,7 @@
 //! and means policy behaves identically on a machine that has never been
 //! configured and one where an administrator deleted the key.
 
-use libauthd::wire::{LogonType, LogonTypes};
+use auth_core::wire::{LogonType, LogonTypes};
 use peios::registry::{Key, KeyAccess, OpenFlags, ValueType};
 use peios::security::{Acl, IntegrityLevel, Privileges, Sid, SidRef, WellKnown, sddl};
 

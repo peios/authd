@@ -9,10 +9,10 @@
 //! not a credential.
 //!
 //! Adding or removing a key is not here: it re-proves the current password,
-//! so it goes through the logon socket. See [`crate::credential`].
+//! so it goes through the logon socket. See [`crate::client::credential`].
 //!
 //! Refusals are PLPS's, as on the admin socket: [`Refusal`], with lpsd's
-//! [`Failure`](libauthd::lps::Failure) where it gave one. A caller lpsd holds
+//! [`Failure`](crate::lps::Failure) where it gave one. A caller lpsd holds
 //! no account for — SYSTEM, a directory principal — is refused `NotFound`.
 
 use std::io;
@@ -20,13 +20,13 @@ use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use libauthd::lps::{self, Failure};
-use libauthd::transport::{recv_message, send_message};
-use libauthd::{LPSD_SELF_SOCKET_PATH, WireError};
+use crate::lps::{self, Failure};
+use crate::transport::{recv_message, send_message};
+use crate::{LPSD_SELF_SOCKET_PATH, WireError};
 
-pub use crate::admin::Refusal;
-pub use libauthd::credential::Policy;
-pub use libauthd::lps::{OwnAccount, OwnKey};
+pub use crate::client::admin::Refusal;
+pub use crate::credential::Policy;
+pub use crate::lps::{OwnAccount, OwnKey};
 
 /// lpsd serves the self socket without blocking, with a five-second deadline
 /// a connection, so an answer is quick or not coming.
@@ -141,7 +141,7 @@ mod tests {
     ) -> (Own, PathBuf, mpsc::Receiver<u16>) {
         static NEXT: AtomicU32 = AtomicU32::new(0);
         let dir = std::env::temp_dir().join(format!(
-            "libauthd-client-own-{}-{}",
+            "auth-core/client-own-{}-{}",
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));

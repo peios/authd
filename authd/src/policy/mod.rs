@@ -25,13 +25,13 @@
 //! keeps the process holding `SeCreateTokenPrivilege` away from a registry write
 //! handle, and it means policy behaves identically on a machine that has never
 //! been configured and one where an administrator deleted the key.
-//! libauthd-policy's writers exist only with its `write` feature, which authd
+//! auth-policy's writers exist only with its `write` feature, which authd
 //! does not turn on.
 
 pub mod principal;
 pub mod sources;
 
-pub use libauthd_policy::{dword, sz};
+pub use auth_policy::{dword, sz};
 pub use principal::{
     Outcome, logon_socket_descriptor, originator_logon_types, session_end_descriptor,
 };
@@ -46,7 +46,7 @@ mod tests {
     /// list of who may assert identity.
     #[test]
     fn generic_policy_and_authd_configuration_are_separate_subtrees() {
-        assert!(libauthd_policy::KEY.starts_with("Machine\\Generic\\"));
+        assert!(auth_policy::KEY.starts_with("Machine\\Generic\\"));
         assert!(sources::SOURCES_KEY.starts_with("Machine\\Software\\Authd\\"));
     }
 
@@ -54,7 +54,7 @@ mod tests {
     fn the_policy_key_paths_are_well_formed() {
         // Components cannot be empty, so no leading, trailing or doubled
         // separator. The canonical separator is a backslash.
-        for path in [libauthd_policy::KEY, sources::SOURCES_KEY] {
+        for path in [auth_policy::KEY, sources::SOURCES_KEY] {
             assert!(!path.starts_with('\\'), "{path}");
             assert!(!path.ends_with('\\'), "{path}");
             assert!(!path.contains("\\\\"), "{path}");

@@ -31,7 +31,7 @@
 //! how much this machine trusts a principal, keyed on the SIDs it ends up
 //! carrying — and neither will ever come from a source. Both are read per logon
 //! from `Machine\Generic\Authn\Policy`, alongside the owner and the default
-//! DACL; see [`crate::policy::principal`] and [`libauthd_policy`].
+//! DACL; see [`crate::policy::principal`] and [`auth_policy`].
 
 use peios::security::{GroupAttributes, Sid, SidRef};
 use peios::token::{
@@ -39,7 +39,7 @@ use peios::token::{
     Session, SessionId, Token, TokenBuilder, TokenType,
 };
 
-use libauthd::wire::LogonType;
+use auth_core::wire::LogonType;
 
 use crate::log;
 use crate::policy;
@@ -78,10 +78,10 @@ fn kacs_logon_type(logon_type: LogonType) -> KacsLogonType {
 }
 
 // The well-known group SIDs a logon type confers, and the rest every token
-// carries, are libauthd-policy's: policy is evaluated against them, so a
+// carries, are auth-policy's: policy is evaluated against them, so a
 // program saying what someone gets has to add exactly what this does.
 #[cfg(test)]
-use libauthd_policy::logon_type_sids;
+use auth_policy::logon_type_sids;
 
 /// A SID's index in the token's SID array.
 ///
@@ -182,7 +182,7 @@ pub fn token_groups(
     // Authenticated Users, Local and the logon-type SIDs, the last being the
     // derivation that matters most here. A source could not assert these
     // meaningfully even if the protocol let it.
-    for sid in libauthd_policy::derived_sids(logon_type) {
+    for sid in auth_policy::derived_sids(logon_type) {
         add_unique(&mut groups, sid, enabled);
     }
 
@@ -260,12 +260,12 @@ pub struct Minting<'a> {
 /// claim living in a *security descriptor*, and neither has any meaning for one
 /// living on a token. Dropping them here is the correct mapping rather than a
 /// loss, but it is stated because the alternative reading is that it is a bug.
-pub fn kacs_claims(claims: &[libauthd::claim::Claim]) -> Option<Vec<Claim>> {
+pub fn kacs_claims(claims: &[auth_core::claim::Claim]) -> Option<Vec<Claim>> {
     claims.iter().map(kacs_claim).collect()
 }
 
-fn kacs_claim(claim: &libauthd::claim::Claim) -> Option<Claim> {
-    use libauthd::claim::Values;
+fn kacs_claim(claim: &auth_core::claim::Claim) -> Option<Claim> {
+    use auth_core::claim::Values;
 
     let values = match &claim.values {
         Values::Int64(v) => ClaimValues::Int64(v.clone()),
@@ -273,7 +273,7 @@ fn kacs_claim(claim: &libauthd::claim::Claim) -> Option<Claim> {
         Values::Boolean(v) => ClaimValues::Boolean(v.clone()),
         Values::String(v) => ClaimValues::String(v.clone()),
         Values::Octet(v) => ClaimValues::Octet(v.clone()),
-        // The only fallible arm: libauthd carries SIDs as opaque bytes, since
+        // The only fallible arm: auth-core carries SIDs as opaque bytes, since
         // it has no dependency on the security library, so this is where they
         // are first held to being SIDs at all.
         Values::Sid(v) => ClaimValues::Sid(
@@ -558,8 +558,8 @@ mod tests {
         }
     }
 
-    fn wire_claim(values: libauthd::claim::Values) -> libauthd::claim::Claim {
-        libauthd::claim::Claim {
+    fn wire_claim(values: auth_core::claim::Values) -> auth_core::claim::Claim {
+        auth_core::claim::Claim {
             name: "Department".into(),
             flags: 0,
             values,
@@ -568,7 +568,7 @@ mod tests {
 
     #[test]
     fn every_claim_value_type_converts() {
-        use libauthd::claim::Values;
+        use auth_core::claim::Values;
 
         let converted = |values| kacs_claims(&[wire_claim(values)]).map(|mut c| c.remove(0).values);
 
@@ -602,13 +602,13 @@ mod tests {
         );
     }
 
-    /// libauthd carries SIDs as opaque bytes, so this is the first point one is
+    /// auth-core carries SIDs as opaque bytes, so this is the first point one is
     /// held to being a SID at all. Refusing the whole set rather than dropping
     /// the offender matters: a claim is an input to access decisions, so losing
     /// one signs somebody in against a policy nobody stated.
     #[test]
     fn a_claim_carrying_something_that_is_not_a_sid_refuses_the_whole_set() {
-        use libauthd::claim::Values;
+        use auth_core::claim::Values;
 
         let good = wire_claim(Values::String(vec!["Engineering".into()]));
         let bad = wire_claim(Values::Sid(vec![b"not a sid".to_vec()]));
@@ -624,10 +624,10 @@ mod tests {
 
     #[test]
     fn the_flags_kacs_carries_on_a_token_survive() {
-        use libauthd::claim::{self, Values};
+        use auth_core::claim::{self, Values};
 
         let with = |flags| {
-            kacs_claims(&[libauthd::claim::Claim {
+            kacs_claims(&[auth_core::claim::Claim {
                 flags,
                 ..wire_claim(Values::Int64(Vec::new()))
             }])

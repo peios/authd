@@ -36,12 +36,12 @@ use std::os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::net::UnixStream;
 use std::time::{Duration, Instant};
 
-use libauthd::transport::send_message;
-use libauthd::wire::{
+use auth_core::transport::send_message;
+use auth_core::wire::{
     Denial, LogonTypes, SessionEndAllowed, SessionEnded, encode_session_end_allowed,
     encode_session_ended,
 };
-use libauthd_policy::SESSION_END;
+use auth_policy::SESSION_END;
 use peios::access::{AccessCheck, AuditContext};
 use peios::security::{AccessMask, GenericMapping, Sid, SidRef};
 use peios::token::{Token, TokenAccess};

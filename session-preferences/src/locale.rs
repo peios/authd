@@ -329,7 +329,7 @@ mod tests {
             file.extend_from_slice(&o.to_ne_bytes());
         }
         file.extend_from_slice(&strings);
-        let path = std::env::temp_dir().join(format!("libsession-id-{}", std::process::id()));
+        let path = std::env::temp_dir().join(format!("session-preferences-id-{}", std::process::id()));
         std::fs::write(&path, &file).unwrap();
         assert_eq!(
             identification(&path),

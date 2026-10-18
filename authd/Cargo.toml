@@ -14,11 +14,11 @@ path = "src/main.rs"
 # dependencies of the most privileged userspace process on the system, so the
 # list stays short and every addition needs a reason.
 [dependencies]
-libauthd = { path = "../libauthd" }
+auth-core = { path = "../auth-core" }
 # authd's own policy reading, its well-known principals and the derivation
 # of a service's SID (which is how a principal source is identified), lifted
 # out so a window saying what a principal gets reads them as authd does.
 # Without its `write` feature it opens no key for writing.
-libauthd-policy = { path = "../libauthd-policy" }
+auth-policy = { path = "../auth-policy" }
 libc = "0.2"
 peios = { git = "https://github.com/peios/peios-rs.git", rev = "f8c84930f2b71763bcf0550df0b1420a0f63b21e" }

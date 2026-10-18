@@ -36,8 +36,8 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use libauthd::lps::{self, Failed, Failure};
-use libauthd::{LPSD_RUN_DIR, LPSD_SELF_SOCKET_PATH, frame};
+use auth_core::lps::{self, Failed, Failure};
+use auth_core::{LPSD_RUN_DIR, LPSD_SELF_SOCKET_PATH, frame};
 use peios::security::{Sid, SidRef};
 
 use crate::audit;
@@ -331,7 +331,7 @@ fn read_request(stream: &UnixStream, buffer: &mut Vec<u8>) -> io::Result<Option<
         } else {
             let total = match frame::decode_header(&lps::SELF_REQUEST_FRAMING, buffer) {
                 Ok((_, total)) => total,
-                Err(libauthd::WireError::TooLong) => {
+                Err(auth_core::WireError::TooLong) => {
                     let reply = failed(
                         Failure::Invalid,
                         "The request is larger than this socket reads.",
@@ -370,7 +370,7 @@ fn read_request(stream: &UnixStream, buffer: &mut Vec<u8>) -> io::Result<Option<
     }
 }
 
-fn failed(failure: Failure, reason: &str) -> Result<Vec<u8>, libauthd::WireError> {
+fn failed(failure: Failure, reason: &str) -> Result<Vec<u8>, auth_core::WireError> {
     lps::encode_failed(&Failed {
         failure,
         reason: reason.to_string(),
@@ -409,7 +409,7 @@ pub fn answer(
     })
 }
 
-fn show(store: &Store, peer: &SidRef) -> Result<Vec<u8>, libauthd::WireError> {
+fn show(store: &Store, peer: &SidRef) -> Result<Vec<u8>, auth_core::WireError> {
     let Some(own) = store.own_account(peer) else {
         return failed(Failure::NotFound, NOT_HELD);
     };
@@ -441,7 +441,7 @@ fn set_display_name(
     peer: &SidRef,
     display_name: &str,
     save: &mut dyn FnMut(&Store) -> Result<(), StoreError>,
-) -> Result<Vec<u8>, libauthd::WireError> {
+) -> Result<Vec<u8>, auth_core::WireError> {
     // `lpsd.account.modified`, the principal both subject and object: only
     // their own account can be named here.
     let record = |account: Option<&SidRef>, failed: Option<&str>| {
@@ -501,7 +501,7 @@ fn set_display_name(
 mod tests {
     use super::*;
     use crate::store::NewPrincipal;
-    use libauthd::transport::{recv_message, send_message};
+    use auth_core::transport::{recv_message, send_message};
 
     fn store_with(names: &[&str]) -> Store {
         let mut store = Store::provision().expect("provisions");
@@ -536,7 +536,7 @@ mod tests {
         assert_eq!(account.display_name, "Alice Liddell");
         assert_eq!(account.sid, alice.as_ref().as_bytes());
         assert!(account.has_password && account.enabled);
-        assert_eq!(account.policy, libauthd::credential::Policy::Password);
+        assert_eq!(account.policy, auth_core::credential::Policy::Password);
         assert!(account.keys.is_empty());
     }
 

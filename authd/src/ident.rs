@@ -37,8 +37,8 @@ use std::os::unix::net::UnixStream;
 use std::sync::Arc;
 use std::time::Duration;
 
-use libauthd::ident::{self, Kind, Outcome};
-use libauthd::transport::{recv_message, send_message};
+use auth_core::ident::{self, Kind, Outcome};
+use auth_core::transport::{recv_message, send_message};
 
 use crate::log;
 use crate::resolve;
@@ -78,7 +78,7 @@ pub fn serve(registry: Arc<Registry>, stream: UnixStream) {
     }
 
     for _ in 0..MAX_REQUESTS_PER_CONNECTION {
-        let received = match recv_message(&libauthd::wire::FRAMING, &stream) {
+        let received = match recv_message(&auth_core::wire::FRAMING, &stream) {
             Ok(received) => received,
             // The ordinary end of a connection, and an idle one timing out.
             // Neither is worth a line in a log that a name resolver will
@@ -232,7 +232,7 @@ fn encode_enumerate_refusal(tag: u32, outcome: Outcome) -> io::Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use libauthd::ident::Fields;
+    use auth_core::ident::Fields;
     use std::thread;
 
     fn client() -> (UnixStream, thread::JoinHandle<()>) {
@@ -245,7 +245,7 @@ mod tests {
     fn round_trip(request: &[u8]) -> Vec<u8> {
         let (stream, handle) = client();
         send_message(&stream, request).expect("must send");
-        let reply = recv_message(&libauthd::wire::FRAMING, &stream).expect("must reply");
+        let reply = recv_message(&auth_core::wire::FRAMING, &stream).expect("must reply");
         let bytes = reply.expose().to_vec();
         drop(stream);
         let _ = handle.join();
@@ -288,7 +288,7 @@ mod tests {
             assert_eq!(record.kind_found, Kind::Group);
             assert_eq!(
                 record.value(Fields::UNIX_ID),
-                Some(&libauthd::ident::Value::UnixId(100))
+                Some(&auth_core::ident::Value::UnixId(100))
             );
         }
     }
@@ -309,7 +309,7 @@ mod tests {
         assert!(record.value(Fields::UNIX_ID).is_none());
         assert_eq!(
             record.reason(Fields::UNIX_ID),
-            Some(libauthd::ident::WithheldReason::Absent)
+            Some(auth_core::ident::WithheldReason::Absent)
         );
     }
 
@@ -369,7 +369,7 @@ mod tests {
             })
             .unwrap();
             send_message(&stream, &request).expect("must send");
-            let reply = recv_message(&libauthd::wire::FRAMING, &stream).expect("must reply");
+            let reply = recv_message(&auth_core::wire::FRAMING, &stream).expect("must reply");
             let reply = ident::decode_lookup_reply(reply.expose()).unwrap();
             assert_eq!(reply.tag, tag);
         }
@@ -381,21 +381,21 @@ mod tests {
     #[test]
     fn a_logon_message_is_not_served_here() {
         let (stream, handle) = client();
-        let start = libauthd::wire::encode_logon_start(&libauthd::wire::LogonStart {
+        let start = auth_core::wire::encode_logon_start(&auth_core::wire::LogonStart {
             required_credential_type: None,
             ssh_binding: None,
 
-            logon_type: libauthd::wire::LogonType::Interactive,
-            identifier_type: libauthd::wire::IdentifierType::Username,
+            logon_type: auth_core::wire::LogonType::Interactive,
+            identifier_type: auth_core::wire::IdentifierType::Username,
             identifier: b"jack".to_vec(),
             tty: None,
             remote_host: None,
-            supported_credential_types: vec![libauthd::wire::CredentialType::Password],
+            supported_credential_types: vec![auth_core::wire::CredentialType::Password],
         })
         .unwrap();
         send_message(&stream, &start).expect("must send");
         assert!(
-            recv_message(&libauthd::wire::FRAMING, &stream).is_err(),
+            recv_message(&auth_core::wire::FRAMING, &stream).is_err(),
             "a LogonStart on the identity socket must close the connection"
         );
         drop(stream);

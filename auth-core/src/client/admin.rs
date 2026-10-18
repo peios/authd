@@ -10,10 +10,10 @@ use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use libauthd::credential::Policy;
-use libauthd::lps::{self, Failure};
-use libauthd::transport::{recv_message, send_message};
-use libauthd::{LPSD_ADMIN_SOCKET_PATH, Secret, WireError};
+use crate::credential::Policy;
+use crate::lps::{self, Failure};
+use crate::transport::{recv_message, send_message};
+use crate::{LPSD_ADMIN_SOCKET_PATH, Secret, WireError};
 
 /// How long lpsd is given to answer.
 ///
@@ -227,7 +227,7 @@ impl Admin {
         self.done(lps::encode_group_delete(&named(name)))
     }
 
-    pub fn set_claim(&self, name: &str, claim: libauthd::Claim) -> Result<(), Refusal> {
+    pub fn set_claim(&self, name: &str, claim: crate::Claim) -> Result<(), Refusal> {
         self.done(lps::encode_set_claim(&lps::SetClaim { name: name.into(), claim }))
     }
 
@@ -282,7 +282,7 @@ mod tests {
     /// `answer` of what it was sent.
     fn stand_in(answer: impl Fn(&[u8]) -> Vec<u8> + Send + 'static) -> (Admin, PathBuf) {
         static NEXT: AtomicU32 = AtomicU32::new(0);
-        let dir = std::env::temp_dir().join(format!("libauthd-client-{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)));
+        let dir = std::env::temp_dir().join(format!("auth-core/client-{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("admin.sock");
         let listener = UnixListener::bind(&path).unwrap();

@@ -37,9 +37,9 @@ mod interactive;
 
 use std::process::ExitCode;
 
-use libauthd::claim::{self, Claim, Values};
-use libauthd::lps::{self, Failure};
-use libauthd_client::admin::{Admin, Refusal};
+use auth_core::claim::{self, Claim, Values};
+use auth_core::lps::{self, Failure};
+use auth_core::client::admin::{Admin, Refusal};
 
 const USAGE: &str = "\
 usage: lps <command> [arguments]
@@ -459,7 +459,7 @@ fn value_for<'a>(option: &str, tail: &'a [&'a str]) -> Result<(&'a str, &'a [&'a
 }
 
 /// Send a request whose only successful answer is "done".
-fn simple(message: Result<Vec<u8>, libauthd::WireError>, done: &str) -> Result<(), Failed> {
+fn simple(message: Result<Vec<u8>, auth_core::WireError>, done: &str) -> Result<(), Failed> {
     Admin::new().done(message)?;
     println!("{done}");
     Ok(())
@@ -564,7 +564,7 @@ mod tests {
 
     #[test]
     fn logon_types_parse_from_their_words() {
-        use libauthd::wire::LogonType;
+        use auth_core::wire::LogonType;
         assert_eq!(parse_logon_types(&["default"]).unwrap(), lps::LogonTypes::UNSTATED);
         assert_eq!(
             parse_logon_types(&["network", "batch"]).unwrap(),

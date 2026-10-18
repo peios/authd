@@ -20,10 +20,10 @@ use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use libauthd::IDENT_SOCKET_PATH;
-use libauthd::ident::{self, Enumerate, EnumerateReply, Fields, Key, Kind, Lookup, Outcome, Record};
-use libauthd::transport::{recv_message, send_message};
-use libauthd::wire::FRAMING;
+use crate::IDENT_SOCKET_PATH;
+use crate::ident::{self, Enumerate, EnumerateReply, Fields, Key, Kind, Lookup, Outcome, Record};
+use crate::transport::{recv_message, send_message};
+use crate::wire::FRAMING;
 
 /// How long authd is given to answer each request, unless the caller says.
 const TIMEOUT: Duration = Duration::from_secs(5);
@@ -97,7 +97,7 @@ impl Session {
         tag
     }
 
-    fn ask(&mut self, request: Result<Vec<u8>, libauthd::WireError>) -> Result<Vec<u8>, Failure> {
+    fn ask(&mut self, request: Result<Vec<u8>, crate::WireError>) -> Result<Vec<u8>, Failure> {
         let request = request.map_err(|error| Failure::Unreadable(format!("the question could not be encoded: {error:?}")))?;
         send_message(&self.stream, &request).map_err(Failure::Unsent)?;
         let received = recv_message(&FRAMING, &self.stream).map_err(Failure::Unanswered)?;
@@ -224,7 +224,7 @@ impl Ident {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use libauthd::ident::{EnumerateReply, LookupReply, Value};
+    use crate::ident::{EnumerateReply, LookupReply, Value};
     use std::os::unix::net::UnixListener;
     use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -232,7 +232,7 @@ mod tests {
     /// connection with `answer` of it.
     fn stand_in(answer: impl Fn(&[u8]) -> Vec<u8> + Send + Sync + 'static) -> (Ident, PathBuf) {
         static NEXT: AtomicU32 = AtomicU32::new(0);
-        let dir = std::env::temp_dir().join(format!("libauthd-client-ident-{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)));
+        let dir = std::env::temp_dir().join(format!("auth-core/client-ident-{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("ident.sock");
         let listener = UnixListener::bind(&path).unwrap();

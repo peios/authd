@@ -23,9 +23,9 @@ use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use libauthd::LOGON_SOCKET_PATH;
-use libauthd::transport::{recv_message, send_message};
-use libauthd::wire::{
+use crate::LOGON_SOCKET_PATH;
+use crate::transport::{recv_message, send_message};
+use crate::wire::{
     self, Denial, FRAMING, MSG_ACCESS_DENIED, MSG_SESSION_END_ALLOWED, MSG_SESSION_ENDED,
     SessionEnd, SessionEndQuery,
 };
@@ -212,7 +212,7 @@ impl Logon {
     /// Send one request on a connection of its own and read the answer. A
     /// denial comes back as [`Refusal::Declined`]; anything else is the
     /// caller's to read.
-    fn ask(&self, request: Result<Vec<u8>, libauthd::WireError>) -> Result<Answer, Refusal> {
+    fn ask(&self, request: Result<Vec<u8>, crate::WireError>) -> Result<Answer, Refusal> {
         let request = request.map_err(|error| {
             Refusal::Unreadable(format!("the request could not be encoded: {error:?}"))
         })?;
@@ -256,7 +256,7 @@ struct Answer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use libauthd::wire::{
+    use crate::wire::{
         AccessDenied, MSG_SESSION_END, MSG_SESSION_END_QUERY, SessionEndAllowed, SessionEnded,
     };
     use std::os::unix::net::UnixListener;
@@ -271,7 +271,7 @@ mod tests {
     ) -> (Logon, PathBuf, mpsc::Receiver<(u16, u64)>) {
         static NEXT: AtomicU32 = AtomicU32::new(0);
         let dir = std::env::temp_dir().join(format!(
-            "libauthd-client-logon-{}-{}",
+            "auth-core/client-logon-{}-{}",
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
@@ -421,7 +421,7 @@ mod tests {
     #[test]
     fn a_connection_closed_without_an_answer_is_unanswered() {
         let dir = std::env::temp_dir().join(format!(
-            "libauthd-client-logon-silent-{}",
+            "auth-core/client-logon-silent-{}",
             std::process::id()
         ));
         std::fs::create_dir_all(&dir).unwrap();

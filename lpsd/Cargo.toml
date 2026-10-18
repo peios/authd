@@ -15,7 +15,7 @@ path = "src/main.rs"
 # because it can mint; lpsd is guarded because compromising it hands over the
 # thing an offline attack is run against.
 [dependencies]
-libauthd = { path = "../libauthd" }
+auth-core = { path = "../auth-core" }
 peios = { git = "https://github.com/peios/peios-rs.git", rev = "f8c84930f2b71763bcf0550df0b1420a0f63b21e" }
 # The password verifier. This is the one dependency lpsd exists to have: a
 # memory-hard KDF is not something to own outright, because the value is in the
@@ -28,7 +28,7 @@ peios = { git = "https://github.com/peios/peios-rs.git", rev = "f8c84930f2b71763
 # object. What is left is the KDF.
 argon2 = { version = "0.5", default-features = false, features = ["alloc"] }
 # `getrandom(2)`, for domain SIDs and salts. Bindings to one syscall, not
-# logic — the same exception libauthd carves out for its transport. std has no
+# logic — the same exception auth-core carves out for its transport. std has no
 # equivalent, and the alternative (`/dev/urandom`) cannot promise the CRNG was
 # seeded, which is exactly the promise first-boot provisioning needs.
 libc = "0.2"

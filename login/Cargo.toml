@@ -11,11 +11,11 @@ name = "login"
 path = "src/main.rs"
 
 [dependencies]
-libsession = { path = "../libsession" }
-libauthd = { path = "../libauthd" }
+session-preferences = { path = "../session-preferences" }
+auth-core = { path = "../auth-core" }
 libc = "0.2"
 # Terminal input, shared with `lps`: both must take a password from a terminal
 # without echoing it, and the termios guard that restores echo afterwards is
 # exactly the sort of thing that should exist once.
-libtty = { path = "../libtty" }
+terminal-input = { path = "../terminal-input" }
 peios = { git = "https://github.com/peios/peios-rs.git", rev = "f8c84930f2b71763bcf0550df0b1420a0f63b21e" }

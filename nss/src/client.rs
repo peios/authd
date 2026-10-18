@@ -28,18 +28,18 @@
 //! `TryAgain`, never `NotFound`. A source that could have answered did not, and
 //! recording that as "no such user" would let an outage be remembered as a fact.
 //!
-//! # The client is libauthd-client's
+//! # The client is auth-core/client's
 //!
 //! Speaking the socket — connecting, the question, the answer, matching one
-//! to the other — is libauthd-client's [`Session`], which every program
+//! to the other — is auth-core/client's [`Session`], which every program
 //! asking authd shares. What is here is the mapping above: its [`Failure`]
 //! said in the terms an NSS entry point answers in.
 
 use std::io;
 use std::time::Duration;
 
-use libauthd::ident::{self, Fields, Kind, Record};
-use libauthd_client::ident::{Failure, Ident, Session};
+use auth_core::ident::{self, Fields, Kind, Record};
+use auth_core::client::ident::{Failure, Ident, Session};
 
 /// How long the authority has to answer before the caller is told to try again.
 ///
@@ -131,7 +131,7 @@ impl Client {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use libauthd::ident::Outcome;
+    use auth_core::ident::Outcome;
 
     /// The mapping this module exists for: a timeout or a source that did
     /// not answer is worth trying again; nothing else is, and none of it is

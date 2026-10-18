@@ -48,15 +48,15 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
 use std::time::Duration;
 
-use libauthd::lps::{self, Failed, Failure};
-use libauthd::transport::{recv_message, send_message};
-use libauthd::{LPSD_ADMIN_SOCKET_PATH, LPSD_RUN_DIR};
+use auth_core::lps::{self, Failed, Failure};
+use auth_core::transport::{recv_message, send_message};
+use auth_core::{LPSD_ADMIN_SOCKET_PATH, LPSD_RUN_DIR};
 use peios::security::{GroupAttributes, Sid, SidRef, WellKnown};
 use peios::token::Token;
 
 use crate::audit;
 use crate::log;
-use libauthd::psi;
+use auth_core::psi;
 
 use crate::store::{self, NewPrincipal, Store, StoreError};
 
@@ -832,12 +832,12 @@ fn changed_flag(changed: bool) -> Changed {
 }
 
 /// A malformed request is the client's fault, so it reads as `Invalid`.
-fn request<T>(result: Result<T, libauthd::WireError>) -> Result<T, Refused> {
+fn request<T>(result: Result<T, auth_core::WireError>) -> Result<T, Refused> {
     result.map_err(|_| Refused::Store(StoreError::Invalid("malformed request".into())))
 }
 
 /// A reply that will not encode is the daemon's fault, so it reads as internal.
-fn encoded(result: Result<Vec<u8>, libauthd::WireError>) -> Result<Vec<u8>, Refused> {
+fn encoded(result: Result<Vec<u8>, auth_core::WireError>) -> Result<Vec<u8>, Refused> {
     result.map_err(|_| Refused::Encode)
 }
 
@@ -1031,7 +1031,7 @@ mod tests {
         assert_eq!(detail.permitted_logon_types, lps::LogonTypes::DEFAULT);
         assert_eq!(
             detail.credential_policy,
-            Some(libauthd::credential::Policy::NoCredential)
+            Some(auth_core::credential::Policy::NoCredential)
         );
     }
 

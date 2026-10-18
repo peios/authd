@@ -13,8 +13,8 @@ Closest prior art is Windows' LSA.
 | `lps` | `/usr/bin/lps` | Administers `lpsd`'s store over `/run/lpsd/admin.sock`. A client with no state and no privilege of its own. |
 | `login` | `/usr/bin/login` | A PGSS Logon client. Collects a credential, receives a token, installs it, execs a shell. |
 | `nss` | `/usr/lib/x86_64-linux-peios/libnss_peios.so.2` | The NSS client through which POSIX programs resolve Peios principals. |
-| `libauthd` | — | The wire formats: PGSS Logon, PSI, and LPS. |
-| `libtty` | — | Terminal handling for credential collection. |
+| `auth-core` | — | The wire formats: PGSS Logon, PSI, and LPS. |
+| `terminal-input` | — | Terminal handling for credential collection. |
 
 ## The shape
 
@@ -31,6 +31,15 @@ Three ideas carry most of the design.
 - **PGSS Logon** (PSD-012) — the standard a Peios authority must speak. `/run/logon.sock`.
 - **PSI** (PSD-013) — how principal sources federate identity to the authority. Not a conformance requirement; specified so third parties can write sources. `/run/psi.sock`.
 - **LPS** — `lpsd`'s administrative protocol, spoken by `lps` and Principals Manager. `/run/lpsd/admin.sock`. Its framing also carries the self socket, `/run/lpsd/self.sock`, on which any principal reads their own account and sets their display name (PSPU §10.11).
+
+## Rust crate layout
+
+Rust-only libraries use descriptive crate names. The protocol and client
+crates are combined as `auth-core`; application client helpers require its
+`client` feature. Policy evaluation lives in `auth-policy`, terminal helpers
+in `terminal-input`, and locale preferences in `session-preferences`.
+Consumers adopting this revision must update their dependency names and
+imports. Independently pinned revisions retain their existing names.
 
 ## Building
 

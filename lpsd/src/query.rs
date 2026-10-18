@@ -24,8 +24,8 @@
 //! failure PSPU §2.16 permits a source precisely because most sources cannot
 //! avoid it.
 
-use libauthd::ident::{Fields, Kind, Outcome, Reference, Value, Withheld, WithheldReason};
-use libauthd::psi;
+use auth_core::ident::{Fields, Kind, Outcome, Reference, Value, Withheld, WithheldReason};
+use auth_core::psi;
 use peios::security::SidRef;
 
 use crate::log;

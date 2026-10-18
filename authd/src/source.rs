@@ -43,9 +43,9 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::Duration;
 
-use libauthd::psi;
-use libauthd::transport::send_message;
-use libauthd::wire::{
+use auth_core::psi;
+use auth_core::transport::send_message;
+use auth_core::wire::{
     CredentialChangeStart, CredentialEnrollStart, CredentialRequest, CredentialResponse,
     LogonStart,
 };
@@ -940,7 +940,7 @@ fn register(stream: UnixStream, entry: &policy::SourceEntry) -> Option<Arc<Sourc
         return None;
     }
 
-    let received = match libauthd::transport::recv_message(&psi::FRAMING, &stream) {
+    let received = match auth_core::transport::recv_message(&psi::FRAMING, &stream) {
         Ok(received) => received,
         Err(error) => {
             log::warn(format_args!("psi: could not read a registration: {error}"));
@@ -1094,7 +1094,7 @@ pub fn pump_for_test(source: &Arc<Source>) {
 /// Read messages until the connection ends, handing each to its conversation.
 fn pump(source: &Arc<Source>) {
     loop {
-        let received = match libauthd::transport::recv_message(&psi::FRAMING, &source.stream) {
+        let received = match auth_core::transport::recv_message(&psi::FRAMING, &source.stream) {
             Ok(received) => received,
             Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => return,
             Err(error) => {
@@ -1293,7 +1293,7 @@ mod tests {
         let id = conversation.id;
         drop(conversation);
 
-        let received = libauthd::transport::recv_message(&psi::FRAMING, &peer).expect("recv");
+        let received = auth_core::transport::recv_message(&psi::FRAMING, &peer).expect("recv");
         let envelope = psi::decode_envelope(received.expose()).expect("envelope");
         assert_eq!(envelope.msg_type, psi::MSG_ABANDON);
         assert_eq!(envelope.conversation, id);
@@ -1311,7 +1311,7 @@ mod tests {
         peer.set_read_timeout(Some(Duration::from_millis(50)))
             .expect("timeout");
         assert!(
-            libauthd::transport::recv_message(&psi::FRAMING, &peer).is_err(),
+            auth_core::transport::recv_message(&psi::FRAMING, &peer).is_err(),
             "a finished conversation must send nothing on drop"
         );
     }
@@ -1336,23 +1336,23 @@ mod tests {
     fn ssh_binding_and_required_method_reach_the_source_unchanged() {
         let (source, peer) = pair();
         let conversation = source.open().unwrap();
-        let binding = libauthd::ssh::Binding {
+        let binding = auth_core::ssh::Binding {
             connection: [1; 16],
             session: vec![2; 64],
             username: "alice".into(),
         };
         let start = LogonStart {
-            logon_type: libauthd::wire::LogonType::RemoteInteractive,
-            identifier_type: libauthd::wire::IdentifierType::Username,
+            logon_type: auth_core::wire::LogonType::RemoteInteractive,
+            identifier_type: auth_core::wire::IdentifierType::Username,
             identifier: b"alice".to_vec(),
             tty: None,
             remote_host: Some("192.0.2.1".into()),
-            supported_credential_types: vec![libauthd::CredentialType::SshPublicKey],
-            required_credential_type: Some(libauthd::CredentialType::SshPublicKey),
+            supported_credential_types: vec![auth_core::CredentialType::SshPublicKey],
+            required_credential_type: Some(auth_core::CredentialType::SshPublicKey),
             ssh_binding: Some(binding.clone()),
         };
         conversation.authenticate(&start, &[1, 2, 3]).unwrap();
-        let message = libauthd::transport::recv_message(&psi::FRAMING, &peer).unwrap();
+        let message = auth_core::transport::recv_message(&psi::FRAMING, &peer).unwrap();
         let decoded = psi::decode_authenticate(message.expose()).unwrap();
         assert_eq!(decoded.start.ssh_binding, Some(binding));
         assert_eq!(

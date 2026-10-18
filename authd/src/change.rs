@@ -29,9 +29,9 @@ use std::os::unix::net::UnixStream;
 use std::sync::Arc;
 use std::time::Instant;
 
-use libauthd::psi::Capabilities;
-use libauthd::transport::send_message;
-use libauthd::wire::{
+use auth_core::psi::Capabilities;
+use auth_core::transport::send_message;
+use auth_core::wire::{
     CredentialChangeStart, CredentialChanged, CredentialEnrollStart, CredentialType, Denial,
     EnrollAction, encode_credential_changed,
 };
@@ -256,9 +256,9 @@ mod tests {
     use super::*;
     use crate::policy;
     use crate::source::pump_for_test;
-    use libauthd::psi;
-    use libauthd::transport::recv_message;
-    use libauthd::wire::{
+    use auth_core::psi;
+    use auth_core::transport::recv_message;
+    use auth_core::wire::{
         self, CredentialType, MSG_ACCESS_DENIED, MSG_CREDENTIAL_CHANGED, decode_access_denied,
         decode_header,
     };
@@ -358,7 +358,7 @@ mod tests {
             assert_eq!(envelope.msg_type, psi::MSG_CHANGE_CREDENTIAL);
             let change = psi::decode_change_credential(received.expose()).expect("decodes");
             let reply = psi::encode_credential_changed(envelope.conversation).expect("encodes");
-            libauthd::transport::send_message(&psi_end, &reply).expect("sends");
+            auth_core::transport::send_message(&psi_end, &reply).expect("sends");
             change.principal
         });
 
@@ -372,7 +372,7 @@ mod tests {
         );
 
         let (received, descriptor) =
-            libauthd::transport::recv_message_with_fd(&wire::FRAMING, &client).expect("terminal");
+            auth_core::transport::recv_message_with_fd(&wire::FRAMING, &client).expect("terminal");
         let (msg_type, _) = decode_header(received.expose()).expect("a header");
         assert_eq!(msg_type, MSG_CREDENTIAL_CHANGED);
         assert!(descriptor.is_none(), "a change must hand over no token");
@@ -398,7 +398,7 @@ mod tests {
                 },
             )
             .expect("encodes");
-            libauthd::transport::send_message(&psi_end, &reply).expect("sends");
+            auth_core::transport::send_message(&psi_end, &reply).expect("sends");
         });
 
         let (client, result) = serve_for(&registry, &sid("S-1-5-21-1-2-3-1000"));
@@ -424,7 +424,7 @@ mod tests {
                 },
             )
             .expect("encodes");
-            libauthd::transport::send_message(&psi_end, &reply).expect("sends");
+            auth_core::transport::send_message(&psi_end, &reply).expect("sends");
         });
 
         let (client, result) = serve_for(&registry, &sid("S-1-5-21-1-2-3-1000"));
@@ -449,7 +449,7 @@ mod tests {
                 },
             )
             .expect("encodes");
-            libauthd::transport::send_message(&psi_end, &reply).expect("sends");
+            auth_core::transport::send_message(&psi_end, &reply).expect("sends");
         });
 
         let (client, result) = serve_for(&registry, &sid("S-1-5-21-1-2-3-1000"));
@@ -545,9 +545,9 @@ mod tests {
             // The proof round, relayed to the client and back.
             let ask = psi::encode_credential_request(
                 envelope.conversation,
-                &libauthd::wire::CredentialRequest {
+                &auth_core::wire::CredentialRequest {
                     messages: Vec::new(),
-                    prompts: vec![libauthd::wire::Prompt {
+                    prompts: vec![auth_core::wire::Prompt {
                         parameters: Vec::new(),
                         credential_ref: 1,
                         credential_type: CredentialType::Password,
@@ -556,13 +556,13 @@ mod tests {
                 },
             )
             .expect("encodes");
-            libauthd::transport::send_message(&psi_end, &ask).expect("sends");
+            auth_core::transport::send_message(&psi_end, &ask).expect("sends");
             let answer = recv_message(&psi::FRAMING, &psi_end).expect("an answer");
             let response = psi::decode_credential_response(answer.expose()).expect("decodes");
             assert_eq!(response.answers[0].data.expose(), b"old");
 
             let reply = psi::encode_credential_changed(envelope.conversation).expect("encodes");
-            libauthd::transport::send_message(&psi_end, &reply).expect("sends");
+            auth_core::transport::send_message(&psi_end, &reply).expect("sends");
             enroll
         });
 
@@ -571,16 +571,16 @@ mod tests {
             let request = recv_message(&wire::FRAMING, &client).expect("the proof prompt");
             let (msg_type, _) = decode_header(request.expose()).expect("a header");
             assert_eq!(msg_type, wire::MSG_CREDENTIAL_REQUEST);
-            let response = wire::encode_credential_response(&libauthd::wire::CredentialResponse {
-                answers: vec![libauthd::wire::Answer {
+            let response = wire::encode_credential_response(&auth_core::wire::CredentialResponse {
+                answers: vec![auth_core::wire::Answer {
                     credential_ref: 1,
-                    data: libauthd::Secret::from_slice(b"old"),
+                    data: auth_core::Secret::from_slice(b"old"),
                 }],
             })
             .expect("encodes");
-            libauthd::transport::send_message(&client, response.expose()).expect("sends");
+            auth_core::transport::send_message(&client, response.expose()).expect("sends");
             let (terminal, descriptor) =
-                libauthd::transport::recv_message_with_fd(&wire::FRAMING, &client)
+                auth_core::transport::recv_message_with_fd(&wire::FRAMING, &client)
                     .expect("terminal");
             let (msg_type, _) = decode_header(terminal.expose()).expect("a header");
             (msg_type, descriptor.is_none())
@@ -612,7 +612,7 @@ mod tests {
                 },
             )
             .expect("encodes");
-            libauthd::transport::send_message(&psi_end, &reply).expect("sends");
+            auth_core::transport::send_message(&psi_end, &reply).expect("sends");
         });
         (registry, fake_source)
     }
