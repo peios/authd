@@ -1,0 +1,16 @@
+{
+    "format": 1,
+    "component": "authd",
+    "origin": {
+        "repository": "https://github.com/peios/integration-tests.git",
+        "commit": "a9aeaa2d6255bf59034ac5d90bee871a0d4829be"
+    },
+    "files": {
+        "tests/authd/events.test.lua": "tests/authd/events.test.lua",
+        "tests/authd/login-console-banner.test.lua": "tests/authd/login-console-banner.test.lua"
+    },
+    "tests": [
+        "tests/authd/events.test.lua",
+        "tests/authd/login-console-banner.test.lua"
+    ]
+}
