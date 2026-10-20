@@ -26,6 +26,21 @@ The name fields returned by this implementation use canonical bare names. Do
 not construct a realm-qualified name and assume it is accepted merely because
 a protocol field is named `qualified_name`.
 
+## Shadowed names
+
+Source order is explicit machine policy, not connection order. Lower
+`SearchOrder` values are consulted first; source names break ties. Changing
+that order can make the same bare name refer to a different SID.
+
+After a successful logon, authd can warn that a later source also owns the
+entered name. The check uses identity queries without credentials and does
+not alter the granted token. Its deadline is shared across the later sources;
+a source that cannot answer makes the check inconclusive. Absence of a
+warning is not proof that a name is unique.
+
+Investigate a warning by comparing the sources and SIDs. Do not remove an
+account merely because its name matches an account in another source.
+
 ## Preserve failure meaning
 
 A lookup can report that an identity does not exist, that a source could not
@@ -47,6 +62,13 @@ Some well-known groups describe a session rather than a stored membership
 list. An empty member listing does not mean no token can carry that group.
 Likewise, a group without a Unix group identifier cannot be represented as an
 ordinary numeric supplementary group.
+
+Recorded memberships can be enumerated when their source supports it.
+Groups such as `Everyone` and `Authenticated Users` are added by token
+derivation rather than stored as member lists. Groups such as `Interactive`
+and `Network` describe a logon, so the same account can carry different groups
+in two sessions. A static account-membership list cannot reconstruct every
+group on a running process's token.
 
 ## Native and libc clients
 

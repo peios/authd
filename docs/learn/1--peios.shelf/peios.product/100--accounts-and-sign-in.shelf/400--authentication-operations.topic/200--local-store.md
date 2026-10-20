@@ -25,6 +25,16 @@ the old SID or the access granted to it.
 Well-known group identities are defined separately. The store records
 memberships in them rather than inventing a local copy of their identity.
 
+Do not bake a provisioned store into an image intended to create independent
+machines. Copying the store copies its domain and account identities; giving
+the machines different hostnames does not change those SIDs.
+
+The stored Unix identifiers are relative. authd applies the source's
+configured numeric range when issuing tokens and answering lookups. `lps`
+displays the effective numbers. A dash in its UID column indicates that no
+usable source range was assigned; it is not evidence that the account lacks
+a SID.
+
 ## Credential material stays protected
 
 The store holds password verifiers rather than plaintext passwords, along with
@@ -38,6 +48,34 @@ identity and SYSTEM. Administrator membership alone has no direct grant.
 Do not widen the descriptor to make an account-management script work. Use the
 daemon's administrative interface, which checks the caller and keeps a single
 writer responsible for the store.
+
+The password verifiers use Argon2id and retain their cost parameters. A
+change to the parameters for newly set passwords does not rewrite existing
+verifiers. Privileges and integrity levels are absent from the store: those
+come from [machine policy](~peios/authentication-policy/granting-access).
+
+## Administrative requests
+
+`lps` reaches `/run/lpsd/admin.sock`; it never edits the file. The socket's
+descriptor and the daemon's peer-token check admit SYSTEM and enabled
+Administrators membership. A deny-only administrator group does not grant
+access. Making the Unix mode more permissive does not repair a KACS denial.
+
+Each connection carries one administrative request and its reply. The daemon
+checks the peer before reading a request and bounds reads and writes. For a
+refused connection, inspect the socket descriptor and the caller's token
+before changing either service configuration or account data.
+
+Use the identity interface for general account lookup and the [self-service
+interface](~peios/authentication-client/self-service) for the caller's own
+account. These do not require widening the administrative socket. The public
+`libauth` client does not expose local administrative operations; `lps` and
+the repository's administrative client implement that separate protocol.
+
+The [Local Principal Administration
+specification](~specifications/local-principal-administration/scope-and-roles)
+defines message formats. Event names and fields belong to `lpsd.evman`; a
+successful no-op is not evidence that a change event will be emitted.
 
 ## Replacement and failures
 

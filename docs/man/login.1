@@ -77,6 +77,26 @@ The traditional
 authentication bypass is deliberately unsupported.  Authentication decisions
 are made by the authority from the verified peer and cannot be asserted by a
 command-line flag.
+.SH ENVIRONMENT
+Without
+.BR \-p ,
+the client clears the inherited environment and sets HOME, SHELL, USER,
+LOGNAME, and PATH from the selected profile and account. PATH is /bin.
+TERM is preserved when set; otherwise it is chosen from the terminal device,
+using linux for a virtual console and vt220 for other terminals.
+Locale preferences are refreshed from session policy even with
+.BR \-p ;
+inherited LC_ALL, LANGUAGE, and locale-category overrides are removed first.
+.PP
+The shell is executed with a leading dash on its basename in argv[0].
+A missing or relative home falls back to /; a missing or relative shell
+falls back to /bin/sh. A home that cannot be entered is reported and the
+session starts in /.
+.SH EXIT STATUS
+The client exits with status 1 for an argument error, denied or failed logon,
+or failure to execute the shell. A successful execution replaces the client,
+so its eventual exit status belongs to the shell.
+
 .SH SEE ALSO
 .BR authd (8),
 .BR lps (1),

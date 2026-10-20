@@ -40,6 +40,28 @@ requests they cannot handle. Passwords must not be echoed. Secure Shell
 (SSH) credentials retain the binding to the authorized originator's live
 transport.
 
+The supported credential list describes what the client can collect. It does
+not force the source to request a password. An empty list permits only a
+conversation that needs no collection; it does not bypass account policy.
+
+The authority reads the connected caller's token from the kernel. A proposed
+logon type is checked against that caller's originator policy. Fields such as
+the remote host remain claims supplied by the client, not independently
+verified identity.
+
+Credential verification establishes identity. Token derivation combines that
+identity with this machine's grants. A source does not send a finished token
+or choose the machine's privilege set and integrity level.
+
+An unknown account and an incorrect credential share the authentication
+failure response. The local source performs a decoy password verification for
+unknown accounts instead of taking a cheap early-return path. This does not
+make account existence secret: the separate identity interface can report
+that a principal does not exist. For diagnosis, compare the authority and
+source [authentication
+events](~peios/authentication-operations/audit-events), without recording
+credential values.
+
 ## Tokens and sessions
 
 Successful logon returns a token descriptor, session ID, and profile. The

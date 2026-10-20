@@ -127,6 +127,44 @@ octet.
 .TP
 .BI claim\ remove " name claim"
 Remove a claim.
+.SH INPUT AND NAMES
+Group arguments accept a well-known name, a qualified built-in name, a local
+group name, or a literal SID. Names are matched without case by lpsd;
+well-known names take precedence over local group names.
+.PP
+Interactive account creation asks for omitted fields and sends no request
+until confirmation. Supplied options skip their corresponding questions.
+.B \-\-no-prompt
+refuses missing required input. Without a terminal, password input is one
+line rather than an echoed command-line argument.
+.PP
+A local account defaults to /home/name and /bin/sh, with Authenticated Users
+as its primary group. No per-user group is created. Home and shell profile
+paths must be absolute; recording a new home path does not move files.
+.PP
+The UID and GID displays use the source's effective numeric range. A dash
+means no usable numeric range was assigned, not that the principal has no SID.
+A local group member count counts only principals held by this store.
+.PP
+Claim names are matched without case. A claim can contain multiple values
+or zero values; an empty claim differs from an absent claim. Boolean values
+accept true, yes, or 1, and false, no, or 0. Octet values contain pairs of
+ASCII hexadecimal digits. Changed claims affect newly issued tokens.
+
+.SH EXIT STATUS
+.TP
+.B 0
+The command completed successfully.
+.TP
+.B 1
+The request failed, was refused, or could not reach the daemon.
+.TP
+.B 2
+The command arguments or input were invalid.
+.PP
+A transport failure after submission does not prove that a change was not
+saved. Read back inspectable state before retrying a mutation.
+
 .SH SECURITY
 .B \-\-no-password
 creates a principal that authenticates with no credential.  It is intended for

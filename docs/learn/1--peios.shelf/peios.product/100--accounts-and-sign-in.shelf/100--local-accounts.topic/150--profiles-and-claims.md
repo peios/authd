@@ -47,6 +47,10 @@ The claim has an effect only where an access rule evaluates it. A string named
 `Administrator` does not grant administrator membership or a privilege by
 itself.
 
+Claim names are matched without case. Setting `department` replaces an
+existing `Department` claim. A claim with no values remains present and is
+different from removing the claim; access rules can distinguish the states.
+
 Claims are copied into a token when it is issued. Changing a stored claim does
 not change tokens that already exist. Test the intended access rule with a
 fresh session after a claim change.

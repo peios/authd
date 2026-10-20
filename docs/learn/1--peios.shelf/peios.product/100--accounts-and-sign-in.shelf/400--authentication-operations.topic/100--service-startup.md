@@ -50,6 +50,26 @@ service identity and SYSTEM, not to every administrator.
 `RequiredPrivileges` narrows the service token. It does not manufacture a
 privilege that machine policy did not grant in the first place.
 
+## Readiness is not a security-state handoff
+
+The authority does not connect to a directory to fetch credentials. Sources
+connect to it and verify credentials; local registry policy determines the
+grants on the resulting tokens. A source's asserted identity is constrained
+by its registration, including its domain and permitted foreign memberships.
+A source trusted to assert an administrator membership can affect local grants
+through that membership. Process separation does not make a compromised
+source harmless.
+
+The client receives a token and profile and starts its own session. authd does
+not launch its shell or set up its terminal. Service attestation is a distinct
+request made by the service manager.
+
+Restarting authd interrupts new conversations but does not replace tokens
+already held by processes. Kernel sessions survive while their token
+references remain. Authority readiness does not certify that every source
+has registered or that central access policies have been loaded: authd does
+not distribute those policies.
+
 ## Inspect before restarting
 
 Use service status and diagnostic output to distinguish an authority startup

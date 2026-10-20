@@ -45,7 +45,7 @@ qualification are separate release steps.
 ## Documentation
 
 Read the component guides in
-[Accounts and Sign In](docs/learn/peios.product/100--accounts-and-sign-in.shelf).
+[Accounts and Sign In](docs/learn/1--peios.shelf/peios.product/100--accounts-and-sign-in.shelf).
 They cover local accounts, credentials, terminal sign-in, policy, service
 operation, and client development.
 

@@ -75,6 +75,12 @@ account, `LocalSystem`, and administrators. The descriptor blocks inherited
 grants from widening that access. The parent directory must already exist;
 authd creates the missing leaf, not a parent tree.
 
+The shipped authd service retains `SeRestorePrivilege` to assign the new
+home's owner and group. Removing it from the service's `RequiredPrivileges`
+can leave a new directory inaccessible to its intended owner. Inspect the
+authority's diagnostics and repair the descriptor deliberately; retrying a
+sign-in does not take over an existing directory.
+
 An existing directory is left alone. Changing the recorded home does not move
 files or repair its ownership. If home preparation fails, the logon can still
 succeed; `login` reports an inaccessible home and starts in `/`.
@@ -84,6 +90,12 @@ succeed; `login` reports an inaccessible home and starts in `/`.
 On a machine with no store, `lpsd` creates an empty store and a machine
 domain. It does not invent an administrator or a password. An image must
 provide an authorized first-account setup route.
+
+An installed image can use [first-boot
+setup](~peios/first-boot/completing-setup). A custom image must enable that
+service or provide another authorized provisioning route. A service that
+uses `lps` to provision an account starts after lpsd is ready; an early boot
+script running before the services cannot use its socket.
 
 The optional `dev.peios.authd-live-account` package supplies a development
 bootstrap. Its credential-free administrator is a deliberate image policy

@@ -41,6 +41,12 @@ A managed console can select an account before presenting a prompt:
 - **`--try-no-password`:** an attempt that offers no credential collection;
   an account needing credentials falls back to the ordinary prompt.
 
+A fallback is explained if the attempt already displayed a credential prompt
+or message. If nothing was displayed, the client moves directly to the
+account prompt. An unavailable authority or a caller that cannot originate
+the logon ends the attempt: asking for another account would not repair that
+failure.
+
 The preliminary account lookup uses read and write timeouts. If the client
 cannot set those timeouts, it treats the lookup as unavailable and continues
 without claiming that the account exists or is absent.
@@ -52,6 +58,24 @@ supported.
 Credential-free automatic sign-in requires an account whose credential policy
 permits it. Its use is not restricted to one console by the account policy
 alone. Keep such accounts limited to deliberate development or live image use.
+
+## Managed console services
+
+The shipped console seed defines the primary `login-console` service and
+additional prompts on `tty1`, `tty2`, and `tty3` when those devices exist.
+Images choose whether to apply that seed. The primary console's precedence
+prevents a second prompt taking the same terminal; first-boot setup takes
+precedence over ordinary prompts.
+
+Peinit fixes `/dev/console` to its selected terminal when loading the service
+configuration. Switching virtual consoles does not move that service or lock
+the session left behind. Its [terminal ownership and exit
+rules](~peios/services-and-jobs/execution-environment#system-console-aliases-and-logout)
+control cleanup and the next prompt.
+
+System Settings changes the selected account through the console service's
+arguments. The next service start uses the changed arguments; it does not
+replace an already running session or change the account's credential policy.
 
 ## Session preferences
 
@@ -67,6 +91,12 @@ sessions, not programs that already inherited an environment.
 The managed `--console` mode also prepares terminal input and waits for
 first-boot setup to finish before accepting credentials. Browser-address
 information is optional; its absence does not prevent terminal sign-in.
+
+The browser banner is printed once per invocation. It contains configured
+addresses and the machine's certificate fingerprint, not a health check of
+the browser service. A reachable address still needs the certificate check
+described in [Signing in from a
+Browser](~peios/signing-in-from-a-browser/open-the-desktop).
 
 For all flags and environment details, read `login(1)`. For failures, use
 [Diagnosing Authentication](~peios/authentication-operations/diagnosing).

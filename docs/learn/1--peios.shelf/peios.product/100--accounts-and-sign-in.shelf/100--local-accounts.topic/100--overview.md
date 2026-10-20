@@ -62,3 +62,9 @@ For retiring an account, distinguish stopping further sign-ins from ending
 existing work. Follow [Retiring an
 Account](~peios/local-accounts/retiring-an-account), and keep a working
 administrator session while changing access.
+
+For desktop administration, use [Principals
+Manager](~peios/security-tools/principals-manager). Personal display names,
+passwords, and keys are covered by [My
+Settings](~peios/security-tools/my-settings). Those interfaces preserve the
+same distinction between identity, credentials, and machine grants.
