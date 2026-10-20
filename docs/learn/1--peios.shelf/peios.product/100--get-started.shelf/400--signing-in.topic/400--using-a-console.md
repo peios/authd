@@ -1,5 +1,5 @@
 ---
-title: Using a Console
+title: Signing in at a Console
 type: how-to
 description: Sign in through the terminal client and understand its fallback behavior.
 related:
