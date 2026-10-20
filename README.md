@@ -45,7 +45,10 @@ qualification are separate release steps.
 ## Documentation
 
 Read the component guides in
-[Accounts and Sign In](docs/learn/1--peios.shelf/peios.product/100--accounts-and-sign-in.shelf).
+[Accounts and Authentication](docs/learn/1--peios.shelf/peios.product/200--using-peios.antho/300--accounts.shelf),
+[Signing In](docs/learn/1--peios.shelf/peios.product/100--get-started.shelf/400--signing-in.topic),
+and
+[Authentication Clients](docs/learn/1--peios.shelf/peios.product/300--developing-for-peios.antho/200--platform-apis.shelf/200--authentication-client.topic).
 They cover local accounts, credentials, terminal sign-in, policy, service
 operation, and client development.
 
