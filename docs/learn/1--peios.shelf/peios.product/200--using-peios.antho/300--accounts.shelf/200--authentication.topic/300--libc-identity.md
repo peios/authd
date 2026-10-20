@@ -3,7 +3,7 @@ title: POSIX Account Lookup
 type: concept
 description: How the authd NSS module presents Peios identities to POSIX account APIs.
 related:
-  - peios/authentication-policy/resolving-names
+  - peios/authentication/resolving-names
   - peios/authentication-client/reading-identities
 ---
 
@@ -53,7 +53,7 @@ module.
 
 Peios' libc package fixes account lookup to this provider. Adding another
 identity source is an [authority registration
-operation](~peios/authentication-policy/registering-a-source), not an
+operation](~peios/authentication/registering-a-source), not an
 `nsswitch.conf` entry that bypasses the authority's search order.
 The package's libc integration and the authd module are both required.
 Installing the module on another Linux system does not change that system's

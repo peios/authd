@@ -4,7 +4,7 @@ type: concept
 description: How lpsd preserves account identities and handles missing or unreadable state.
 related:
   - peios/local-accounts/retiring-an-account
-  - peios/authentication-operations/diagnosing
+  - peios/authentication/diagnosing
 ---
 
 `lpsd` keeps local identities in `/var/state/lpsd/principals`. The store
@@ -52,7 +52,7 @@ writer responsible for the store.
 The password verifiers use Argon2id and retain their cost parameters. A
 change to the parameters for newly set passwords does not rewrite existing
 verifiers. Privileges and integrity levels are absent from the store: those
-come from [machine policy](~peios/authentication-policy/granting-access).
+come from [machine policy](~peios/authentication/granting-access).
 
 ## Administrative requests
 

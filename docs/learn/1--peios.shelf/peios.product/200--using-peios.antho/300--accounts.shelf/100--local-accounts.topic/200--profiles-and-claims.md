@@ -4,7 +4,7 @@ type: concept
 description: How account profile preferences differ from security claims on issued tokens.
 related:
   - peios/local-accounts/creating-an-account
-  - peios/authentication-policy/granting-access
+  - peios/authentication/granting-access
 ---
 
 A profile tells a client how to start a session. Claims describe account
@@ -61,4 +61,4 @@ account.
 
 The complete claim types and command syntax belong to `lps(1)`. The machine's
 privilege grants are described separately in [Granting
-Access](~peios/authentication-policy/granting-access).
+Access](~peios/authentication/granting-access).

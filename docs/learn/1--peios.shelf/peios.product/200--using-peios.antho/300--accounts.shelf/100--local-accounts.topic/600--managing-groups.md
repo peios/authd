@@ -4,7 +4,7 @@ type: how-to
 description: Create a local group and change membership while preserving stable identities.
 related:
   - peios/local-accounts/profiles-and-claims
-  - peios/authentication-policy/granting-access
+  - peios/authentication/granting-access
 ---
 
 Use a local group when several accounts need the same access. The group has

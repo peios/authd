@@ -4,7 +4,7 @@ type: concept
 description: How authd resolves account names and preserves unavailable results.
 related:
   - peios/authentication-client/reading-identities
-  - peios/authentication-policy/registering-a-source
+  - peios/authentication/registering-a-source
 ---
 
 `authd` resolves names, security identifiers (SIDs), and Unix identifiers

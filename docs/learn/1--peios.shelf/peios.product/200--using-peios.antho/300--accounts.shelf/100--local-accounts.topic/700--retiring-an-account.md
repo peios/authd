@@ -3,8 +3,8 @@ title: Retiring an Account
 type: how-to
 description: Stop further sign-ins, handle active sessions, and decide whether to delete an account.
 related:
-  - peios/terminal-sign-in/sessions-and-account-changes
-  - peios/authentication-operations/local-store
+  - peios/local-accounts/sessions-and-account-changes
+  - peios/authentication/local-store
 ---
 
 Retire an account by stopping further sign-ins before deciding whether to
@@ -60,5 +60,5 @@ restore the deleted identity, its group membership, or its access. Deleting
 the account also does not remove its home directory.
 
 Read [Sessions and Account
-Changes](~peios/terminal-sign-in/sessions-and-account-changes) for the limits
+Changes](~peios/local-accounts/sessions-and-account-changes) for the limits
 of ending active access.

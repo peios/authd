@@ -3,8 +3,8 @@ title: Authentication Events
 type: concept
 description: Use authority and source events to distinguish credential checks from granted logons.
 related:
-  - peios/authentication-operations/diagnosing
-  - peios/terminal-sign-in/sessions-and-account-changes
+  - peios/authentication/diagnosing
+  - peios/local-accounts/sessions-and-account-changes
 ---
 
 Authentication events record what the authority and local source decided. They

@@ -59,7 +59,7 @@ unknown accounts instead of taking a cheap early-return path. This does not
 make account existence secret: the separate identity interface can report
 that a principal does not exist. For diagnosis, compare the authority and
 source [authentication
-events](~peios/authentication-operations/audit-events), without recording
+events](~peios/authentication/audit-events), without recording
 credential values.
 
 ## Tokens and sessions

@@ -5,7 +5,7 @@ description: Create a local account, verify its profile, and check a fresh sign-
 related:
   - peios/local-accounts/managing-groups
   - peios/local-accounts/managing-credentials
-  - peios/terminal-sign-in/using-a-console
+  - peios/signing-in/using-a-console
 ---
 
 Create an account with `lps` when someone needs an identity held by this
@@ -64,7 +64,7 @@ lps add alice --group Administrators
 ```
 
 This grants access to local account administration. The separate [machine
-policy](~peios/authentication-policy/granting-access) determines the
+policy](~peios/authentication/granting-access) determines the
 privileges on tokens issued to that group.
 
 ## Home directories

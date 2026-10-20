@@ -3,8 +3,8 @@ title: Using a Console
 type: how-to
 description: Sign in through the terminal client and understand its fallback behavior.
 related:
-  - peios/terminal-sign-in/sessions-and-account-changes
-  - peios/authentication-operations/diagnosing
+  - peios/local-accounts/sessions-and-account-changes
+  - peios/authentication/diagnosing
 ---
 
 The `login(1)` client collects credentials at a terminal, receives a token
@@ -96,7 +96,7 @@ The browser banner is printed once per invocation. It contains configured
 addresses and the machine's certificate fingerprint, not a health check of
 the browser service. A reachable address still needs the certificate check
 described in [Signing in from a
-Browser](~peios/signing-in-from-a-browser/open-the-desktop).
+Browser](~peios/signing-in/open-the-desktop).
 
 For all flags and environment details, read `login(1)`. For failures, use
-[Diagnosing Authentication](~peios/authentication-operations/diagnosing).
+[Diagnosing Authentication](~peios/authentication/diagnosing).

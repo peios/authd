@@ -49,7 +49,7 @@ successful query does not guarantee a later request will succeed.
 Warn the person before ending a session because running programs can lose
 unsaved work. The requesting program can be among the processes stopped. Read
 [Sessions and Account
-Changes](~peios/terminal-sign-in/sessions-and-account-changes) for the
+Changes](~peios/local-accounts/sessions-and-account-changes) for the
 result's limitations.
 
 ## Submitted changes can have uncertain outcomes

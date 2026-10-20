@@ -4,7 +4,7 @@ type: how-to
 description: Set passwords and public keys without confusing stored credentials with policy.
 related:
   - peios/local-accounts/retiring-an-account
-  - peios/terminal-sign-in/sessions-and-account-changes
+  - peios/local-accounts/sessions-and-account-changes
 ---
 
 Manage an account's credential material and its permitted methods as two
@@ -106,7 +106,7 @@ interchange the two interfaces.
 
 Removing a key or changing policy invalidates pending SSH key proofs but does
 not end existing sessions. Stopping active access is a separate [session
-operation](~peios/terminal-sign-in/sessions-and-account-changes).
+operation](~peios/local-accounts/sessions-and-account-changes).
 
 ## Self-service changes
 

@@ -3,8 +3,8 @@ title: Registering a Principal Source
 type: how-to
 description: Configure a source identity and verify registration without widening its authority.
 related:
-  - peios/authentication-policy/resolving-names
-  - peios/authentication-operations/service-startup
+  - peios/authentication/resolving-names
+  - peios/authentication/service-startup
 ---
 
 Register a principal source when authd must accept identities from that

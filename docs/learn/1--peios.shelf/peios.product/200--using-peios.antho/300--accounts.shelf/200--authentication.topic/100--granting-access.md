@@ -3,8 +3,8 @@ title: Granting Access
 type: concept
 description: How authd combines machine policy with authenticated identity when issuing tokens.
 related:
-  - peios/authentication-policy/registering-a-source
-  - peios/authentication-operations/diagnosing
+  - peios/authentication/registering-a-source
+  - peios/authentication/diagnosing
 ---
 
 `authd` reads local machine policy to decide which privileges, integrity
@@ -109,4 +109,4 @@ Different settings have different refresh points:
 Keep a verified administrator route while changing policy. Validate a fresh
 request before assuming a registry edit has taken effect. For source
 configuration, read [Registering a Principal
-Source](~peios/authentication-policy/registering-a-source).
+Source](~peios/authentication/registering-a-source).

@@ -3,7 +3,7 @@ title: Reading Identities
 type: how-to
 description: Use libauth identity queries without losing field states or incomplete results.
 related:
-  - peios/authentication-policy/resolving-names
+  - peios/authentication/resolving-names
   - peios/authentication-client/using-the-library
 ---
 

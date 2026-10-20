@@ -5,7 +5,7 @@ description: How local accounts, groups, credentials, and machine policy fit tog
 related:
   - peios/local-accounts/creating-an-account
   - peios/local-accounts/managing-credentials
-  - peios/authentication-operations/diagnosing
+  - peios/authentication/diagnosing
 ---
 
 Local accounts identify people and services known to this machine. The local
@@ -46,7 +46,7 @@ Use the tool for the task you need:
 - **Integrate an application:** use the
   [authentication client library](~peios/authentication-client/conversations).
 - **Diagnose the daemons:** start with
-  [Diagnosing Authentication](~peios/authentication-operations/diagnosing).
+  [Diagnosing Authentication](~peios/authentication/diagnosing).
 
 `lps` does not edit the store file directly. `lpsd` checks the caller's token,
 applies the request, and saves the result. An ordinary signed-in account does
@@ -64,7 +64,7 @@ Account](~peios/local-accounts/retiring-an-account), and keep a working
 administrator session while changing access.
 
 For desktop administration, use [Principals
-Manager](~peios/security-tools/principals-manager). Personal display names,
+Manager](~peios/local-accounts/principals-manager). Personal display names,
 passwords, and keys are covered by [My
-Settings](~peios/security-tools/my-settings). Those interfaces preserve the
+Settings](~peios/local-accounts/my-settings). Those interfaces preserve the
 same distinction between identity, credentials, and machine grants.

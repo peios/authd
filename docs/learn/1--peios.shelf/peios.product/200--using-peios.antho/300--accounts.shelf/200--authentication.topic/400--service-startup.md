@@ -3,8 +3,8 @@ title: Authentication Services
 type: concept
 description: How the authority, local source, registry seeds, and service readiness fit together.
 related:
-  - peios/authentication-policy/registering-a-source
-  - peios/authentication-operations/local-store
+  - peios/authentication/registering-a-source
+  - peios/authentication/local-store
 ---
 
 The authentication service set separates token creation from credential
@@ -78,6 +78,6 @@ authentication requests. Keep a separate working administrator route while
 investigating.
 
 Read `authd(8)` and `lpsd(8)` for daemon behavior, then follow [Diagnosing
-Authentication](~peios/authentication-operations/diagnosing) for common
+Authentication](~peios/authentication/diagnosing) for common
 symptoms. Contributor build instructions live in the repository's
 `docs/building.md`.

@@ -3,8 +3,8 @@ title: Diagnosing Authentication
 type: how-to
 description: Locate failures in service readiness, credentials, policy, and session startup.
 related:
-  - peios/authentication-operations/audit-events
-  - peios/authentication-policy/granting-access
+  - peios/authentication/audit-events
+  - peios/authentication/granting-access
 ---
 
 Diagnose the stage that failed before changing account or machine policy. A
@@ -63,9 +63,9 @@ operation. Similarly, reaching the self-service socket does not authorize an
 operation on someone else's account.
 
 For originator refusals, inspect [Authentication
-Policy](~peios/authentication-policy/granting-access). For registration
+Policy](~peios/authentication/granting-access). For registration
 failures, inspect [Registering a Principal
-Source](~peios/authentication-policy/registering-a-source).
+Source](~peios/authentication/registering-a-source).
 
 ## Handle failed changes carefully
 
@@ -75,7 +75,7 @@ daemon reports a storage failure, preserve its diagnostics and investigate the
 filesystem before making further account changes.
 
 Do not delete the principal store to repair a startup failure. Read [The Local
-Principal Store](~peios/authentication-operations/local-store) for why
+Principal Store](~peios/authentication/local-store) for why
 replacing it changes the machine's identities.
 
 ## Check the result
