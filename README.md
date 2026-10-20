@@ -71,7 +71,8 @@ trail lint docs/learn
 trail build docs/learn --strict
 ```
 
-Panorama includes this tree through its documentation merge configuration.
+Peios Learn includes this tree through its documentation merge
+configuration.
 Shared protocol specifications and other components' guides remain in the
 central documentation tree.
 
