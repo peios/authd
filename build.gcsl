@@ -36,9 +36,9 @@ def crates(extra: List<rust.CrateSettings> = []) -> rust.RustWorkspace {
             {
                 package = "peios-sys"
                 env = [
-                    {name = "PEIOS_LIB_DIR"; value = "/opt/peios/lib"},
-                    {name = "PEIOS_INCLUDE"; value = "/opt/peios/include"},
-                    {name = "PKM_UAPI"; value = "/opt/peios/uapi"},
+                    {key = "PEIOS_LIB_DIR"; value = "/opt/peios/lib"},
+                    {key = "PEIOS_INCLUDE"; value = "/opt/peios/include"},
+                    {key = "PKM_UAPI"; value = "/opt/peios/uapi"},
                 ]
                 given = [
                     {at = "/opt/peios/lib/libpeios.so"; place = build libpeios()},

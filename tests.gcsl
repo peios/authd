@@ -8,7 +8,7 @@ import "github.com/gcslib/python"
 import "github.com/gcslib/rust"
 
 # Where the tests find the shared libraries they load.
-let LIBRARIES = [{name = "LD_LIBRARY_PATH"; value = "/opt/peios/lib:/opt/auth/lib"}]
+let LIBRARIES = [{key = "LD_LIBRARY_PATH"; value = "/opt/peios/lib:/opt/auth/lib"}]
 
 # The members of the workspace, each a directory of the same name.
 let MEMBERS = [
@@ -97,7 +97,7 @@ def test peios_auth(
         crates([
             {
                 package = "peios-auth"
-                env = [{name = "PEIOS_AUTH_LIB_DIR"; value = "/opt/auth/lib"}]
+                env = [{key = "PEIOS_AUTH_LIB_DIR"; value = "/opt/auth/lib"}]
                 given = [{at = "/opt/auth/lib/libauth.so"; place = build libauth()}]
             },
         ]),
