@@ -1,0 +1,193 @@
+# authd's tests: each member's unit and integration tests, as `cargo test
+# -p` builds them, and with the features the client and the administrators
+# use, which the daemons are built without.
+import fs
+import toolchain
+import Toolchain from toolchain
+import "github.com/gcslib/python"
+import "github.com/gcslib/rust"
+
+# Where the tests find the shared libraries they load.
+let LIBRARIES = [{name = "LD_LIBRARY_PATH"; value = "/opt/peios/lib:/opt/auth/lib"}]
+
+# The members of the workspace, each a directory of the same name.
+let MEMBERS = [
+    "auth-abi",
+    "auth-core",
+    "auth-policy",
+    "authd",
+    "libauth",
+    "login",
+    "lps",
+    "lpsd",
+    "nss",
+    "peios-auth",
+    "session-preferences",
+    "terminal-input",
+]
+
+# What every test is given: libpeios, by its soname, which a program that
+# links it loads.
+def loaded() -> List<{at: String, place: Dir | File}> {
+    = [{at = "/opt/peios/lib/libpeios.so.0"; place = build libpeios()}]
+}
+
+# Runs each of `tests`, given `given`.
+fn ran(tests: List<rust.RustTest>, given: List<{at: String, place: Dir | File}>) -> {} {
+    let each = for test in tests { = rust.run_test(test, given = given, env = LIBRARIES) }
+}
+
+def test auth_abi(tests: List<rust.RustTest> = rust.tests(crates(), "auth-abi"), given: List<{at: String, place: Dir | File}> = loaded()) {
+    = ran(tests, given)
+}
+
+# `auth-core`'s, its citation check walking every member's sources.
+def test auth_core(
+    tests: List<rust.RustTest> = rust.tests(crates(), "auth-core"),
+    given: List<{at: String, place: Dir | File}> = [...loaded(), ...(for each in MEMBERS { = {at = "/work/src/{each}"; place = dir(each)} })],
+) {
+    = ran(tests, given)
+}
+
+def test auth_core_client(
+    tests: List<rust.RustTest> = rust.tests(crates(), "auth-core", features = ["client"]),
+    given: List<{at: String, place: Dir | File}> = [...loaded(), ...(for each in MEMBERS { = {at = "/work/src/{each}"; place = dir(each)} })],
+) {
+    = ran(tests, given)
+}
+
+def test auth_policy(tests: List<rust.RustTest> = rust.tests(crates(), "auth-policy"), given: List<{at: String, place: Dir | File}> = loaded()) {
+    = ran(tests, given)
+}
+
+def test auth_policy_write(
+    tests: List<rust.RustTest> = rust.tests(crates(), "auth-policy", features = ["write"]),
+    given: List<{at: String, place: Dir | File}> = loaded(),
+) {
+    = ran(tests, given)
+}
+
+def test authd(tests: List<rust.RustTest> = rust.tests(crates(), "authd"), given: List<{at: String, place: Dir | File}> = loaded()) {
+    = ran(tests, given)
+}
+
+def test libauth(tests: List<rust.RustTest> = rust.tests(crates(), "libauth"), given: List<{at: String, place: Dir | File}> = loaded()) {
+    = ran(tests, given)
+}
+
+def test login(tests: List<rust.RustTest> = rust.tests(crates(), "login"), given: List<{at: String, place: Dir | File}> = loaded()) {
+    = ran(tests, given)
+}
+
+def test lps(tests: List<rust.RustTest> = rust.tests(crates(), "lps"), given: List<{at: String, place: Dir | File}> = loaded()) {
+    = ran(tests, given)
+}
+
+def test lpsd(tests: List<rust.RustTest> = rust.tests(crates(), "lpsd"), given: List<{at: String, place: Dir | File}> = loaded()) {
+    = ran(tests, given)
+}
+
+def test nss(tests: List<rust.RustTest> = rust.tests(crates(), "nss_peios"), given: List<{at: String, place: Dir | File}> = loaded()) {
+    = ran(tests, given)
+}
+
+# `peios-auth`'s, which link libauth and load it by its soname.
+def test peios_auth(
+    tests: List<rust.RustTest> = rust.tests(
+        crates([
+            {
+                package = "peios-auth"
+                env = [{name = "PEIOS_AUTH_LIB_DIR"; value = "/opt/auth/lib"}]
+                given = [{at = "/opt/auth/lib/libauth.so"; place = build libauth()}]
+            },
+        ]),
+        "peios-auth",
+    ),
+    given: List<{at: String, place: Dir | File}> = [...loaded(), {at = "/opt/auth/lib/libauth.so.1"; place = build libauth()}],
+) {
+    = ran(tests, given)
+}
+
+def test session_preferences(
+    tests: List<rust.RustTest> = rust.tests(crates(), "session-preferences"),
+    given: List<{at: String, place: Dir | File}> = loaded(),
+) {
+    = ran(tests, given)
+}
+
+def test terminal_input(
+    tests: List<rust.RustTest> = rust.tests(crates(), "terminal-input"),
+    given: List<{at: String, place: Dir | File}> = loaded(),
+) {
+    = ran(tests, given)
+}
+
+# The tool `name` of the C toolchain `c`, by its path in a sandbox that has
+# the toolchain at `/opt/cc`: `x86_64-linux-nm` beside `x86_64-linux-gcc`.
+fn tool(c: toolchain.CToolchain, name: String): String {
+    let cc = c.cc.path.strip_prefix(c.root.path).strip_prefix("/")
+    = "/opt/cc/{cc.strip_suffix("gcc")}{name}"
+}
+
+# The C client's ABI: its exports exactly those `exports.txt` lists, its
+# SONAME, each layout the same in C and Rust, and a C program that links it
+# calling it, as `tools/check-auth-abi.py` checks them.
+def test abi(
+    library: File = build libauth(),
+    sources: List<{at: String, place: Dir | File}> = [
+        {at = "/work/src/auth-abi"; place = dir("auth-abi")},
+        {at = "/work/src/libauth"; place = dir("libauth")},
+        {at = "/work/src/tools/check-auth-abi.py"; place = file("tools/check-auth-abi.py")},
+    ],
+    c: toolchain.CToolchain = toolchain.get(Toolchain::C),
+    rust: rust.RustToolchain = toolchain.get(Toolchain::Rust),
+    py: python.PythonToolchain = toolchain.get(Toolchain::Python),
+) {
+    let home = dir(".").path
+    let made = fs.mkdir("{home}/tmp")
+    let placed: List<{at: String, place: Dir | File | FileSet}> = [
+        {at = "/"; place = c.runtime},
+        {at = "/tmp"; place = dir("{home}/tmp")},
+        {at = "/opt/cc"; place = c.root},
+        {at = "/opt/rust"; place = rust.root},
+        {at = "/opt/python"; place = py.root},
+        {at = "/work/lib/libauth.so.1"; place = library},
+        {at = "/work/lib/libauth.so"; place = library},
+        ...(for each in sources { = {at = each.at; place = each.place} }),
+    ]
+    let box = fs.compose(placed).sandbox(
+        cwd = "/work",
+        env = {
+            CC = tool(c, "gcc")
+            NM = tool(c, "nm")
+            READELF = tool(c, "readelf")
+            RUSTC = "/opt/rust/bin/rustc"
+            PATH = "/opt/cc/bin:/opt/rust/bin:/opt/python/bin"
+        },
+    )
+    let ran = box.exec("/opt/python/bin/python3", "/work/src/tools/check-auth-abi.py", "/work/lib", panic = false)
+    if ran.status != 0 {
+        panic("the ABI check failed:\n{ran.stdout}{ran.stderr}")
+    }
+}
+
+# The NSS module stands alone: glibc loads it into every program that
+# looks a name up, so it needs neither libpeios nor `libgcc_s`, searches no
+# path of its own, and has the SONAME glibc finds it by.
+def test nss_linkage(library: File = build nss(), c: toolchain.CToolchain = toolchain.get(Toolchain::C)) {
+    let box = fs.compose([
+        {at = "/"; place = c.runtime},
+        {at = "/opt/cc"; place = c.root},
+        {at = "/work/libnss_peios.so"; place = library},
+    ]).sandbox(cwd = "/work")
+    let shown = box.exec(tool(c, "readelf"), "-d", "/work/libnss_peios.so").stdout
+    if not shown.contains("[libnss_peios.so.2]") {
+        panic("the NSS module's SONAME is not `libnss_peios.so.2`:\n{shown}")
+    }
+    let checked = for line in shown.lines() {
+        let needs = line.contains("(NEEDED)") and (line.contains("libpeios") or line.contains("libgcc_s"))
+        if needs or line.contains("(RPATH)") or line.contains("(RUNPATH)") {
+            panic("the NSS module must need neither libpeios nor `libgcc_s`, and search no path: {line.trim()}")
+        }
+    }
+}

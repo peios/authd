@@ -11,3 +11,6 @@ __pycache__/
 
 # pekit build output.
 /pekit-out/
+
+# Libraries pekit fetches for the pins in `pekit.lock`.
+/.gcsl/

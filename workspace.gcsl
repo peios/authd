@@ -1,0 +1,11 @@
+# The authd workspace: pekit builds it with the gcc library's Bootlin C
+# toolchain and the rust library's pinned Rust, and checks the C client's
+# ABI with the python library's pinned Python.
+import Toolchain::* from "github.com/gcslib/gcc"
+import Toolchain::* from "github.com/gcslib/python"
+import Toolchain::* from "github.com/gcslib/rust"
+import Toolchain from toolchain
+
+pekitconf = {
+    toolchains = [Toolchain::C gcc_x86_64, Toolchain::Rust rust_1_98, Toolchain::Python python_3_14]
+}
