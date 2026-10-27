@@ -9,13 +9,14 @@ supported development host is x86-64 Linux.
 
 You need pekit and Git. Everything else is pinned and fetched by pekit on
 the first build: the Bootlin C toolchain, Rust 1.98.1, Python 3.14,
-libclang, the crates `Cargo.lock` selects, and the Peios SDK at the commit
-`build.gcsl` names. The first build needs network access; later builds
+libclang, and the crates `Cargo.lock` selects. The first build needs
+network access; later builds
 find what they need in pekit's store, and every step runs without network
 access in a sandbox that holds only its declared inputs.
 
 The build files use the gcslib libraries named in `workspace.gcsl` and the
-build files. `pekit lock` pins their commits in `pekit.lock`.
+build files, and the libraries of peios-rs and the Peios SDK. `pekit lock`
+pins their commits in `pekit.lock`.
 
 ## Build
 
@@ -31,7 +32,7 @@ pekit build authd lpsd lps login nss libauth
 | `login` | Terminal logon client |
 | `nss` | NSS module, `libnss_peios.so.2` by its shared object name (SONAME) |
 | `libauth` | Public C client library, `libauth.so.1` by its SONAME |
-| `libpeios` | The Peios SDK's library, built from the SDK's source |
+| `libpeios` | The Peios SDK's library, built from the SDK's own files |
 
 Pekit prints where each output is, under `pekit-out/<target>/`. The
 programs load `libpeios.so.0` by its SONAME and carry no runtime search
@@ -75,14 +76,18 @@ its manifest says is given it in `build.gcsl`'s `crates`:
 
 - `auth-policy` reads the registry seeds in `registry.d/`;
 - `peios-sys` generates its bindings from the SDK's headers with bindgen and
-  links libpeios, so it, and every crate that depends on it, is given the
-  library and the headers;
+  links libpeios, so it, and every crate that depends on it, is given what
+  peios-rs's library says it needs, `crate_settings()`: libpeios and its
+  headers;
 - the tests of `peios-auth` link the C client library, which they are given
   in `tests.gcsl`.
 
-The Peios SDK's library is built from the SDK's source, `peios-sdk` at the
-commit `build.gcsl` pins in `sdk()`. Change that commit to build against
-another SDK.
+libpeios and its headers are built from the Peios SDK's own files, through
+the SDK's GCSL library, which peios-rs's library imports. The commits
+`pekit.lock` pins say which SDK and which peios-rs; the rust library fails a
+build whose `Cargo.lock` takes peios-rs's crates at another commit than
+`pekit.lock` pins its library at, so the crates and the settings they are
+built with always agree.
 
 ## Not built with pekit yet
 
