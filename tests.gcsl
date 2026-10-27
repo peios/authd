@@ -6,6 +6,7 @@ import toolchain
 import Toolchain from toolchain
 import "github.com/gcslib/python"
 import "github.com/gcslib/rust"
+import "github.com/peios/peios-rs" as peios_rs
 
 # Where the tests find the shared libraries they load.
 let LIBRARIES = [{key = "LD_LIBRARY_PATH"; value = "/opt/peios/lib:/opt/auth/lib"}]
@@ -27,9 +28,9 @@ let MEMBERS = [
 ]
 
 # What every test is given: libpeios, by its soname, which a program that
-# links it loads.
+# links it loads (see peios-rs's `runtime`).
 def loaded() -> List<{at: String, place: Dir | File}> {
-    = [{at = "/opt/peios/lib/libpeios.so.0"; place = build libpeios()}]
+    = peios_rs.runtime()
 }
 
 # Runs each of `tests`, given `given`.
@@ -143,7 +144,7 @@ def test abi(
     rust: rust.RustToolchain = toolchain.get(Toolchain::Rust),
     py: python.PythonToolchain = toolchain.get(Toolchain::Python),
 ) {
-    let home = dir(".").path
+    let home = working_dir().path
     let made = fs.mkdir("{home}/tmp")
     let placed: List<{at: String, place: Dir | File | FileSet}> = [
         {at = "/"; place = c.runtime},

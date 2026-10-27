@@ -2,51 +2,21 @@
 # rust library's `workspace`), for glibc.
 import "github.com/gcslib/clang"
 import "github.com/gcslib/rust"
-
-# The Peios SDK authd builds against, at a pinned commit: libpeios's
-# source and headers, and the kernel's UAPI headers it includes.
-def sdk() -> Dir {
-    = fetch_git("https://github.com/peios/peios-sdk", "23fd80d263572a7601806fb9d059279c4f395f0e")
-}
-
-# libpeios, the SDK's shared library, `libpeios.so.0` by its soname. The
-# kernel's crates the SDK vendors read the kernel's sources beside them.
-def build libpeios() {
-    let src = sdk()
-    let kernel = [{at = "vendor/kernel"; place = src.dir("vendor/kernel")}]
-    let ws = rust.workspace(
-        src,
-        rust.vendored(src.file("Cargo.lock")),
-        crates = for each in ["peios-uapi", "kacs-core", "lcs-core"] { = {package = each; data = kernel} },
-    )
-    = rust.library(ws, "libpeios")
-}
+import "github.com/peios/peios-rs" as peios_rs
+import build * from "github.com/peios/peios-sdk"
 
 # The authd workspace, planned. `peios-sys` binds libpeios with bindgen
-# and links it, so it, and every crate that depends on it, is given the
-# library and the headers; `auth-policy` reads the registry seeds. `extra`
-# are settings of further packages.
+# and links it, so it, and every crate that depends on it, is given what
+# peios-rs's library says it needs: libpeios and its headers, built from
+# the Peios SDK's own files. `auth-policy` reads the registry seeds.
+# `extra` are settings of further packages.
 def crates(extra: List<rust.CrateSettings> = []) -> rust.RustWorkspace {
-    let sdk = sdk()
     = rust.workspace(
         dir("."),
         rust.vendored(file("Cargo.lock")),
         crates = [
             {package = "auth-policy"; data = [{at = "registry.d"; place = dir("registry.d")}]},
-            {
-                package = "peios-sys"
-                env = [
-                    {key = "PEIOS_LIB_DIR"; value = "/opt/peios/lib"},
-                    {key = "PEIOS_INCLUDE"; value = "/opt/peios/include"},
-                    {key = "PKM_UAPI"; value = "/opt/peios/uapi"},
-                ]
-                given = [
-                    {at = "/opt/peios/lib/libpeios.so"; place = build libpeios()},
-                    {at = "/opt/peios/lib/libpeios.so.0"; place = build libpeios()},
-                    {at = "/opt/peios/include"; place = sdk.dir("libpeios/include")},
-                    {at = "/opt/peios/uapi"; place = sdk.dir("vendor/kernel/include/uapi")},
-                ]
-            },
+            ...peios_rs.crate_settings(),
             ...extra,
         ],
         libclang = [clang.libclang_18()],
