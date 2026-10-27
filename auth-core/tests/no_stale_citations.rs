@@ -24,7 +24,8 @@ fn offending(dir: &Path, hits: &mut Vec<String>) {
             if name != "target"
                 && name != "out"
                 && name != ".git"
-                && !(path.is_symlink() && name.as_encoded_bytes().starts_with(b"bazel-"))
+                && name != ".gcsl"
+                && name != "pekit-out"
             {
                 offending(&path, hits);
             }
