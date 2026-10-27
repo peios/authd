@@ -1,231 +1,96 @@
 # Building Authentication
 
-Use Bazel to build the authentication daemons, command-line clients, name
-service switch
-(NSS) module, and shared authentication client. The supported development host
-is
-x86-64 Linux with glibc.
+Use pekit to build the authentication daemons, command-line clients, name
+service switch (NSS) module, and shared authentication client. Pekit builds
+each crate on its own, so a change rebuilds only the crates it reaches. The
+supported development host is x86-64 Linux.
 
 ## Before you start
 
-Install Git, curl, a C compiler, libc development headers, libclang,
-Python 3, pkg-config, and binutils. The checked-in `./bazel` wrapper verifies
-and caches Bazel 8.4.2 outside the checkout. Bazel downloads Rust 1.96.0 and
-the dependencies selected by `Cargo.lock` on the first build. Repository
-fetches need network access; compilation uses declared inputs.
+You need pekit and Git. Everything else is pinned and fetched by pekit on
+the first build: the Bootlin C toolchain, Rust 1.98.1, Python 3.14,
+libclang, the crates `Cargo.lock` selects, and the Peios SDK at the commit
+`build.gcsl` names. The first build needs network access; later builds
+find what they need in pekit's store, and every step runs without network
+access in a sandbox that holds only its declared inputs.
 
-The C compiler, system headers, and libclang come from the host. These are
-Linux development builds, not fully hermetic or cross-compilation builds.
-Socket tests use temporary Unix sockets and do not contact system services.
+The build files use the gcslib libraries named in `workspace.gcsl` and the
+build files. `pekit lock` pins their commits in `pekit.lock`.
 
-## Build the client SDK
-
-The client software development kit (SDK) does not require the Peios
-kernel SDK:
+## Build
 
 ```sh
-./bazel build //:sdk
-./bazel test //libauth:tests //peios-auth:client-test //:abi-test
+pekit build authd lpsd lps login nss libauth
 ```
 
-The archive `bazel-bin/auth-sdk.tar.gz` contains `usr/include/peios/`,
-`usr/lib/libauth.so.1`, its linker symlink, and `usr/lib/pkgconfig/auth.pc`.
-Extract it into a staging directory, not over the host operating system.
-When using that staging directory, point `pkg-config` at its metadata and
-set `PKG_CONFIG_SYSROOT_DIR` to the staging root. Runtime callers also need
-its `usr/lib` directory on their library search path.
-
-The application binary interface (ABI) test compares C and Rust layouts,
-checks the public exports and shared object name (SONAME), and compiles and
-runs a C client. The Rust client tests load the
-shared library through Bazel's runtime dependency graph.
-
-## Prepare a Peios SDK
-
-The full build needs a compatible `libpeios.so.0` and matching library and
-kernel headers. Supply one SDK directory with this layout:
-
-```text
-peios-sdk/
-    include/peios.h
-    include/peios/*.h
-    include/pkm/*.h
-    lib/libpeios.so.0
-```
-
-To create a development SDK from existing source checkouts, install Rust
-1.96.0 through rustup, then run:
-
-```sh
-rustup toolchain install 1.96.0 --profile minimal
-tools/prepare-dev-sdk /path/to/libpeios /path/to/kernel/include/uapi \
-    /tmp/authd-dev-sdk
-export PEIOS_SDK=/tmp/authd-dev-sdk
-```
-
-Use a new output directory each time. The helper builds the separate
-`libpeios` component through its Cargo interface and copies its
-headers together with the supplied kernel userspace API (UAPI). It does not
-change the
-source checkouts. Bazel then consumes the SDK library and headers as
-explicit inputs. Changing those inputs invalidates dependent actions.
-
-Continuous integration (CI) selects exact source revisions in
-`.github/workflows/check.yml`. The
-SDK is a host development build; running Peios-specific operations still
-requires a compatible Peios kernel.
-
-## Build and test everything
-
-With the SDK configured, build the artifacts and run the tests:
-
-```sh
-./bazel build //:artifacts
-./bazel test //...
-```
-
-`//:artifacts` builds all four programs, both shared libraries, and the
-Rust client wrapper. Tests cover the default and optional client/policy
-features separately. Choose an individual target for a shorter edit loop:
-
-| Target | Output or check |
+| Target | Output |
 |---|---|
-| `//authd` | Authentication authority |
-| `//lpsd` | Local principal source |
-| `//lps` | Account administration client |
-| `//login` | Terminal logon client |
-| `//nss` | NSS shared library |
-| `//libauth:shared` | Public C client shared library |
-| `//peios-auth` | Rust wrapper for the shared library |
-| `//lpsd:tests` | Local principal source unit tests |
-| `//:sdk` | Client SDK archive |
-| `//:abi-test` | C/Rust ABI and linkage checks |
-| `//:nss-linkage-test` | NSS runtime dependencies |
-| `//:vendor-test` | Offline repository snapshot handling |
+| `authd` | Authentication authority |
+| `lpsd` | Local principal source |
+| `lps` | Account administration client |
+| `login` | Terminal logon client |
+| `nss` | NSS module, `libnss_peios.so.2` by its shared object name (SONAME) |
+| `libauth` | Public C client library, `libauth.so.1` by its SONAME |
+| `libpeios` | The Peios SDK's library, built from the SDK's source |
 
-Use `-c dbg` for an unoptimized build with debug information. Do not run
-the daemons on the development host as part of a build check. Bazel places
-outputs under `bazel-bin`; the program paths are `authd/authd`, `lpsd/lpsd`,
-`lps/lps`, and `login/login` beneath that directory. Programs that use the
-Peios SDK have Bazel runtime paths and are not standalone release packages.
+Pekit prints where each output is, under `pekit-out/<target>/`. The
+programs load `libpeios.so.0` by its SONAME and carry no runtime search
+path, so running them needs libpeios installed. Do not run the daemons on
+the development host as part of a build check.
 
-## Change dependencies
-
-Keep Rust dependency versions in the Cargo manifests and `Cargo.lock`.
-Bazel's crate rules read those files and preserve the checked-in lockfile.
-Update the lockfile deliberately with Cargo, then run the Bazel checks and
-review `MODULE.bazel.lock` before committing both lockfiles. Build-rule and
-compiler versions are pinned in `MODULE.bazel`; Bazel's own version and
-checksum are in `.bazelversion` and `build/bazel.sha256`.
-
-When changing the component version, update `build/version.bzl` alongside
-the Cargo manifests, the module version in `MODULE.bazel`, and the versions
-and exact dependencies in `packages/definitions/`. Package staging checks
-that the source-family and package versions agree.
-
-Workspace dependencies are explicit in each `BUILD.bazel`. In particular,
-the daemons use the protocol-only `auth-core`, while `lps` and NSS use its
-client variant. The terminal helper has matching variants so one program
-never links incompatible Rust identities for the same public type. Preserve
-that separation when adding a dependency.
-
-A small Bazel-only patch makes `peios-sys` use the declared SDK instead of
-probing host package metadata. It also removes its development absolute
-runtime path. Cargo consumers continue to use the upstream build script.
-
-## Build packages
-
-Run `./bazel build //:packages` to build the complete package set. The output
-is `bazel-bin/packages.store`, containing deduplicated, compressed blobs under
-`blobs/sha256/` and canonical manifests under
-`manifests/<name>/<version>/<arch>/manifest.toml`. The writer is the same
-pinned package-store writer used by the kernel. Its manifest format is
-unchanged.
-
-Build one package with a target such as `//packages:authd`,
-`//packages:libauth-devel`, or `//packages:authd-source`. Each target produces
-its own `.ppk` directory. The source package includes only declared repository
-inputs. Runtime packages share one staging action, which builds the six
-executable and linkable format (ELF) artifacts, collects the declared crate
-closures' license notices, splits debug
-information, and stages manuals and registry seeds. Manual sources live in
-`docs/man/`; event and registry manifests live in `docs/*.evman` and
-`docs/*.regman`. Packaging installs them in their respective directories under
-`/usr/share/`.
-
-The package family contains the authority, principal source, administration
-and `login` clients, NSS library, C client library and development headers,
-six debuginfo packages, shared debug sources, source code, and the optional
-live-account bootstrap. Building all packages does not select them for
-installation. Keep the passwordless live-account package out of production
-images unless their policy deliberately requests it.
-
-The default configuration produces packages for the Linux development ABI.
-Package binaries link to installed library SONAMEs without Bazel runtime
-search paths; development tests outside packaging retain their runfiles
-library paths. Package staging checks ABI layouts and exports, command-line
-behavior,
-registry privileges, manual pages, SONAMEs, split debug files, and path
-leakage.
-
-`index.json` records package identities, manifest hashes, input provenance,
-and whether the artifacts use the development or native Peios ABI. It also
-preserves package descriptions, licenses, dependencies, service-state security
-descriptors, side effects, and required signing tiers. These fields are policy
-metadata alongside the canonical manifests; the manifest format does
-not yet encode them. A release installer must apply that policy explicitly.
-The store is unsigned and is not marked release-ready.
-
-## Build with the native toolchain
-
-Inside a prepared Peios userspace build environment, declare the installed
-SDK:
+## Test
 
 ```sh
-tools/prepare-native-sdk /tmp/authd-sdk
-export PEIOS_SDK=/tmp/authd-sdk
-export PEIOS_RUSTC=/usr/bin/rustc
-./bazel build --config=peios //:packages
-./bazel test --config=peios //...
+pekit test
 ```
 
-This configuration requires the packaged Peios Rust compiler and standard
-library, version 1.98.1 or newer, and applies control-flow enforcement
-technology
-(CET) and distribution linker hardening. It never substitutes the downloaded
-development compiler. Native
-package staging requires indirect branch tracking, shadow stacks, and
-packed relative relocations (RELR) on every ELF artifact.
-The build environment needs a C compiler, binutils, Python 3.11 or newer,
-Bash, gzip, tar, pkg-config, libclang, the Peios SDK and kernel headers.
+Each member's unit and integration tests are a test of their own, named
+after the member: `auth_core`, `lpsd`, and so on. `auth_core_client` and
+`auth_policy_write` test those crates with the `client` and `write`
+features, which the daemons are built without. Two further tests check
+what the C client and the NSS module promise:
 
-For offline workers, acquire dependencies on a networked development host
-with the development SDK configured:
+| Test | Check |
+|---|---|
+| `abi` | The C client's exports, SONAME, C and Rust layouts, and a linked C caller |
+| `nss_linkage` | The NSS module needs neither libpeios nor `libgcc_s` and searches no path |
 
-```sh
-tools/offline-build acquire /absolute/path/authd-inputs
-```
+A test whose inputs did not change is found in the store and not run
+again. Socket tests use temporary Unix sockets and do not contact system
+services.
 
-Mount that snapshot read-only in the prepared native environment, declare
-its installed SDK with `PEIOS_SDK`, and provide a separate writable work
-directory:
+## How the build is planned
 
-```sh
-tools/offline-build build /absolute/path/authd-inputs /absolute/path/authd-work
-tools/offline-build test /absolute/path/authd-inputs /absolute/path/authd-work
-```
+`build.gcsl` plans the Cargo workspace with the gcslib rust library's
+`workspace`: Cargo works out each member's build, unit by unit, and pekit
+compiles each unit as a step. Each member's crates get the features Cargo
+resolves for that member alone, so the daemons use the protocol-only
+`auth-core`, while `lps` and NSS use its client variant, without either
+reaching the other. Planning reads the manifests, `Cargo.lock`, and which
+files exist, never the sources, so editing a source plans nothing again.
 
-The helper checks the module lock, verifies the Bazel executable, and uses a
-writable metadata view of the snapshot with repository downloads disabled.
-The caller provides the native root and network isolation. It does not
-install packages or alter the host SDK. Native builds suppress Bazel's
-convenience symlinks; outputs are under the work directory's
-`output/execroot/_main/bazel-out/k8-opt/bin/`.
+Keep Rust dependency versions in the Cargo manifests and `Cargo.lock`, and
+update the lockfile deliberately with Cargo. A package that needs more than
+its manifest says is given it in `build.gcsl`'s `crates`:
 
-Signing, publication, image policy application, and authentication/token
-qualification on a running Peios kernel are separate release steps. In
-particular, the authority requires the `tcb.priv` signing tier recorded in
-its package metadata.
+- `auth-policy` reads the registry seeds in `registry.d/`;
+- `peios-sys` generates its bindings from the SDK's headers with bindgen and
+  links libpeios, so it, and every crate that depends on it, is given the
+  library and the headers;
+- the tests of `peios-auth` link the C client library, which they are given
+  in `tests.gcsl`.
+
+The Peios SDK's library is built from the SDK's source, `peios-sdk` at the
+commit `build.gcsl` pins in `sdk()`. Change that commit to build against
+another SDK.
+
+## Not built with pekit yet
+
+Packages, the client SDK archive, and builds with the native Peios
+toolchain, which hardens programs with control-flow enforcement technology
+(CET), are not yet built with pekit. The package definitions and native
+build settings from the Bazel build are kept outside this repository until
+they are.
 
 ## Regenerate the client interface
 
@@ -245,8 +110,8 @@ rustup run 1.96.0 rustfmt --config-path tools/rustfmt.toml libauth/src/lib.rs \
     peios-auth/src/lib.rs auth-abi/src/lib.rs
 ```
 
-Run `./bazel test //:abi-test` after regenerating the files. Review the
-public header, generated files, and export changes together.
+Run `pekit test abi` after regenerating the files. Review the public
+header, generated files, and export changes together.
 
 ## Source compatibility
 

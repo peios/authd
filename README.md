@@ -25,22 +25,21 @@ Internal crates provide the wire formats (`auth-core`), policy evaluation
 
 ## Build and test
 
-Use the checked-in Bazel wrapper on x86-64 Linux. The client software
-development kit (SDK) does not require the Peios kernel SDK:
+Use pekit on x86-64 Linux. It fetches every toolchain and dependency it
+needs, pinned, and builds each crate on its own:
 
 ```sh
-./bazel build //:sdk
-./bazel test //libauth:tests //peios-auth:client-test //:abi-test
+pekit build authd lpsd lps login nss libauth
+pekit test
 ```
 
-The output archive is `bazel-bin/auth-sdk.tar.gz`. For daemon builds, all
-tests, native toolchains, and package assembly, follow
-[Building Authentication](docs/building.md).
+[Building Authentication](docs/building.md) lists the targets and tests and
+explains how the build is planned.
 
-The default configuration produces Linux development artifacts. Native
-Peios builds use `--config=peios` with a declared SDK and installed Peios
-Rust toolchain. Signing, publication, image policy application, and runtime
-qualification are separate release steps.
+These are Linux development builds. Packages and native Peios builds, with
+the installed Peios Rust toolchain, are not yet built with pekit. Signing,
+publication, image policy application, and runtime qualification are
+separate release steps.
 
 ## Documentation
 
@@ -77,10 +76,6 @@ Shared protocol specifications and other components' guides remain in the
 central documentation tree.
 
 ## Package policy
-
-`./bazel build //:packages` produces all 16 packages as a content-addressed
-blob and manifest store in `bazel-bin/packages.store`. Package definitions
-live under `packages/definitions/`.
 
 Registry seeds under `registry.d/` are inert until image or administrator
 policy applies them. Installing a package must not silently authorize a

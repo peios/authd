@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Check C/Rust layouts, exact public exports, SONAME, and a linked C caller."""
+"""Check C/Rust layouts, exact public exports, SONAME, and a linked C caller.
+
+The C compiler, `nm`, `readelf` and `rustc` are `$CC`, `$NM`, `$READELF` and
+`$RUSTC` when set, as a hermetic build gives them, and found on `PATH` by those
+names otherwise; rustc links with `$CC` when it is set.
+"""
 
 import os
 import re
@@ -80,7 +85,7 @@ def check_layouts(temporary: Path) -> int:
     (temporary / "layout.c").write_text(c_source)
     (temporary / "layout.rs").write_text(rust_source)
     run(
-        "cc",
+        os.environ.get("CC", "cc"),
         "-std=c11",
         "-Wall",
         "-Wextra",
@@ -90,8 +95,10 @@ def check_layouts(temporary: Path) -> int:
         "-o",
         str(temporary / "layout-c"),
     )
+    linker = ["-Clinker=" + os.environ["CC"]] if "CC" in os.environ else []
     run(
         os.environ.get("RUSTC", "rustc"),
+        *linker,
         "--edition=2024",
         str(temporary / "layout.rs"),
         "-o",
@@ -107,7 +114,7 @@ def check_caller(temporary: Path, library: Path) -> None:
     """Exercise the installed shared library through its public C interface."""
     (temporary / "caller.c").write_text(CALLER_SOURCE)
     run(
-        "cc",
+        os.environ.get("CC", "cc"),
         "-std=c11",
         "-Wall",
         "-Wextra",
@@ -127,11 +134,12 @@ def check_caller(temporary: Path, library: Path) -> None:
 def main() -> None:
     """Verify installed symbols, layouts, and linked behavior in disposable files."""
     library = Path(sys.argv[1]).resolve()
-    exports = run("nm", "-D", "--defined-only", str(library / "libauth.so.1"))
+    exports = run(os.environ.get("NM", "nm"), "-D", "--defined-only", str(library / "libauth.so.1"))
     actual = sorted(line.split()[-1] for line in exports.splitlines() if line.split())
     expected = (ROOT / "libauth/exports.txt").read_text().splitlines()
     assert actual == expected, (actual, expected)
-    assert "[libauth.so.1]" in run("readelf", "-d", str(library / "libauth.so.1"))
+    readelf = os.environ.get("READELF", "readelf")
+    assert "[libauth.so.1]" in run(readelf, "-d", str(library / "libauth.so.1"))
     with tempfile.TemporaryDirectory(prefix="auth-abi-") as directory:
         temporary = Path(directory)
         count = check_layouts(temporary)

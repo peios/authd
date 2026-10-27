@@ -9,5 +9,8 @@ __pycache__/
 /docs/learn/dist/
 .trail-cache/
 
-/bazel-*
-/.ci-sdk/
+# pekit build output.
+/pekit-out/
+
+# Libraries pekit fetches for the pins in `pekit.lock`.
+/.gcsl/

@@ -1,0 +1,84 @@
+# authd's programs and libraries, each crate compiled on its own (see the
+# rust library's `workspace`), for glibc.
+import "github.com/gcslib/clang"
+import "github.com/gcslib/rust"
+
+# The Peios SDK authd builds against, at a pinned commit: libpeios's
+# source and headers, and the kernel's UAPI headers it includes.
+def sdk() -> Dir {
+    = fetch_git("https://github.com/peios/peios-sdk", "23fd80d263572a7601806fb9d059279c4f395f0e")
+}
+
+# libpeios, the SDK's shared library, `libpeios.so.0` by its soname. The
+# kernel's crates the SDK vendors read the kernel's sources beside them.
+def build libpeios() {
+    let src = sdk()
+    let kernel = [{at = "vendor/kernel"; place = src.dir("vendor/kernel")}]
+    let ws = rust.workspace(
+        src,
+        rust.vendored(src.file("Cargo.lock")),
+        crates = for each in ["peios-uapi", "kacs-core", "lcs-core"] { = {package = each; data = kernel} },
+    )
+    = rust.library(ws, "libpeios")
+}
+
+# The authd workspace, planned. `peios-sys` binds libpeios with bindgen
+# and links it, so it, and every crate that depends on it, is given the
+# library and the headers; `auth-policy` reads the registry seeds. `extra`
+# are settings of further packages.
+def crates(extra: List<rust.CrateSettings> = []) -> rust.RustWorkspace {
+    let sdk = sdk()
+    = rust.workspace(
+        dir("."),
+        rust.vendored(file("Cargo.lock")),
+        crates = [
+            {package = "auth-policy"; data = [{at = "registry.d"; place = dir("registry.d")}]},
+            {
+                package = "peios-sys"
+                env = [
+                    {key = "PEIOS_LIB_DIR"; value = "/opt/peios/lib"},
+                    {key = "PEIOS_INCLUDE"; value = "/opt/peios/include"},
+                    {key = "PKM_UAPI"; value = "/opt/peios/uapi"},
+                ]
+                given = [
+                    {at = "/opt/peios/lib/libpeios.so"; place = build libpeios()},
+                    {at = "/opt/peios/lib/libpeios.so.0"; place = build libpeios()},
+                    {at = "/opt/peios/include"; place = sdk.dir("libpeios/include")},
+                    {at = "/opt/peios/uapi"; place = sdk.dir("vendor/kernel/include/uapi")},
+                ]
+            },
+            ...extra,
+        ],
+        libclang = [clang.libclang_18()],
+    )
+}
+
+# The authentication authority.
+def build authd() {
+    = rust.bin(crates(), "authd")
+}
+
+# The local password service, which verifies local accounts' credentials.
+def build lpsd() {
+    = rust.bin(crates(), "lpsd")
+}
+
+# The client of the local password service.
+def build lps() {
+    = rust.bin(crates(), "lps")
+}
+
+# The console sign-in program.
+def build login() {
+    = rust.bin(crates(), "login")
+}
+
+# The NSS module glibc loads by its name, `libnss_peios.so.2`.
+def build nss() {
+    = rust.library(crates(), "nss_peios")
+}
+
+# The C client library, `libauth.so.1` by its soname.
+def build libauth() {
+    = rust.library(crates(), "libauth")
+}
