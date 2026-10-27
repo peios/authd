@@ -13,7 +13,7 @@ rules = [
 ]
 line_length = 78
 proper_nouns = [
-  "Peios", "Linux", "Bazel", "Rust", "Cargo", "SSH", "POSIX", "Argon2id",
+  "Peios", "Linux", "Rust", "Cargo", "SSH", "POSIX", "Argon2id",
   "NSS", "SID", "SIDs", "API", "ABI", "SDK", "SYSTEM", "GXWI",
   "regman", "evman", "peinit", "authd", "lpsd",
 ]
