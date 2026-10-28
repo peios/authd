@@ -18,4 +18,4 @@ libc = "0.2"
 # without echoing it, and the termios guard that restores echo afterwards is
 # exactly the sort of thing that should exist once.
 terminal-input = { path = "../terminal-input" }
-peios = { git = "https://github.com/peios/peios-rs.git", rev = "f8c84930f2b71763bcf0550df0b1420a0f63b21e" }
+peios = { git = "https://github.com/peios/peios-rs.git", rev = "b2282f654758831e4a2e34c7b35c26e61a6ebe1c" }
