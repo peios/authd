@@ -1,9 +1,6 @@
 # Cargo build output.
 /target
 
-# Local staging output.
-/out
-
 # Python tooling and local documentation output.
 __pycache__/
 /docs/learn/dist/
