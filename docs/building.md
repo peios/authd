@@ -48,13 +48,16 @@ pekit test
 Each member's unit and integration tests are a test of their own, named
 after the member: `auth_core`, `lpsd`, and so on. `auth_core_client` and
 `auth_policy_write` test those crates with the `client` and `write`
-features, which the daemons are built without. Two further tests check
-what the C client and the NSS module promise:
+features, which the daemons are built without. Further tests check what
+the C client and the NSS module promise, and the whole workspace's
+documentation and lints:
 
 | Test | Check |
 |---|---|
 | `abi` | The C client's exports, SONAME, C and Rust layouts, and a linked C caller |
 | `nss_linkage` | The NSS module needs neither libpeios nor `libgcc_s` and searches no path |
+| `doctests` | Each member's documentation tests, as `cargo test --doc` runs them |
+| `clippy` | Clippy's checks of every target of every member, with every warning denied |
 
 A test whose inputs did not change is found in the store and not run
 again. Socket tests use temporary Unix sockets and do not contact system
@@ -91,11 +94,10 @@ built with always agree.
 
 ## Not built with pekit yet
 
-Packages, the client SDK archive, and builds with the native Peios
-toolchain, which hardens programs with control-flow enforcement technology
-(CET), are not yet built with pekit. The package definitions and native
-build settings from the Bazel build are kept outside this repository until
-they are.
+Packages and builds with the native Peios toolchain, which hardens
+programs with control-flow enforcement technology (CET), are not yet built
+with pekit. The package definitions and native build settings from the
+Bazel build are kept outside this repository until they are.
 
 ## Regenerate the client interface
 
