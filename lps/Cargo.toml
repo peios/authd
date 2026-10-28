@@ -16,4 +16,4 @@ path = "src/main.rs"
 [dependencies]
 auth-core = { path = "../auth-core", features = ["client"] }
 terminal-input = { path = "../terminal-input" }
-peios = { git = "https://github.com/peios/peios-rs.git", rev = "f8c84930f2b71763bcf0550df0b1420a0f63b21e" }
+peios = { git = "https://github.com/peios/peios-rs.git", rev = "b2282f654758831e4a2e34c7b35c26e61a6ebe1c" }
