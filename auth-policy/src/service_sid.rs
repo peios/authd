@@ -55,8 +55,10 @@ pub fn of(service_name: &str) -> Option<Sid> {
     let digest = Sha1::digest(&encoded);
     let mut sub_authorities = Vec::with_capacity(6);
     sub_authorities.push(SERVICE_AUTHORITY);
-    for chunk in digest.chunks_exact(4) {
-        sub_authorities.push(u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
+    // A SHA-1 digest is 20 bytes: five words, none left over.
+    let (words, _) = digest.as_chunks::<4>();
+    for word in words {
+        sub_authorities.push(u32::from_le_bytes(*word));
     }
 
     // NT Authority (5), then 80 and the five digest words.
