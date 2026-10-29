@@ -137,25 +137,15 @@ def test peios_auth(
 # Each member's documentation tests, as `cargo test --doc` runs them, given
 # libauth besides libpeios, which `peios-auth`'s load. They are steps the
 # rust library makes, so they are made in the default.
-def test doctests(ran: List<List<{}>> = documented(linking_libauth(), loaded_with_libauth())) {}
-
-# The documentation tests of every member of `ws`, each given `given`. The
-# workspace and `given` are made once, by the caller, and not in each
-# iteration: GCSL's scheduler can split iterations that each wait on the
-# same target's result again and again without end (see PEI-1604).
-fn documented(ws: rust.RustWorkspace, given: List<{at: String, place: Dir | File}>) -> List<List<{}>> {
-    = for each in PACKAGES { = rust.doctests(ws, each, given = given, env = LIBRARIES) }
-}
+def test doctests(
+    ran: List<List<{}>> = for each in PACKAGES {
+        = rust.doctests(linking_libauth(), each, given = loaded_with_libauth(), env = LIBRARIES)
+    },
+) {}
 
 # Clippy's checks of each member, as `cargo clippy --all-targets --
 # -Dwarnings` makes them, every warning denied.
-def test clippy(checked: List<List<{}>> = checked_by_clippy(linking_libauth())) {}
-
-# Clippy's checks of every member of `ws`, made once by the caller, as
-# `documented` has it.
-fn checked_by_clippy(ws: rust.RustWorkspace) -> List<List<{}>> {
-    = for each in PACKAGES { = rust.clippy(ws, each, flags = ["-Dwarnings"]) }
-}
+def test clippy(checked: List<List<{}>> = for each in PACKAGES { = rust.clippy(linking_libauth(), each, flags = ["-Dwarnings"]) }) {}
 
 def test session_preferences(
     tests: List<rust.RustTest> = rust.tests(crates(), "session-preferences"),
