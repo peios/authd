@@ -8,7 +8,7 @@ publish = false
 
 [dependencies]
 auth-core = { path = "../auth-core" }
-peios = { git = "https://github.com/peios/peios-rs.git", rev = "b2282f654758831e4a2e34c7b35c26e61a6ebe1c" }
+peios = { git = "https://github.com/peios/peios-rs.git", rev = "4c9c0106550e3b7d8b4a98dfd0d7a5490fcf0116" }
 # Deriving a service's SID from its name: records are keyed by them, and a
 # program naming a record's service derives it as authd does. Pure
 # computation with no I/O and no unsafe; peinit carries the same dependency
