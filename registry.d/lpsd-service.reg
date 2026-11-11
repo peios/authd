@@ -22,7 +22,12 @@
     "directly in /run). peinit creates it before launch with a Peios descriptor",
     "naming SYSTEM, Administrators and lpsd's own service SID.",
     "",
-    "The package provisions /var/state/lpsd for its distinct virtual account.",
+    "The required lpsd-state ProvisionedPaths entry has peinit create",
+    "/var/state/lpsd before phase 2 for its distinct virtual account.",
+    "The image or installer supplies /var/state. Security is this binary",
+    "self-relative descriptor, owned by lpsd with full access only for it",
+    "and SYSTEM, inherited by files and directories:",
+    "O:S-1-5-80-4242895835-3884168475-4287610261-1596539771-2019494472G:S-1-5-80-4242895835-3884168475-4287610261-1596539771-2019494472D:P(A;OICI;GA;;;SY)(A;OICI;GA;;;S-1-5-80-4242895835-3884168475-4287610261-1596539771-2019494472)",
     "lpsd protects the credential store and admin socket without changing",
     "the runtime directory established by peinit.",
     "",
@@ -45,6 +50,17 @@
   ],
   "keys": [
     { "path": "Machine\\System" },
+    { "path": "Machine\\System\\Init" },
+    { "path": "Machine\\System\\Init\\ProvisionedPaths" },
+    {
+      "path": "Machine\\System\\Init\\ProvisionedPaths\\lpsd-state",
+      "values": [
+        { "name": "Kind", "type": "sz", "data": "directory" },
+        { "name": "Path", "type": "sz", "data": "/var/state/lpsd" },
+        { "name": "Security", "type": "binary", "data": "0100049014000000340000000000000054000000010600000000000550000000db73e5fc1bb583e795bd8fff7b43295f480a5f78010600000000000550000000db73e5fc1bb583e795bd8fff7b43295f480a5f78020044000200000000031400000000100101000000000005120000000003280000000010010600000000000550000000db73e5fc1bb583e795bd8fff7b43295f480a5f78" },
+        { "name": "Required", "type": "dword", "data": 1 }
+      ]
+    },
     { "path": "Machine\\System\\Services" },
     {
       "path": "Machine\\System\\Services\\lpsd",

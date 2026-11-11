@@ -58,6 +58,10 @@ Stop administrative changes and investigate the storage failure.
 .TP
 .I /var/state/lpsd
 Persistent local-principal state.
+The lpsd-service.reg seed declares this as the required lpsd-state
+ProvisionedPaths entry. peinit creates it before phase 2, owned by lpsd's
+service SID, with a protected inheritable descriptor granting full control
+only to that SID and SYSTEM. The image or installer must supply /var/state.
 .TP
 .I /run/lpsd/admin.sock
 Local administration socket.
