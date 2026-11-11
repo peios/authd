@@ -12,6 +12,13 @@ contains the machine's domain identifier, account and group records,
 credential material, and allocation state. Losing it means losing the
 identities that existing access rules name.
 
+The `lpsd-service.reg` seed declares `/var/state/lpsd` as the required
+`lpsd-state` entry under `Machine\System\Init\ProvisionedPaths`. peinit
+creates the directory before phase 2, owned by lpsd's service SID, with
+a protected inheritable descriptor granting full control to that SID
+and SYSTEM. The image or installer must supply `/var/state`; peinit
+does not create unnamed parents.
+
 ## Identity survives names
 
 The machine domain is generated when a missing store is provisioned. Accounts
