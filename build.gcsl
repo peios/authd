@@ -52,3 +52,8 @@ def build nss() {
 def build libauth() {
     = rust.library(crates(), "libauth")
 }
+
+# A native protocol probe for a disposable development guest, never installed.
+def build authn_probe() {
+    = rust.bin(crates(), "authd", name = "authn-probe")
+}

@@ -54,7 +54,7 @@ pub const MAGIC: [u8; 4] = *b"PGSL";
 /// of, and a new client meeting an old authority is refused. Both directions
 /// fail safe without a bump, which a bump would only have turned into a flat
 /// refusal of every mixed pair.
-pub const VERSION: u16 = 1;
+pub const VERSION: u16 = 2;
 
 pub const HEADER_BYTES: usize = frame::COMMON_HEADER_BYTES;
 
@@ -111,6 +111,12 @@ pub const MSG_SESSION_END: u16 = 0x0040;
 pub const MSG_SESSION_ENDED: u16 = 0x8040;
 pub const MSG_SESSION_END_QUERY: u16 = 0x0041;
 pub const MSG_SESSION_END_ALLOWED: u16 = 0x8041;
+
+pub use crate::authentication::{
+    AuthenticationRequest, AuthenticateStart, Authenticated, DisclosureRequest,
+    MSG_AUTHENTICATE_START, MSG_AUTHENTICATED, encode_authenticate_start,
+    decode_authenticate_start, encode_authenticated, decode_authenticated,
+};
 
 pub const MAX_IDENTIFIER_BYTES: usize = 1024;
 pub const MAX_CREDENTIAL_BYTES: usize = 32 * 1024;
@@ -399,33 +405,40 @@ impl Denial {
 /// verified peer is permitted to request.
 #[derive(Debug)]
 pub struct LogonStart {
-    /// None permits intentional credential-free source policy.
-    pub required_credential_type: Option<CredentialType>,
-    pub ssh_binding: Option<crate::ssh::Binding>,
+    pub authentication: AuthenticationRequest,
     pub logon_type: LogonType,
-    pub identifier_type: IdentifierType,
-    /// The identifier itself, interpreted per [`Self::identifier_type`].
-    pub identifier: Vec<u8>,
-    /// The terminal this logon is happening on, if any.
     pub tty: Option<String>,
-    /// The remote peer, for a logon originated on a network client's behalf.
     pub remote_host: Option<String>,
-    /// Every [`CredentialType`] this client can render.
-    ///
-    /// An authority **must not** send a prompt for a type absent from this
-    /// list. This is what makes adding a credential type a non-breaking change:
-    /// length-framing lets us append *fields* freely, but says nothing about
-    /// new *enum values*, which every peer is otherwise required to understand.
-    /// Advertising capability closes that gap — an old client simply never
-    /// claims the new type, and the authority falls back or denies with a
-    /// reason rather than sending something the client would have to hard-fail
-    /// on.
-    ///
-    /// Decoding this field is the one place where an unrecognised enum value is
-    /// *not* fatal: it is a statement of capability, not an instruction, so a
-    /// value this build does not know is dropped and the intersection of "what
-    /// the client claims" and "what this build understands" is what remains.
-    pub supported_credential_types: Vec<CredentialType>,
+}
+
+/// Local-logon context is separate from the credential request sent to a source.
+#[derive(Debug, Clone)]
+pub struct LogonContext {
+    pub logon_type: LogonType,
+    pub tty: Option<String>,
+    pub remote_host: Option<String>,
+}
+
+impl LogonStart {
+    pub fn context(&self) -> LogonContext {
+        LogonContext {
+            logon_type: self.logon_type,
+            tty: self.tty.clone(),
+            remote_host: self.remote_host.clone(),
+        }
+    }
+}
+
+impl core::ops::Deref for LogonStart {
+    type Target = AuthenticationRequest;
+    fn deref(&self) -> &Self::Target {
+        &self.authentication
+    }
+}
+impl core::ops::DerefMut for LogonStart {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.authentication
+    }
 }
 
 /// One thing the authority wants from the user.
@@ -736,94 +749,28 @@ pub(crate) fn write_profile_body(w: &mut Writer, profile: &Profile) -> Result<()
 }
 
 pub(crate) fn read_logon_start_body(b: &mut Reader<'_>) -> Result<LogonStart, WireError> {
+    let authentication = crate::authentication::read_request(&mut b.open()?)?;
     let logon_type = LogonType::from_u8(b.u8()?).ok_or(WireError::UnknownValue)?;
-    let identifier_type = IdentifierType::from_u8(b.u8()?).ok_or(WireError::UnknownValue)?;
-    let identifier = b.bytes(MAX_IDENTIFIER_BYTES)?.to_vec();
     let tty = frame::non_empty(b.string(MAX_TTY_BYTES)?);
     let remote_host = frame::non_empty(b.string(MAX_REMOTE_HOST_BYTES)?);
-
-    let supported_credential_types = read_supported_credential_types(b)?;
-    let required_credential_type = match b.u8()? {
-        0 => None,
-        v => Some(CredentialType::from_u8(v).ok_or(WireError::UnknownValue)?),
-    };
-    let ssh_binding = match b.u8()? {
-        0 => None,
-        1 => {
-            let mut r = b.open()?;
-            let connection = r.take(16)?.try_into().map_err(|_| WireError::Truncated)?;
-            let value = crate::ssh::Binding {
-                connection,
-                session: r.bytes(64)?.to_vec(),
-                username: r.string(256)?.to_owned(),
-            };
-            value.validate()?;
-            if !r.at_end() {
-                return Err(WireError::UnknownValue);
-            }
-            Some(value)
-        }
-        _ => return Err(WireError::UnknownValue),
-    };
-    if required_credential_type.is_some_and(|t| !supported_credential_types.contains(&t))
-        || supported_credential_types.contains(&CredentialType::SshPublicKey)
-            != ssh_binding.is_some()
-        || ssh_binding.as_ref().is_some_and(|b| {
-            identifier_type != IdentifierType::Username || b.username.as_bytes() != identifier
-        })
-    {
-        return Err(WireError::UnknownValue);
-    }
-
     Ok(LogonStart {
-        required_credential_type,
-        ssh_binding,
+        authentication,
         logon_type,
-        identifier_type,
-        identifier,
         tty,
         remote_host,
-        supported_credential_types,
     })
 }
 
 pub(crate) fn write_logon_start_body(w: &mut Writer, start: &LogonStart) -> Result<(), WireError> {
-    if start
-        .required_credential_type
-        .is_some_and(|t| !start.supported_credential_types.contains(&t))
-        || start
-            .supported_credential_types
-            .contains(&CredentialType::SshPublicKey)
-            != start.ssh_binding.is_some()
-        || start.ssh_binding.as_ref().is_some_and(|b| {
-            start.identifier_type != IdentifierType::Username
-                || b.username.as_bytes() != start.identifier
-        })
-    {
-        return Err(WireError::UnknownValue);
-    }
+    let nested = w.open();
+    crate::authentication::write_request(w, &start.authentication)?;
+    w.close(nested);
     w.u8(start.logon_type as u8);
-    w.u8(start.identifier_type as u8);
-    w.bytes(&start.identifier, MAX_IDENTIFIER_BYTES)?;
     w.string(start.tty.as_deref().unwrap_or(""), MAX_TTY_BYTES)?;
     w.string(
         start.remote_host.as_deref().unwrap_or(""),
         MAX_REMOTE_HOST_BYTES,
-    )?;
-    write_supported_credential_types(w, &start.supported_credential_types)?;
-    w.u8(start.required_credential_type.map_or(0, |v| v as u8));
-    w.u8(u8::from(start.ssh_binding.is_some()));
-    if let Some(binding) = &start.ssh_binding {
-        binding.validate()?;
-        let at = w.open();
-        for byte in binding.connection {
-            w.u8(byte);
-        }
-        w.bytes(&binding.session, 64)?;
-        w.string(&binding.username, 256)?;
-        w.close(at);
-    }
-    Ok(())
+    )
 }
 
 /// A capability list, dropping any value this build does not recognise.
@@ -1230,15 +1177,17 @@ mod tests {
 
     fn start() -> LogonStart {
         LogonStart {
-            required_credential_type: None,
-            ssh_binding: None,
+            authentication: crate::wire::AuthenticationRequest {
+                required_credential_type: None,
+                ssh_binding: None,
+                identifier_type: IdentifierType::Username,
+                identifier: b"jack".to_vec(),
+                supported_credential_types: vec![CredentialType::Password],
+            },
 
             logon_type: LogonType::Interactive,
-            identifier_type: IdentifierType::Username,
-            identifier: b"jack".to_vec(),
             tty: Some("/dev/console".into()),
             remote_host: None,
-            supported_credential_types: vec![CredentialType::Password],
         }
     }
 
@@ -1479,11 +1428,17 @@ mod tests {
     fn unknown_capability_is_dropped_not_rejected() {
         let mut bytes = encode_logon_start(&start()).unwrap();
 
-        // Append an unknown credential type to the capability list.
-        bytes.insert(bytes.len() - 2, 99);
-        let list_len_at = bytes.len() - 2 - 2 - 4;
-        let list_len = u32::from_le_bytes(bytes[list_len_at..list_len_at + 4].try_into().unwrap());
-        bytes[list_len_at..list_len_at + 4].copy_from_slice(&(list_len + 1).to_le_bytes());
+        // Locate the shared request and append an unknown collection type.
+        let nested_len_at = HEADER_BYTES + 4;
+        let request_at = nested_len_at + 4;
+        let list_len_at = request_at + 1 + 4 + start().identifier.len();
+        let list_len =
+            u32::from_le_bytes(bytes[list_len_at..list_len_at + 4].try_into().unwrap()) as usize;
+        bytes.insert(list_len_at + 4 + list_len, 99);
+        bytes[list_len_at..list_len_at + 4].copy_from_slice(&((list_len + 1) as u32).to_le_bytes());
+        let nested_len =
+            u32::from_le_bytes(bytes[nested_len_at..nested_len_at + 4].try_into().unwrap());
+        bytes[nested_len_at..nested_len_at + 4].copy_from_slice(&(nested_len + 1).to_le_bytes());
         let body_len = (bytes.len() - HEADER_BYTES - 4) as u32;
         bytes[HEADER_BYTES..HEADER_BYTES + 4].copy_from_slice(&body_len.to_le_bytes());
         let total = bytes.len() as u32;
@@ -1719,12 +1674,17 @@ mod tests {
     }
 
     #[test]
-    fn remote_interactive_round_trips_on_version_one() {
+    fn remote_interactive_round_trips_on_current_version() {
         let mut opening = start();
         opening.logon_type = LogonType::RemoteInteractive;
         let bytes = encode_logon_start(&opening).unwrap();
-        assert_eq!(u16::from_le_bytes([bytes[4], bytes[5]]), 1);
-        assert_eq!(bytes[HEADER_BYTES + 4], 10);
+        assert_eq!(u16::from_le_bytes([bytes[4], bytes[5]]), VERSION);
+        let length = u32::from_le_bytes(
+            bytes[HEADER_BYTES + 4..HEADER_BYTES + 8]
+                .try_into()
+                .unwrap(),
+        ) as usize;
+        assert_eq!(bytes[HEADER_BYTES + 8 + length], 10);
         assert_eq!(
             decode_logon_start(&bytes).unwrap().logon_type,
             LogonType::RemoteInteractive
@@ -1734,7 +1694,12 @@ mod tests {
     #[test]
     fn unknown_logon_type_is_rejected() {
         let mut bytes = encode_logon_start(&start()).unwrap();
-        bytes[HEADER_BYTES + 4] = 99;
+        let length = u32::from_le_bytes(
+            bytes[HEADER_BYTES + 4..HEADER_BYTES + 8]
+                .try_into()
+                .unwrap(),
+        ) as usize;
+        bytes[HEADER_BYTES + 8 + length] = 99;
         assert_eq!(
             decode_logon_start(&bytes).unwrap_err(),
             WireError::UnknownValue

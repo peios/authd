@@ -970,7 +970,7 @@ fn qualify(_source: &Arc<Source>, canonical: &str) -> String {
 /// on means a source is never asked about a name no source is permitted to hold,
 /// and it makes `jack@local` a clean refusal rather than a mysterious absence
 /// once realms exist.
-fn name_is_usable(name: &str) -> bool {
+pub(crate) fn name_is_usable(name: &str) -> bool {
     !name.is_empty()
         && name.len() <= auth_core::ident::MAX_NAME_BYTES
         && name.bytes().all(|b| (0x20..=0x7e).contains(&b))

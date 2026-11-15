@@ -94,7 +94,7 @@ use crate::ident::{Fields, Kind, Outcome, Value, Withheld};
 use crate::secret::Secret;
 use crate::wire::{
     CredentialChangeStart, CredentialEnrollStart, CredentialRequest, CredentialResponse, Denial,
-    LogonStart, LogonTypes, MAX_REASON_BYTES, Profile, WireError,
+    LogonTypes, MAX_REASON_BYTES, Profile, WireError,
 };
 
 /// Four literal bytes opening every message: **P**eios **P**rincipal **S**ource
@@ -106,7 +106,7 @@ use crate::wire::{
 /// hard error on the first four bytes.
 pub const MAGIC: [u8; 4] = *b"PPSI";
 
-pub const VERSION: u16 = 1;
+pub const VERSION: u16 = 2;
 
 /// PGSS Logon's twelve-byte header plus the conversation id.
 pub const HEADER_BYTES: usize = frame::COMMON_HEADER_BYTES + 8;
@@ -279,11 +279,12 @@ pub struct Registered {
 
 /// authd asking a source to authenticate someone. Opens a conversation.
 ///
-/// This is PGSS Logon's [`LogonStart`] verbatim — nested, so it can grow on its
-/// own schedule — plus the one thing only authd knows.
+/// The shared authentication request is nested so it can grow independently.
+/// Local logon context is optional: general authentication has no logon type.
 #[derive(Debug)]
 pub struct Authenticate {
-    pub start: LogonStart,
+    pub start: crate::wire::AuthenticationRequest,
+    pub logon: Option<crate::wire::LogonContext>,
     /// The **verified** identity of the peer that originated this logon, as
     /// binary SID bytes, taken from the connected socket and never from a
     /// message body.
@@ -387,7 +388,7 @@ pub struct Refusal {
 /// conversation. PSPU §2.21.
 ///
 /// PGSS Logon's [`CredentialChangeStart`] nested whole, as [`Authenticate`]
-/// nests `LogonStart`, plus the one thing only authd knows.
+/// nests its shared authentication request, plus the one thing only authd knows.
 ///
 /// The interrogation that follows is the ordinary one — [`CredentialRequest`]
 /// and [`CredentialResponse`], relayed — and it ends in
@@ -711,24 +712,54 @@ pub fn encode_authenticate(
     let mut w = begin(MSG_AUTHENTICATE, conversation);
     let body = w.open();
 
-    // Nested rather than inlined: LogonStart is PGSS Logon's struct and grows
-    // on PGSS Logon's schedule. Flattening it here would mean a field appended
-    // there silently displaced `originator`.
+    // The neutral request is nested; extending it cannot displace the verified
+    // originator or optional local logon context.
     let nested = w.open();
-    crate::wire::write_logon_start_body(&mut w, &authenticate.start)?;
+    crate::authentication::write_request(&mut w, &authenticate.start)?;
     w.close(nested);
 
     w.bytes(&authenticate.originator, MAX_SID_BYTES)?;
+    w.u8(u8::from(authenticate.logon.is_some()));
+    if let Some(context) = &authenticate.logon {
+        let nested = w.open();
+        w.u8(context.logon_type as u8);
+        w.string(
+            context.tty.as_deref().unwrap_or(""),
+            crate::wire::MAX_TTY_BYTES,
+        )?;
+        w.string(
+            context.remote_host.as_deref().unwrap_or(""),
+            crate::wire::MAX_REMOTE_HOST_BYTES,
+        )?;
+        w.close(nested);
+    }
     w.close(body);
     w.finish()
 }
 
 pub fn decode_authenticate(buf: &[u8]) -> Result<Authenticate, WireError> {
     let mut b = open_body(buf, MSG_AUTHENTICATE)?;
-    let start = crate::wire::read_logon_start_body(&mut b.open()?)?;
+    let start = crate::authentication::read_request(&mut b.open()?)?;
+    let originator = b.bytes(MAX_SID_BYTES)?.to_vec();
+    let logon = match b.u8()? {
+        0 => None,
+        1 => {
+            let mut context = b.open()?;
+            Some(crate::wire::LogonContext {
+                logon_type: crate::wire::LogonType::from_u8(context.u8()?)
+                    .ok_or(WireError::UnknownValue)?,
+                tty: crate::frame::non_empty(context.string(crate::wire::MAX_TTY_BYTES)?),
+                remote_host: crate::frame::non_empty(
+                    context.string(crate::wire::MAX_REMOTE_HOST_BYTES)?,
+                ),
+            })
+        }
+        _ => return Err(WireError::UnknownValue),
+    };
     Ok(Authenticate {
         start,
-        originator: b.bytes(MAX_SID_BYTES)?.to_vec(),
+        originator,
+        logon,
     })
 }
 
@@ -875,7 +906,7 @@ pub fn encode_change_credential(
     let mut w = begin(MSG_CHANGE_CREDENTIAL, conversation);
     let body = w.open();
 
-    // Nested for the reason `Authenticate` nests its `LogonStart`: the start is
+    // Nested for the reason `Authenticate` nests its shared request: the start is
     // PGSS Logon's and grows on PGSS Logon's schedule, and a field appended
     // there must not displace `principal`.
     let nested = w.open();
@@ -1141,20 +1172,23 @@ pub fn decode_changed(buf: &[u8]) -> Result<Changed, WireError> {
 mod tests {
     use super::*;
     use crate::wire::{
-        Answer, CredentialType, IdentifierType, LogonType, Message, MessageSeverity, Prompt,
+        Answer, CredentialType, IdentifierType, LogonStart, LogonType, Message, MessageSeverity,
+        Prompt,
     };
 
     fn start() -> LogonStart {
         LogonStart {
-            required_credential_type: None,
-            ssh_binding: None,
+            authentication: crate::wire::AuthenticationRequest {
+                required_credential_type: None,
+                ssh_binding: None,
+                identifier_type: IdentifierType::Username,
+                identifier: b"jack".to_vec(),
+                supported_credential_types: vec![CredentialType::Password],
+            },
 
             logon_type: LogonType::Interactive,
-            identifier_type: IdentifierType::Username,
-            identifier: b"jack".to_vec(),
             tty: Some("/dev/console".into()),
             remote_host: None,
-            supported_credential_types: vec![CredentialType::Password],
         }
     }
 
@@ -1243,7 +1277,8 @@ mod tests {
         let bytes = encode_authenticate(
             7,
             &Authenticate {
-                start: start(),
+                start: start().authentication,
+                logon: Some(start().context()),
                 originator: vec![1, 1, 0, 0, 0, 0, 0, 5, 18, 0, 0, 0],
             },
         )
@@ -1252,8 +1287,14 @@ mod tests {
         assert_eq!(decode_envelope(&bytes).unwrap().conversation, 7);
         let decoded = decode_authenticate(&bytes).unwrap();
         assert_eq!(decoded.start.identifier, b"jack");
-        assert_eq!(decoded.start.logon_type, LogonType::Interactive);
-        assert_eq!(decoded.start.tty.as_deref(), Some("/dev/console"));
+        assert_eq!(
+            decoded.logon.as_ref().unwrap().logon_type,
+            LogonType::Interactive
+        );
+        assert_eq!(
+            decoded.logon.as_ref().unwrap().tty.as_deref(),
+            Some("/dev/console")
+        );
         assert_eq!(
             decoded.originator,
             vec![1, 1, 0, 0, 0, 0, 0, 5, 18, 0, 0, 0]
@@ -1269,7 +1310,8 @@ mod tests {
         let mut bytes = encode_authenticate(
             1,
             &Authenticate {
-                start: start(),
+                start: start().authentication,
+                logon: Some(start().context()),
                 originator: originator.clone(),
             },
         )
@@ -1807,7 +1849,8 @@ mod tests {
             encode_authenticate(
                 1,
                 &Authenticate {
-                    start: start(),
+                    start: start().authentication,
+                    logon: Some(start().context()),
                     originator: vec![1, 1, 0, 0, 0, 0, 0, 5, 18, 0, 0, 0],
                 },
             )

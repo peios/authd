@@ -14,19 +14,34 @@ typedef struct peios_auth_client_options {
     peios_auth_bytes self_socket;
     uint64_t reply_timeout_ms;
 } peios_auth_client_options;
-typedef struct peios_auth_logon_request {
+typedef struct peios_auth_authentication_request {
     size_t size;
-    uint32_t logon_type;
     uint32_t identifier_type;
     peios_auth_bytes identifier;
-    peios_auth_bytes tty;
-    peios_auth_bytes remote_host;
     uint32_t required_credential_type;
     uint32_t supported_credentials;
     peios_auth_bytes ssh_connection;
     peios_auth_bytes ssh_session;
     peios_auth_bytes ssh_username;
+} peios_auth_authentication_request;
+typedef struct peios_auth_authenticate_request {
+    size_t size;
+    peios_auth_authentication_request authentication;
+    uint32_t groups;
+    const peios_auth_bytes *claims;
+    size_t claim_count;
+} peios_auth_authenticate_request;
+typedef struct peios_auth_logon_request {
+    size_t size;
+    peios_auth_authentication_request authentication;
+    uint32_t logon_type;
+    peios_auth_bytes tty;
+    peios_auth_bytes remote_host;
 } peios_auth_logon_request;
+typedef struct peios_auth_authentication_view {
+    uint32_t verified_credentials;
+    size_t absent_claim_count;
+} peios_auth_authentication_view;
 typedef struct peios_auth_service_request {
     size_t size;
     peios_auth_bytes identity;

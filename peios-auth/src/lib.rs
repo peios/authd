@@ -14,8 +14,8 @@ use auth_abi as abi;
 mod identity;
 mod sys;
 pub use identity::{
-    Account, AccountKey, Claim, ClaimValue, EnumerateRequest, Field, Identity, IdentityKind, Key,
-    Record, Reference, fields,
+    Account, AccountKey, Authenticated, Claim, ClaimValue, EnumerateRequest, Field, Identity,
+    IdentityKind, Key, Record, Reference, fields,
 };
 
 /// Application-visible operation progress. Denials and failures are Errors.
@@ -91,7 +91,7 @@ pub struct Options<'a> {
 }
 
 /// Credential types this client knows how to collect.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Capabilities(pub u32);
 impl Capabilities {
     // Bit values are the public libauth capability mask from peios/auth.h.
@@ -120,16 +120,53 @@ pub struct SshBinding<'a> {
     pub username: &'a str,
 }
 
-/// A proposed logon; authd decides whether the connected caller may originate it.
-pub struct LogonRequest<'a> {
-    pub logon_type: LogonType,
+/// The shared credential collection request. It contains no password.
+pub struct AuthenticationRequest<'a> {
     pub username: &'a str,
-    pub tty: Option<&'a str>,
-    pub remote_host: Option<&'a str>,
     pub supported_credentials: Capabilities,
-    /// None allows the authority's credential policy, including credential-free policy.
     pub required_credential_type: Option<u32>,
     pub ssh_binding: Option<SshBinding<'a>>,
+}
+
+impl AuthenticationRequest<'_> {
+    fn raw(&self) -> abi::AuthenticationRequest {
+        abi::AuthenticationRequest {
+            size: size_of::<abi::AuthenticationRequest>(),
+            identifier_type: 1,
+            identifier: string(self.username),
+            required_credential_type: self.required_credential_type.unwrap_or(0),
+            supported_credentials: self.supported_credentials.0,
+            ssh_connection: self
+                .ssh_binding
+                .as_ref()
+                .map(|b| span(b.connection))
+                .unwrap_or(span(&[])),
+            ssh_session: self
+                .ssh_binding
+                .as_ref()
+                .map(|b| span(b.session))
+                .unwrap_or(span(&[])),
+            ssh_username: self
+                .ssh_binding
+                .as_ref()
+                .map(|b| string(b.username))
+                .unwrap_or(span(&[])),
+        }
+    }
+}
+
+pub struct AuthenticateRequest<'a> {
+    pub authentication: AuthenticationRequest<'a>,
+    pub groups: bool,
+    pub claims: &'a [&'a str],
+}
+
+/// The shared authentication followed by local logon policy and token creation.
+pub struct LogonRequest<'a> {
+    pub authentication: AuthenticationRequest<'a>,
+    pub logon_type: LogonType,
+    pub tty: Option<&'a str>,
+    pub remote_host: Option<&'a str>,
 }
 
 /// Configuration handle. Operations remain valid after this is dropped.
@@ -145,7 +182,7 @@ impl Client {
     /// Create a client with copied configuration; reject an incompatible library ABI.
     pub fn with_options(options: Options<'_>) -> Result<Self, Error> {
         // SAFETY: this scalar query takes no pointers or mutable state.
-        if unsafe { sys::peios_auth_abi_version() } != 1 {
+        if unsafe { sys::peios_auth_abi_version() } != 2 {
             return Err(invalid());
         }
         let raw = abi::ClientOptions {
@@ -167,31 +204,26 @@ impl Client {
     pub fn logon(&self, request: LogonRequest<'_>) -> Result<Operation, Error> {
         let raw = abi::LogonRequest {
             size: size_of::<abi::LogonRequest>(),
+            authentication: request.authentication.raw(),
             logon_type: request.logon_type as u32,
-            identifier_type: 1,
-            identifier: string(request.username),
             tty: string(request.tty.unwrap_or("")),
             remote_host: string(request.remote_host.unwrap_or("")),
-            required_credential_type: request.required_credential_type.unwrap_or(0),
-            supported_credentials: request.supported_credentials.0,
-            ssh_connection: request
-                .ssh_binding
-                .as_ref()
-                .map(|b| span(b.connection))
-                .unwrap_or(span(&[])),
-            ssh_session: request
-                .ssh_binding
-                .as_ref()
-                .map(|b| span(b.session))
-                .unwrap_or(span(&[])),
-            ssh_username: request
-                .ssh_binding
-                .as_ref()
-                .map(|b| string(b.username))
-                .unwrap_or(span(&[])),
         };
         // SAFETY: this owns a live client; request buffers outlive the call.
         Operation::new(unsafe { sys::peios_auth_logon_begin(self.handle.as_ptr(), &raw) })
+    }
+    /// Authenticate and request explicit disclosure, without creating an OS token.
+    pub fn authenticate(&self, request: AuthenticateRequest<'_>) -> Result<Operation, Error> {
+        let claims: Vec<_> = request.claims.iter().map(|name| string(name)).collect();
+        let raw = abi::AuthenticateRequest {
+            size: size_of::<abi::AuthenticateRequest>(),
+            authentication: request.authentication.raw(),
+            groups: u32::from(request.groups),
+            claims: claims.as_ptr(),
+            claim_count: claims.len(),
+        };
+        // SAFETY: raw, claims and every borrowed span remain live through begin.
+        Operation::new(unsafe { sys::peios_auth_authenticate_begin(self.handle.as_ptr(), &raw) })
     }
     /// Request a token for the named service identity; the authority checks permission.
     pub fn service_attest(&self, identity: &str, service: &str) -> Result<Operation, Error> {

@@ -31,14 +31,10 @@
             "u64"
         ]
     ],
-    "LogonRequest": [
+    "AuthenticationRequest": [
         [
             "size",
             "usize"
-        ],
-        [
-            "logon_type",
-            "u32"
         ],
         [
             "identifier_type",
@@ -46,14 +42,6 @@
         ],
         [
             "identifier",
-            "Bytes"
-        ],
-        [
-            "tty",
-            "Bytes"
-        ],
-        [
-            "remote_host",
             "Bytes"
         ],
         [
@@ -75,6 +63,60 @@
         [
             "ssh_username",
             "Bytes"
+        ]
+    ],
+    "AuthenticateRequest": [
+        [
+            "size",
+            "usize"
+        ],
+        [
+            "authentication",
+            "AuthenticationRequest"
+        ],
+        [
+            "groups",
+            "u32"
+        ],
+        [
+            "claims",
+            "*const Bytes"
+        ],
+        [
+            "claim_count",
+            "usize"
+        ]
+    ],
+    "LogonRequest": [
+        [
+            "size",
+            "usize"
+        ],
+        [
+            "authentication",
+            "AuthenticationRequest"
+        ],
+        [
+            "logon_type",
+            "u32"
+        ],
+        [
+            "tty",
+            "Bytes"
+        ],
+        [
+            "remote_host",
+            "Bytes"
+        ]
+    ],
+    "AuthenticationView": [
+        [
+            "verified_credentials",
+            "u32"
+        ],
+        [
+            "absent_claim_count",
+            "usize"
         ]
     ],
     "ServiceRequest": [

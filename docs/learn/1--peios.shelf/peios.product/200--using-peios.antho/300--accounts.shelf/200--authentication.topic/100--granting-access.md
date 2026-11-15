@@ -77,13 +77,14 @@ After editing policy, inspect a freshly issued token with `token show
 it. Check both inherited access and the fallback case. A successful sign-in
 alone does not verify the intended access rules.
 
-## Separate the three gates
+## Separate the access checks
 
 A sign-in client must pass more than the account's credential check:
 
 1. The socket's security descriptor must allow it to connect.
-2. Its own identity must be allowed to originate the requested logon type.
-3. The target account and principal source must allow that logon and its
+2. AuthenticationSecurity must grant the connected token the Logon right.
+3. Its own identity must be allowed to originate the requested logon type.
+4. The target account and principal source must allow that logon and its
    credentials.
 
 The `LogonTypes` value in a principal-policy record controls what the
@@ -93,7 +94,20 @@ signed in. Changing one does not change the other.
 Originator policy matches the peer token's **user SID**, not its group
 memberships. A service SID used as the user of a virtual service account can
 match; merely carrying the SID as a group is insufficient. SYSTEM has an
-explicit originator allowance.
+explicit default Logon ACE and no additional caller logon-type restriction.
+
+Authenticate uses a separate operation right and creates no OS session or
+token. It shares credential verification with Logon, then discloses the
+requested, permitted source groups and claims. It does not interpret those
+claims as permission to use a Wi-Fi network or another application.
+
+For a virtual service account, configure capability names under its literal
+service-SID policy record in Capabilities. peinit requests its service token
+from authd, which adds those SIDs as enabled token groups. The default
+AuthenticationSecurity descriptor maps peios.auth.authenticate and
+peios.auth.logon to separate operations. Neither grants disclosure by itself.
+Changing assignments requires a new service token, normally by restart.
+The registry key's security descriptor controls who can edit this policy.
 
 ## Apply changes at the right boundary
 
@@ -102,6 +116,8 @@ Different settings have different refresh points:
 | Setting | When authd uses it | Effect on existing state |
 |---|---|---|
 | Token grants | When issuing a token | Existing tokens retain their grants |
+| AuthenticationSecurity | Once per Authenticate or Logon request | An active conversation retains its descriptor snapshot |
+| Service Capabilities | When attesting a new service token | Restart applies the assignment |
 | `SessionEndSecurity` | Each session-end permission check | A later request is checked again |
 | `LogonSocketDescriptor` | Authority startup | An existing socket is not restamped by a registry edit |
 | Source registration policy | Source registration | A connected source retains its accepted configuration |

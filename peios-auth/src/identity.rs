@@ -85,6 +85,12 @@ impl Client {
     }
 }
 #[derive(Debug)]
+pub struct Authenticated {
+    pub identity: Record,
+    pub verified_credentials: super::Capabilities,
+    pub absent_claims: Vec<String>,
+}
+#[derive(Debug)]
 pub struct Identity {
     pub outcome: u32,
     pub records: Vec<Record>,
@@ -147,6 +153,26 @@ pub struct AccountKey {
 }
 
 impl Operation {
+    /// Copy authenticated identity and explicit absence. No token is attached.
+    pub fn authenticated(&self) -> Result<Authenticated, Error> {
+        // SAFETY: getters borrow one immutable live operation; every span is
+        // copied before the operation can be mutated or destroyed.
+        unsafe {
+            let view =
+                read(|out| sys::peios_auth_operation_authentication(self.handle.as_ptr(), out))?;
+            let mut absent_claims = Vec::with_capacity(view.absent_claim_count);
+            for index in 0..view.absent_claim_count {
+                absent_claims.push(copy_text(read(|out| {
+                    sys::peios_auth_authentication_absent_claim(self.handle.as_ptr(), index, out)
+                })?));
+            }
+            Ok(Authenticated {
+                identity: self.record(0)?,
+                verified_credentials: super::Capabilities(view.verified_credentials),
+                absent_claims,
+            })
+        }
+    }
     /// Copy the completed identity result, including partial results and the next cursor.
     pub fn identity(&self) -> Result<Identity, Error> {
         // SAFETY: every getter in this method uses the same immutable live

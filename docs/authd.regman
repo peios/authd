@@ -57,11 +57,13 @@ grants SYSTEM and Administrators full access and Authenticated Users connect
 access. That permits signed-in accounts to request self-service credential
 changes and session ending, subject to each operation's authorization.
 
-Connecting does not grant logon origination. For a non-SYSTEM originator,
+Connecting does not grant Authenticate or Logon. AuthenticationSecurity
+authorizes those operations against the connected caller's token. For a non-SYSTEM originator,
 `Machine\Generic\Authn\Policy\<principal> LogonTypes` must also permit the
 requested type for the peer token's user security identifier (SID). If the
 socket already admits that peer, only the originator grant needs changing.
-SYSTEM can originate every supported logon type without a policy record.
+SYSTEM needs the Logon operation grant too, but has no additional logon-type
+restriction. The default AuthenticationSecurity descriptor grants it.
 
 A replacement descriptor that omits an account can prevent its self-service
 operations. authd reads this value at startup and applies it when binding
@@ -70,6 +72,64 @@ the socket; editing the registry does not restamp a running socket.
 This value does not configure `/run/psi.sock` or `/run/ident.sock`. Their
 descriptors are fixed by authd. All three sockets use protected descriptors
 to prevent inherited access from changing the intended grants.
+
+--- machine\generic\authn\policy authenticationsecurity
+canonical: Machine\Generic\Authn\Policy AuthenticationSecurity
+type: REG_SZ
+default: SYSTEM has all four rights; distinct capability SIDs grant Authenticate and Logon
+valid: nonempty SDDL; unreadable, incorrectly typed or malformed policy denies access
+applies: live (one descriptor snapshot per request)
+
+Security descriptor authorizing general authentication, local logon and
+Authenticate result disclosure. The registry key's descriptor controls who
+can administer this value; this stored descriptor controls authd requests.
+
+Access rights are Authenticate (0x1), Logon (0x2), ReadGroups (0x4) and
+ReadClaim (0x8). Generic read maps to 0xc, generic execute to 0x3, generic
+write to zero and generic all to 0xf. SYSTEM has no operation bypass.
+ServiceAttest retains its separate SYSTEM-and-PID-1 authorization.
+
+The default grants Authenticate to the capability named
+`peios.auth.authenticate`, and Logon to `peios.auth.logon`. A custom
+capability SID is S-1-15-3 followed by SHA-256 of the exact UTF-8 capability
+name, split into eight little-endian 32-bit words. Neither capability grants
+group or claim disclosure. Direct service-SID grants are also supported.
+
+ReadClaim object ACEs target a claim GUID. Derive UUID v5 using namespace
+7503a8f1-bb10-4b57-a1d2-d4946256f404 and the UTF-8 claim name after ASCII
+lowercasing. Non-ASCII spelling is exact. Department and department both
+select c4abd379-a4d6-5910-bccf-9f01f9a4738f. GUIDs use the platform's
+little-endian wire layout. Use auth-policy's shared claim_guid helper rather
+than reimplementing the derivation in administration tools.
+
+Authenticate checks every requested disclosure before collecting credentials.
+An unauthorized request is refused; an authorized absent claim is reported
+as absent. Group disclosure returns validated source memberships, excluding
+groups synthesized for a local token. These controls apply to Authenticate;
+the separate identity-lookup interface has its own disclosure contract.
+
+If this value is absent, the built-in descriptor applies. A present but
+unusable value never restores a default grant. Edits affect later requests,
+not a conversation that already captured its descriptor.
+
+--- machine\generic\authn\policy\<principal> capabilities
+canonical: Machine\Generic\Authn\Policy\<principal> Capabilities
+type: REG_MULTI_SZ
+default: empty
+valid: at most 32 nonempty UTF-8 capability names, each at most 256 bytes without NUL
+applies: new service tokens (restart the service)
+
+Capabilities assigned to an attested service. The record must be keyed by
+the literal service SID, not a friendly principal name or asserted membership.
+During ServiceAttest, authd reads that service's direct record and adds the
+derived SIDs as enabled ordinary token groups. A confinement capability list
+alone does not create these grants. Duplicate names/SIDs are included once.
+
+The requesting application cannot supply its own capability list. Configure
+the assignment through protected machine policy. An unreadable or malformed
+assignment refuses token creation; a missing record or value assigns none.
+This value does not assign capabilities through peinit's separate SYSTEM
+token path or through credentialled user Logon.
 
 --- machine\generic\authn\policy sessionendsecurity
 canonical: Machine\Generic\Authn\Policy SessionEndSecurity
@@ -240,7 +300,8 @@ only. Group memberships do not contribute. A service SID works here when
 it is the user SID of a virtual service account, not merely a service group
 on another account's token.
 
-SYSTEM can originate every supported logon type without a record. For
+After AuthenticationSecurity grants Logon, SYSTEM can originate every
+supported logon type without a LogonTypes record. For
 other callers, a missing record, absent value, or empty list grants no
 origination. Connection permission is separately controlled by
 `Machine\Generic\Authn\Policy LogonSocketDescriptor`.

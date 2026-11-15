@@ -46,7 +46,7 @@ use std::time::Duration;
 use auth_core::psi;
 use auth_core::transport::send_message;
 use auth_core::wire::{
-    CredentialChangeStart, CredentialEnrollStart, CredentialRequest, CredentialResponse, LogonStart,
+    CredentialChangeStart, CredentialEnrollStart, CredentialRequest, CredentialResponse,
 };
 use peios::security::{Sid, SidRef};
 
@@ -320,29 +320,21 @@ impl Conversation {
     }
 
     /// Ask the source to authenticate someone.
-    pub fn authenticate(&self, start: &LogonStart, originator: &[u8]) -> io::Result<()> {
+    pub fn authenticate_request(
+        &self,
+        request: &auth_core::wire::AuthenticationRequest,
+        logon: Option<auth_core::wire::LogonContext>,
+        originator: &[u8],
+    ) -> io::Result<()> {
         let message = psi::encode_authenticate(
             self.id,
             &psi::Authenticate {
-                // Cheap enough to rebuild rather than thread a borrow through
-                // the encoder, and it keeps `LogonStart` free of Clone — which
-                // it must be, since a future credential-bearing field would
-                // make cloning it a way to duplicate a secret.
-                start: LogonStart {
-                    required_credential_type: start.required_credential_type,
-                    ssh_binding: start.ssh_binding.clone(),
-
-                    logon_type: start.logon_type,
-                    identifier_type: start.identifier_type,
-                    identifier: start.identifier.clone(),
-                    tty: start.tty.clone(),
-                    remote_host: start.remote_host.clone(),
-                    supported_credential_types: start.supported_credential_types.clone(),
-                },
+                start: request.clone(),
+                logon,
                 originator: originator.to_vec(),
             },
         )
-        .map_err(|_| io::Error::other("could not encode an authenticate"))?;
+        .map_err(|_| io::Error::other("could not encode authentication"))?;
         self.source.send(&message)
     }
 
@@ -1230,6 +1222,7 @@ fn decode(source: &Arc<Source>, envelope: &psi::Envelope, buf: &[u8]) -> Option<
 
 #[cfg(test)]
 mod tests {
+    use auth_core::wire::LogonStart;
     use super::*;
 
     fn sid(text: &str) -> Sid {
@@ -1344,16 +1337,21 @@ mod tests {
             username: "alice".into(),
         };
         let start = LogonStart {
+            authentication: auth_core::wire::AuthenticationRequest {
+                identifier_type: auth_core::wire::IdentifierType::Username,
+                identifier: b"alice".to_vec(),
+                supported_credential_types: vec![auth_core::CredentialType::SshPublicKey],
+                required_credential_type: Some(auth_core::CredentialType::SshPublicKey),
+                ssh_binding: Some(binding.clone()),
+            },
+
             logon_type: auth_core::wire::LogonType::RemoteInteractive,
-            identifier_type: auth_core::wire::IdentifierType::Username,
-            identifier: b"alice".to_vec(),
             tty: None,
             remote_host: Some("192.0.2.1".into()),
-            supported_credential_types: vec![auth_core::CredentialType::SshPublicKey],
-            required_credential_type: Some(auth_core::CredentialType::SshPublicKey),
-            ssh_binding: Some(binding.clone()),
         };
-        conversation.authenticate(&start, &[1, 2, 3]).unwrap();
+        conversation
+            .authenticate_request(&start.authentication, Some(start.context()), &[1, 2, 3])
+            .unwrap();
         let message = auth_core::transport::recv_message(&psi::FRAMING, &peer).unwrap();
         let decoded = psi::decode_authenticate(message.expose()).unwrap();
         assert_eq!(decoded.start.ssh_binding, Some(binding));

@@ -16,6 +16,94 @@ use crate::api::*;
 use crate::results::*;
 
 static NEXT_SOCKET: AtomicUsize = AtomicUsize::new(0);
+
+#[test]
+fn authenticate_uses_the_shared_conversation_and_never_exposes_a_token() {
+    let server = Server::new(|socket| {
+        let message = recv_message(&wire::FRAMING, &socket).unwrap();
+        let request = wire::decode_authenticate_start(message.expose()).unwrap();
+        assert!(request.disclosure.groups);
+        assert_eq!(
+            request.authentication.required_credential_type,
+            Some(wire::CredentialType::Password)
+        );
+        send_message(&socket, &prompts()).unwrap();
+        let message = recv_message(&wire::FRAMING, &socket).unwrap();
+        let response = wire::decode_credential_response(message.expose()).unwrap();
+        assert_eq!(response.answers[0].data.expose(), b"test-secret");
+        send_message(
+            &socket,
+            &wire::encode_authenticated(&wire::Authenticated {
+                user_sid: vec![1, 1, 0, 0, 0, 0, 0, 5, 18, 0, 0, 0],
+                canonical_name: "jack".into(),
+                verified_credentials: vec![wire::CredentialType::Password],
+                groups: Some(Vec::new()),
+                claims: vec![auth_core::Claim {
+                    name: "Department".into(),
+                    flags: 0,
+                    values: auth_core::claim::Values::String(vec!["engineering".into()]),
+                }],
+                absent_claims: vec!["office".into()],
+            })
+            .unwrap(),
+        )
+        .unwrap();
+    });
+    unsafe {
+        let client = server.client(3000);
+        let names = [bytes(b"department"), bytes(b"office")];
+        let request = AuthenticateRequest {
+            size: size_of::<AuthenticateRequest>(),
+            authentication: start().authentication,
+            groups: 1,
+            claims: names.as_ptr(),
+            claim_count: names.len(),
+        };
+        let operation = peios_auth_authenticate_begin(client, &request);
+        assert!(!operation.is_null());
+        peios_auth_client_destroy(client);
+        assert_eq!(peios_auth_operation_wait(operation), 1);
+        let (mut round, mut messages, mut prompts) = (0, 0, 0);
+        assert_eq!(
+            peios_auth_operation_round(operation, &mut round, &mut messages, &mut prompts),
+            0
+        );
+        let answer = Answer {
+            credential_ref: 77,
+            data: bytes(b"test-secret"),
+        };
+        assert_eq!(
+            peios_auth_operation_respond(operation, round, &answer, 1),
+            0
+        );
+        assert_eq!(peios_auth_operation_wait(operation), 2);
+        assert_eq!(peios_auth_operation_take_token(operation), -1);
+        let mut result = std::mem::zeroed();
+        assert_eq!(
+            peios_auth_operation_authentication(operation, &mut result),
+            0
+        );
+        assert_eq!(result.verified_credentials, 1);
+        assert_eq!(result.absent_claim_count, 1);
+        assert_eq!(
+            peios_auth_record_field_state(operation, 0, ident::Fields::GROUPS.0),
+            5
+        );
+        let mut count = 1;
+        assert_eq!(
+            peios_auth_record_reference_count(operation, 0, ident::Fields::GROUPS.0, &mut count),
+            0
+        );
+        assert_eq!(count, 0);
+        let mut name = bytes(&[]);
+        assert_eq!(
+            peios_auth_authentication_absent_claim(operation, 0, &mut name),
+            0
+        );
+        assert_eq!(std::slice::from_raw_parts(name.data, name.len), b"office");
+        peios_auth_operation_destroy(operation);
+    }
+}
 struct Server {
     path: PathBuf,
     thread: Option<JoinHandle<()>>,
@@ -63,16 +151,19 @@ impl Drop for Server {
 fn start() -> LogonRequest {
     LogonRequest {
         size: size_of::<LogonRequest>(),
+        authentication: auth_abi::AuthenticationRequest {
+            size: size_of::<auth_abi::AuthenticationRequest>(),
+            identifier_type: 1,
+            identifier: bytes(b"jack"),
+            required_credential_type: 1,
+            supported_credentials: 1,
+            ssh_connection: bytes(&[]),
+            ssh_session: bytes(&[]),
+            ssh_username: bytes(&[]),
+        },
         logon_type: 2,
-        identifier_type: 1,
-        identifier: bytes(b"jack"),
         tty: bytes(b"/dev/tty1"),
         remote_host: bytes(&[]),
-        required_credential_type: 1,
-        supported_credentials: 1,
-        ssh_connection: bytes(&[]),
-        ssh_session: bytes(&[]),
-        ssh_username: bytes(&[]),
     }
 }
 fn prompts() -> Vec<u8> {
@@ -487,7 +578,7 @@ fn timeouts_and_invalid_requests_are_explicit() {
         request.size = 0;
         assert!(peios_auth_logon_begin(client, &request).is_null());
         request = start();
-        request.supported_credentials = 0x8000;
+        request.authentication.supported_credentials = 0x8000;
         assert!(peios_auth_logon_begin(client, &request).is_null());
         let operation = peios_auth_logon_begin(client, &start());
         assert_eq!(peios_auth_operation_wait(operation), 4);

@@ -267,15 +267,17 @@ mod tests {
 
     fn start() -> LogonStart {
         LogonStart {
-            required_credential_type: None,
-            ssh_binding: None,
+            authentication: crate::wire::AuthenticationRequest {
+                required_credential_type: None,
+                ssh_binding: None,
+                identifier_type: IdentifierType::Username,
+                identifier: b"jack".to_vec(),
+                supported_credential_types: vec![CredentialType::Password],
+            },
 
             logon_type: LogonType::Interactive,
-            identifier_type: IdentifierType::Username,
-            identifier: b"jack".to_vec(),
             tty: Some("/dev/console".into()),
             remote_host: None,
-            supported_credential_types: vec![CredentialType::Password],
         }
     }
 
@@ -297,7 +299,8 @@ mod tests {
         let message = psi::encode_authenticate(
             9,
             &psi::Authenticate {
-                start: start(),
+                start: start().authentication,
+                logon: Some(start().context()),
                 originator: vec![1, 1, 0, 0, 0, 0, 0, 5, 18, 0, 0, 0],
             },
         )

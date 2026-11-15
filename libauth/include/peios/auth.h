@@ -10,7 +10,7 @@ extern "C" {
 typedef struct peios_auth_client peios_auth_client;
 typedef struct peios_auth_operation peios_auth_operation;
 
-/* ABI 1. Requests/options start with size = sizeof(object). Zero-initialize
+/* ABI 2. Requests/options start with size = sizeof(object). Zero-initialize
  * them before setting fields. A NULL options pointer selects the system sockets
  * and a 90-second reply timeout. Zero timeout selects that default; explicit
  * timeouts are 1..86400000 milliseconds. Empty socket paths select defaults.
@@ -61,12 +61,19 @@ typedef struct peios_auth_operation peios_auth_operation;
  * Session-end counts follow PGSS: ending the caller's session replies before
  * termination, so its counts are prospective rather than confirmed kills.
  *
- * LogonRequest.identifier is a UTF-8 username (identifier_type USERNAME).
+ * AuthenticationRequest.identifier is a UTF-8 username (identifier_type USERNAME).
+ * Both AuthenticateRequest and LogonRequest embed it and set its size field.
  * supported_credentials is an OR of SUPPORT_* bits. required_credential_type
  * is PASSWORD, SSH_PUBLIC_KEY, or zero to use source policy. Empty tty and
  * remote_host are absent. SSH binding fields are all absent or all present:
  * connection is 16 nonzero-as-a-whole bytes, session is 16..64 bytes, and
  * username is nonempty UTF-8. These describe the authorized live transport.
+ * Authenticate requests groups as a boolean and named claims explicitly.
+ * Unauthorized disclosure fails before collection; authorized absent claims
+ * are available through authentication_absent_claim. Success uses record index
+ * zero with the identity/claim getters and never supplies a token descriptor.
+ * AuthenticationView.verified_credentials reports checks actually completed;
+ * require PASSWORD when no-credential source success must not be accepted.
  * Key.kind selects NAME (UTF-8 value), SID (binary value), or UNIX_ID (unix_id).
  * LookupRequest.kind can be ANY; EnumerateRequest.kind must be PRINCIPAL or
  * GROUP. A NULL group enumerates all; otherwise it names the group whose

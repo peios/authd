@@ -10,6 +10,10 @@ publish = false
 name = "authd"
 path = "src/main.rs"
 
+[[bin]]
+name = "authn-probe"
+path = "tests/native/authn-probe.rs"
+
 # authd runs at PeiosTcb holding SeCreateTokenPrivilege. Dependencies here are
 # dependencies of the most privileged userspace process on the system, so the
 # list stays short and every addition needs a reason.
@@ -22,3 +26,6 @@ auth-core = { path = "../auth-core" }
 auth-policy = { path = "../auth-policy" }
 libc = "0.2"
 peios = { git = "https://github.com/peios/peios-rs.git", rev = "4c9c0106550e3b7d8b4a98dfd0d7a5490fcf0116" }
+# The access-list API takes the SDK's object-type entries. This exposes the
+# already-linked SDK ABI types; it adds no second access-check implementation.
+peios-sys = { git = "https://github.com/peios/peios-rs.git", rev = "4c9c0106550e3b7d8b4a98dfd0d7a5490fcf0116" }

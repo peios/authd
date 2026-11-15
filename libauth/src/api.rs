@@ -7,13 +7,14 @@ use std::time::Duration;
 
 use auth_abi::{
     Answer, Bytes, ClientOptions, EndedView, EnumerateRequest, ErrorView, GrantView, Key,
-    LogonRequest, LookupRequest, MessageView, PollInfo, PromptView, ServiceRequest,
+    AuthenticationRequest, AuthenticateRequest, LogonRequest, LookupRequest, MessageView, PollInfo,
+    PromptView, ServiceRequest,
 };
 use auth_core::{Secret, ident, lps, wire};
 use crate::engine::{Kind, Operation, Output, State};
 
 // These discriminants are fixed by the public constants in peios/auth.h.
-const ABI_VERSION: u32 = 1;
+const ABI_VERSION: u32 = 2;
 const SUPPORT_PASSWORD: u32 = 1;
 const SUPPORT_SSH_PUBLIC_KEY: u32 = 2;
 const SUPPORTED_CREDENTIALS: u32 = SUPPORT_PASSWORD | SUPPORT_SSH_PUBLIC_KEY;
@@ -114,7 +115,7 @@ pub(crate) unsafe fn write<T>(out: *mut T, value: T) -> i32 {
     0
 }
 fn capabilities(mask: u32) -> Option<Vec<wire::CredentialType>> {
-    if mask & !SUPPORTED_CREDENTIALS != 0 || mask == 0 {
+    if mask & !SUPPORTED_CREDENTIALS != 0 {
         return None;
     }
     let mut types = Vec::new();
@@ -233,56 +234,110 @@ pub unsafe extern "C" fn peios_auth_client_destroy(client: *mut Client) {
     }
 }
 
-/// Begin a logon conversation with copied request data.
+/// Copy the shared credential request once for both public operations.
 ///
 /// # Safety
+/// Every nested span is readable through this call and the size-prefixed
+/// request is initialized and exclusively borrowed.
+unsafe fn authentication(request: &AuthenticationRequest) -> Option<wire::AuthenticationRequest> {
+    if request.size < size_of::<AuthenticationRequest>() {
+        return None;
+    }
+    let supported = capabilities(request.supported_credentials)?;
+    let required_credential_type = match request.required_credential_type {
+        0 => None,
+        value => Some(wire::CredentialType::from_u8(u8::try_from(value).ok()?)?),
+    };
+    let ssh_binding = if request.ssh_connection.len == 0
+        && request.ssh_session.len == 0
+        && request.ssh_username.len == 0
+    {
+        None
+    } else {
+        Some(auth_core::ssh::Binding {
+            connection: unsafe { input(request.ssh_connection)? }.try_into().ok()?,
+            session: unsafe { input(request.ssh_session)? }.to_vec(),
+            username: unsafe { text(request.ssh_username)? },
+        })
+    };
+    let result = wire::AuthenticationRequest {
+        identifier_type: wire::IdentifierType::from_u8(
+            u8::try_from(request.identifier_type).ok()?,
+        )?,
+        identifier: unsafe { input(request.identifier)? }.to_vec(),
+        required_credential_type,
+        supported_credential_types: supported,
+        ssh_binding,
+    };
+    result.validate().ok()?;
+    Some(result)
+}
+
+/// Begin a general authentication conversation, without requesting a token.
 ///
-/// Client must be null or a live library handle without concurrent access.
-/// Every request pointer must be aligned and readable for its declared
-/// size; all nested spans and pointers must remain readable through the
-/// call. Inputs are copied. The caller owns the returned operation and
-/// must eventually release it with operation_destroy.
+/// # Safety
+/// Client and request must be live, aligned and readable through this call.
+/// Nonempty nested spans and the claims array must be readable. Inputs are
+/// copied; release the returned operation with operation_destroy.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn peios_auth_authenticate_begin(
+    client: *const Client,
+    request: *const AuthenticateRequest,
+) -> *mut Operation {
+    pointer_result!({
+        let client = unsafe { client.as_ref()? };
+        let request = unsafe { sized(request)? };
+        if request.groups > 1
+            || request.claim_count > auth_core::claim::MAX_CLAIMS
+            || (request.claim_count != 0 && request.claims.is_null())
+        {
+            return None;
+        }
+        let authentication = unsafe { authentication(&request.authentication)? };
+        let names = if request.claim_count == 0 {
+            &[][..]
+        } else {
+            unsafe { std::slice::from_raw_parts(request.claims, request.claim_count) }
+        };
+        let claims = names
+            .iter()
+            .map(|name| unsafe { text(*name) })
+            .collect::<Option<Vec<_>>>()?;
+        let start = wire::AuthenticateStart {
+            authentication,
+            disclosure: wire::DisclosureRequest {
+                groups: request.groups != 0,
+                claims,
+            },
+        };
+        let supported = start.authentication.supported_credential_types.clone();
+        begin(
+            client,
+            Kind::Authenticate,
+            wire::encode_authenticate_start(&start),
+            supported,
+        )
+    })
+}
+
+/// Begin a local logon with the same credential collection request.
+///
+/// # Safety
+/// Client and size-prefixed request must be live and readable through this call,
+/// including nested spans. Inputs are copied; destroy the returned operation.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn peios_auth_logon_begin(
     client: *const Client,
     request: *const LogonRequest,
 ) -> *mut Operation {
-    // SAFETY: this entry point's contract keeps the client, request objects, and
-    // nested input spans valid until their owned copies have been constructed.
     pointer_result!({
         let client = unsafe { client.as_ref()? };
         let request = unsafe { sized(request)? };
-        let supported = capabilities(request.supported_credentials)?;
-        let credential = if request.required_credential_type == 0 {
-            None
-        } else {
-            Some(wire::CredentialType::from_u8(
-                u8::try_from(request.required_credential_type).ok()?,
-            )?)
-        };
-        if credential.is_some_and(|credential| !supported.contains(&credential)) {
-            return None;
-        }
-        let ssh_binding = if request.ssh_connection.len == 0
-            && request.ssh_session.len == 0
-            && request.ssh_username.len == 0
-        {
-            None
-        } else {
-            let binding = auth_core::ssh::Binding {
-                connection: unsafe { input(request.ssh_connection)? }.try_into().ok()?,
-                session: unsafe { input(request.ssh_session)? }.to_vec(),
-                username: unsafe { text(request.ssh_username)? },
-            };
-            binding.validate().ok()?;
-            Some(binding)
-        };
+        let authentication = unsafe { authentication(&request.authentication)? };
+        let supported = authentication.supported_credential_types.clone();
         let start = wire::LogonStart {
+            authentication,
             logon_type: wire::LogonType::from_u8(u8::try_from(request.logon_type).ok()?)?,
-            identifier_type: wire::IdentifierType::from_u8(
-                u8::try_from(request.identifier_type).ok()?,
-            )?,
-            identifier: unsafe { input(request.identifier)? }.to_vec(),
             tty: if request.tty.len == 0 {
                 None
             } else {
@@ -293,9 +348,6 @@ pub unsafe extern "C" fn peios_auth_logon_begin(
             } else {
                 Some(unsafe { text(request.remote_host)? })
             },
-            required_credential_type: credential,
-            supported_credential_types: supported.clone(),
-            ssh_binding,
         };
         begin(
             client,

@@ -39,7 +39,8 @@
 //! The socket also admits every authenticated principal, so that each can
 //! change its own credential (PGSS §2.20, served by [`crate::change`]). Reaching
 //! the socket therefore says nothing about whether a peer may originate a
-//! logon: that is [`may_originate`], decided per peer after the opening message,
+//! logon: that is the authentication interface's access check, decided per peer
+//! after the opening message,
 //! exactly as it was when the socket admitted originators alone. The same
 //! relay carries both kinds of conversation; [`Purpose`] is what stops either
 //! ending the way only the other may.
@@ -165,6 +166,8 @@ impl Drop for NonOriginatorSlot {
 pub(crate) enum Purpose {
     /// A logon, which ends in an [`Ended::Asserted`] and a token.
     Logon,
+    /// General authentication, returning identity without a token.
+    Authenticate,
     /// A change of the caller's own credential (PGSS §2.20), which ends in
     /// [`Ended::Changed`] and nothing else.
     Change,
@@ -180,6 +183,7 @@ impl Purpose {
     fn noun(self) -> &'static str {
         match self {
             Self::Logon => "logon",
+            Self::Authenticate => "authentication",
             // To the principal, adding or removing a key is changing what
             // they sign in with, and the words say so.
             Self::Change | Self::Enroll => "change",
@@ -198,7 +202,7 @@ impl Purpose {
 // successful logon without reducing a collection or long-lived state.
 #[allow(clippy::large_enum_variant)]
 pub(crate) enum Ended {
-    /// The source said who the principal is. Only ever for [`Purpose::Logon`].
+    /// The source established identity for Logon or general Authenticate.
     Asserted(auth_core::psi::Assertion),
     /// The source changed the credential. Only ever for [`Purpose::Change`]
     /// and [`Purpose::Enroll`].
@@ -244,7 +248,10 @@ fn run(registry: &Registry, stream: &UnixStream, deadline: Instant) -> io::Resul
 
     // Decided before the peer has sent a byte, because it chooses the budget
     // the connection draws on and a connection holds its slot while it waits.
-    let originator = may_originate(&peer);
+    let originator = crate::auth_access::Authorization::open(stream).is_some_and(|authorization| {
+        authorization.permits(auth_policy::authentication::LOGON)
+            || authorization.permits(auth_policy::authentication::AUTHENTICATE)
+    });
     let _slot = if originator {
         None
     } else {
@@ -266,6 +273,9 @@ fn run(registry: &Registry, stream: &UnixStream, deadline: Instant) -> io::Resul
 
     let start = match read_opening(stream) {
         Ok(Opening::Logon(start)) => start,
+        Ok(Opening::Authenticate(start)) => {
+            return authenticate(registry, stream, &peer, &start, deadline);
+        }
         // A service attestation is not a conversation: it carries no
         // credential, so none of the relay below applies to it. Dispatched here
         // rather than earlier because everything up to this point -- the
@@ -312,15 +322,7 @@ fn run(registry: &Registry, stream: &UnixStream, deadline: Instant) -> io::Resul
     // written however it ends — including by an I/O error, which is why the
     // record is written here rather than at each terminal below.
     let mut attempt = Attempt::new(&peer, &start);
-    let result = logon(
-        registry,
-        stream,
-        &peer,
-        originator,
-        &start,
-        deadline,
-        &mut attempt,
-    );
+    let result = logon(registry, stream, &peer, &start, deadline, &mut attempt);
     let shadow_owner = attempt.shadow_owner.take();
     attempt.finish();
     // The normal audit record, like the success reply, precedes advisory I/O.
@@ -336,6 +338,7 @@ fn run(registry: &Registry, stream: &UnixStream, deadline: Instant) -> io::Resul
 /// Never the identifier the client sent: on a failure authd does not know who
 /// was signing in, and on a success the minted token's SID says it.
 struct Attempt {
+    event: &'static str,
     record: audit::Record,
     /// `None` until a terminal: a conversation that never reaches one was
     /// abandoned, by the client or the source going away.
@@ -362,6 +365,7 @@ impl Attempt {
             record.str("object.session.logon-type", name);
         }
         Self {
+            event: "authd.logon.attempted",
             record,
             outcome: None,
             shadow_owner: None,
@@ -386,7 +390,7 @@ impl Attempt {
             None => Some("abandoned"),
         };
         self.record.outcome(reason);
-        audit::essential("authd.logon.attempted", &self.record);
+        audit::essential(self.event, &self.record);
     }
 }
 
@@ -395,142 +399,247 @@ fn logon(
     registry: &Registry,
     stream: &UnixStream,
     peer: &Sid,
-    originator: bool,
     start: &LogonStart,
     deadline: Instant,
     attempt: &mut Attempt,
 ) -> io::Result<()> {
-    if !originator {
-        log::warn(format_args!(
-            "refused logon from {peer}: not a permitted originator"
-        ));
+    // No user SID, including SYSTEM, bypasses this operation access check.
+    if !crate::auth_access::permits(stream, auth_policy::authentication::LOGON) {
         return attempt.refuse(
             stream,
             Denial::PermissionDenied,
-            "Caller may not originate logons.",
+            "Caller may not request logons.",
         );
     }
-
     if !may_request(peer, start.logon_type) {
-        log::warn(format_args!(
-            "refused {:?} logon from {peer}: not permitted for this originator",
-            start.logon_type
-        ));
         return attempt.refuse(
             stream,
             Denial::LogonTypeNotPermitted,
             "Caller may not request that logon type.",
         );
     }
+    let Some(authenticated) = run_authentication(
+        registry,
+        stream,
+        peer,
+        &start.authentication,
+        Some(start.context()),
+        deadline,
+        attempt,
+    )?
+    else {
+        return Ok(());
+    };
+    grant(
+        stream,
+        start,
+        &authenticated.conversation,
+        &authenticated.assertion,
+        attempt,
+    )?;
+    if attempt.outcome == Some(Ok(())) {
+        attempt.shadow_owner = Some(authenticated.source);
+    }
+    Ok(())
+}
 
-    if start.ssh_binding.is_some() && !crate::peer::ssh_originator(stream) {
-        return attempt.refuse(
+struct AuthenticatedSource {
+    conversation: Conversation,
+    assertion: auth_core::psi::Assertion,
+    source: Arc<crate::source::Source>,
+}
+
+/// One routing/collection implementation for both public operations. A source
+/// only supplies identity; neither this stage nor its relay creates a token.
+fn run_authentication(
+    registry: &Registry,
+    stream: &UnixStream,
+    peer: &Sid,
+    request: &wire::AuthenticationRequest,
+    context: Option<wire::LogonContext>,
+    deadline: Instant,
+    attempt: &mut Attempt,
+) -> io::Result<Option<AuthenticatedSource>> {
+    let purpose = if context.is_some() {
+        Purpose::Logon
+    } else {
+        Purpose::Authenticate
+    };
+    if request.ssh_binding.is_some() && !crate::peer::ssh_originator(stream) {
+        attempt.refuse(
             stream,
             Denial::PermissionDenied,
             "Caller may not bind SSH authentication.",
-        );
+        )?;
+        return Ok(None);
     }
-
-    log::info(format_args!(
-        "logon started: peer={peer} type={:?} identifier={}",
-        start.logon_type,
-        String::from_utf8_lossy(&start.identifier)
-    ));
-
-    let source = match crate::resolve::route(registry, &start.identifier) {
-        crate::resolve::Route::Owner(source) => source,
-        crate::resolve::Route::Blind(source) => {
-            // Logged for the administrator; the caller learns nothing. The
-            // source runs a blinded conversation for a name it does not hold
-            // and denies AuthenticationFailed, indistinguishable from a
-            // wrong password (PGSS §2.10).
-            log::info(format_args!(
-                "no source claims {}; blinding via {}",
-                String::from_utf8_lossy(&start.identifier),
-                source.name()
-            ));
-            source
-        }
-        crate::resolve::Route::Unavailable => {
-            return attempt.refuse(
+    let source = match crate::resolve::route(registry, &request.identifier) {
+        crate::resolve::Route::Owner(source) | crate::resolve::Route::Blind(source) => source,
+        _ => {
+            attempt.refuse(
                 stream,
                 Denial::AuthorityUnavailable,
                 "The authority could not be reached.",
-            );
-        }
-        crate::resolve::Route::NoSources => {
-            log::warn(format_args!(
-                "no principal source can answer for {}",
-                String::from_utf8_lossy(&start.identifier)
-            ));
-            return attempt.refuse(
-                stream,
-                Denial::AuthorityUnavailable,
-                "No authority is available for that principal.",
-            );
+            )?;
+            return Ok(None);
         }
     };
-    // The session's auth package, should one be minted: the same name
-    // `derive::mint` gives the kernel, so the two records agree.
-    attempt
-        .record
-        .str("object.session.auth-package", source.name());
-
+    if purpose == Purpose::Logon {
+        attempt
+            .record
+            .str("object.session.auth-package", source.name());
+    }
     let Some(mut conversation) = source.open() else {
-        log::warn(format_args!(
-            "source {} could not accept another conversation",
-            source.name()
-        ));
-        return attempt.refuse(
+        attempt.refuse(
             stream,
             Denial::AuthorityUnavailable,
-            "The authority is busy. Try again shortly.",
-        );
+            "The authority is busy.",
+        )?;
+        return Ok(None);
     };
-
-    if let Err(error) = conversation.authenticate(start, peer.as_ref().as_bytes()) {
+    if let Err(error) =
+        conversation.authenticate_request(request, context, peer.as_ref().as_bytes())
+    {
         log::warn(format_args!(
-            "could not reach source {}: {error}",
+            "could not contact source {}: {error}",
             source.name()
         ));
-        return attempt.refuse(
+        attempt.refuse(
             stream,
             Denial::AuthorityUnavailable,
             "The authority could not be reached.",
-        );
+        )?;
+        return Ok(None);
     }
-
     match relay(
         stream,
-        &start.supported_credential_types,
+        &request.supported_credential_types,
         &mut conversation,
         deadline,
-        Purpose::Logon,
+        purpose,
     )? {
-        Ok(Ended::Asserted(assertion)) => {
-            grant(stream, start, &conversation, &assertion, attempt)?;
-            // grant can return Ok after sending a denial. Only a delivered
-            // success permits this advisory query, and the client already has
-            // its token before any later source is asked. PGSS §2.15 forbids a
-            // failed shadowing check from failing an otherwise valid logon.
-            if attempt.outcome == Some(Ok(())) {
-                attempt.shadow_owner = Some(Arc::clone(&source));
-            }
-            Ok(())
+        Ok(Ended::Asserted(assertion)) => Ok(Some(AuthenticatedSource {
+            conversation,
+            assertion,
+            source,
+        })),
+        Ok(Ended::Changed) => {
+            attempt.refuse(
+                stream,
+                Denial::Internal,
+                "The authority returned an unexpected result.",
+            )?;
+            Ok(None)
         }
-        // `relay` ends a logon in an assertion or in a denial it has already
-        // sent. Answered anyway rather than trusted, so that a mistake there
-        // costs a denial and never a connection closed with nothing said.
-        Ok(Ended::Changed) => attempt.refuse(
-            stream,
-            Denial::Internal,
-            "The authority could not complete the logon.",
-        ),
         Err(denial) => {
             attempt.denied(denial);
-            Ok(())
+            Ok(None)
         }
     }
+}
+
+fn authenticate(
+    registry: &Registry,
+    stream: &UnixStream,
+    peer: &Sid,
+    start: &wire::AuthenticateStart,
+    deadline: Instant,
+) -> io::Result<()> {
+    let mut record = audit::Record::new();
+    record.sid("source.token.sid", peer.as_ref());
+    let mut attempt = Attempt {
+        event: "authd.authentication.attempted",
+        record,
+        outcome: None,
+        shadow_owner: None,
+    };
+    let result = (|| {
+        let Some(authorization) = crate::auth_access::Authorization::open(stream) else {
+            return attempt.refuse(
+                stream,
+                Denial::PermissionDenied,
+                "Authentication is not permitted.",
+            );
+        };
+        if !authorization.permits(auth_policy::authentication::AUTHENTICATE)
+            || !authorization.discloses(&start.disclosure)
+        {
+            return attempt.refuse(
+                stream,
+                Denial::PermissionDenied,
+                "Caller may not authenticate or receive the requested identity information.",
+            );
+        }
+        let Some(authenticated) = run_authentication(
+            registry,
+            stream,
+            peer,
+            &start.authentication,
+            None,
+            deadline,
+            &mut attempt,
+        )?
+        else {
+            return Ok(());
+        };
+        let identity = match validate_assertion(
+            &start.authentication,
+            &authenticated.conversation,
+            &authenticated.assertion,
+        ) {
+            Ok(identity) => identity,
+            Err((denial, reason)) => return attempt.refuse(stream, denial, reason),
+        };
+        let assertion = &authenticated.assertion;
+        let mut claims = Vec::new();
+        let mut absent_claims = Vec::new();
+        for requested in &start.disclosure.claims {
+            match assertion
+                .claims
+                .iter()
+                .find(|c| c.name.eq_ignore_ascii_case(requested))
+            {
+                Some(claim) => claims.push(claim.clone()),
+                None => absent_claims.push(requested.clone()),
+            }
+        }
+        let disclosed = wire::Authenticated {
+            user_sid: identity.user.as_ref().as_bytes().to_vec(),
+            canonical_name: assertion.canonical_name.clone(),
+            verified_credentials: assertion
+                .authenticated_credential_type
+                .into_iter()
+                .collect(),
+            groups: start.disclosure.groups.then(|| {
+                identity
+                    .memberships
+                    .iter()
+                    .map(|(sid, _)| sid.as_ref().as_bytes().to_vec())
+                    .collect()
+            }),
+            claims,
+            absent_claims,
+        };
+        let message = match wire::encode_authenticated(&disclosed) {
+            Ok(message) => message,
+            Err(_) => {
+                return attempt.refuse(
+                    stream,
+                    Denial::Internal,
+                    "The identity result is too large.",
+                );
+            }
+        };
+        // No SCM_RIGHTS, token creation, session creation or local provisioning.
+        send_message(stream, &message)?;
+        attempt
+            .record
+            .sid("object.account.sid", identity.user.as_ref());
+        attempt.outcome = Some(Ok(()));
+        Ok(())
+    })();
+    attempt.finish();
+    result
 }
 
 /// Carry messages between the client and the source until one of them
@@ -670,7 +779,7 @@ pub(crate) fn relay(
             // believed.
             Inbound::Assert(assertion) => {
                 conversation.finished();
-                if purpose != Purpose::Logon {
+                if !matches!(purpose, Purpose::Logon | Purpose::Authenticate) {
                     log::error(format_args!(
                         "source {} answered a {noun} with an assertion",
                         conversation.source_name()
@@ -805,31 +914,6 @@ fn drop_unassertable(memberships: Vec<(Sid, u32)>, source_name: &str) -> Vec<(Si
     kept
 }
 
-/// The memberships membership scope applies to.
-///
-/// Every group the source claimed, including a primary group it named — but
-/// **not** a primary group authd substituted for an empty field. PSI authority
-/// obligation 26: never apply membership scope to a `primary_group` the
-/// authority chose itself, because it needs no permission from anybody to
-/// apply its own default.
-///
-/// Conflating the two cancelled two correct rules against each other. The
-/// default is `Authenticated Users`, `S-1-5-11` — two sub-authorities — and a
-/// principal is `S-1-5-21-A-B-C-RID`, so [`crate::domain::siblings`] can never
-/// hold between them. Every source that omitted `primary_group` therefore had
-/// every logon denied, naming the source for a claim it never made.
-fn scoped_groups<'a>(
-    memberships: &'a [(Sid, u32)],
-    primary_group: &SidRef,
-    primary_group_asserted: bool,
-) -> Vec<&'a SidRef> {
-    memberships
-        .iter()
-        .map(|(sid, _)| sid.as_ref())
-        .filter(|sid| primary_group_asserted || *sid != primary_group)
-        .collect()
-}
-
 /// The relative id a source gave a group, or 0 if it named no number for it.
 ///
 /// 0 is what the protocol already means by "this source does not number this
@@ -938,7 +1022,102 @@ fn ask_client(
     })
 }
 
-/// Mint and hand over the token, recording how it went in `attempt`.
+/// Source-established identity, before any local token groups or privileges.
+struct ValidatedIdentity {
+    user: Sid,
+    memberships: Vec<(Sid, u32)>,
+    primary_group: Option<Sid>,
+    claims: Vec<peios::token::Claim>,
+}
+
+fn validate_assertion(
+    request: &wire::AuthenticationRequest,
+    conversation: &Conversation,
+    assertion: &auth_core::psi::Assertion,
+) -> Result<ValidatedIdentity, (Denial, &'static str)> {
+    validate_source_assertion(
+        request,
+        conversation.domain().as_ref(),
+        conversation.may_assert_foreign_memberships(),
+        conversation.source_name(),
+        assertion,
+    )
+}
+
+fn validate_source_assertion(
+    request: &wire::AuthenticationRequest,
+    domain: &SidRef,
+    foreign_memberships: bool,
+    source_name: &str,
+    assertion: &auth_core::psi::Assertion,
+) -> Result<ValidatedIdentity, (Denial, &'static str)> {
+    if !request.accepts(assertion.authenticated_credential_type) {
+        return Err((Denial::AuthenticationFailed, "Authentication failed."));
+    }
+    let invalid = || {
+        (
+            Denial::Internal,
+            "The authority returned an unusable identity.",
+        )
+    };
+    if !crate::resolve::name_is_usable(&assertion.canonical_name) {
+        return Err(invalid());
+    }
+    let user = SidRef::from_bytes(&assertion.user_sid)
+        .ok_or_else(invalid)?
+        .to_sid();
+    if !crate::domain::contains(domain, user.as_ref()) {
+        return Err((
+            Denial::Internal,
+            "The authority is not entitled to assert that identity.",
+        ));
+    }
+    let mut memberships = Vec::with_capacity(assertion.groups.len() + 1);
+    for group in &assertion.groups {
+        let sid = SidRef::from_bytes(&group.sid).ok_or_else(invalid)?.to_sid();
+        memberships.push((sid, group.unix_id));
+    }
+    let mut memberships = drop_unassertable(memberships, source_name);
+    let primary_group = if assertion.primary_group.is_empty() {
+        None
+    } else {
+        let sid = SidRef::from_bytes(&assertion.primary_group)
+            .ok_or_else(invalid)?
+            .to_sid();
+        if derive::is_logon_sid(sid.as_ref()) {
+            return Err(invalid());
+        }
+        if !memberships.iter().any(|(known, _)| *known == sid) {
+            memberships.push((sid, 0));
+        }
+        Some(sid)
+    };
+    let group_sids: Vec<&SidRef> = memberships.iter().map(|(sid, _)| sid.as_ref()).collect();
+    if !foreign_memberships && foreign_membership(user.as_ref(), &group_sids).is_some() {
+        return Err((
+            Denial::Internal,
+            "The authority is not entitled to assert that membership.",
+        ));
+    }
+    let mut names = Vec::with_capacity(assertion.claims.len());
+    for claim in &assertion.claims {
+        claim.validate().map_err(|_| invalid())?;
+        let name =
+            auth_core::authentication::canonical_claim_name(&claim.name).map_err(|_| invalid())?;
+        if names.contains(&name) {
+            return Err(invalid());
+        }
+        names.push(name);
+    }
+    let claims = derive::kacs_claims(&assertion.claims).ok_or_else(invalid)?;
+    Ok(ValidatedIdentity {
+        user,
+        memberships,
+        primary_group,
+        claims,
+    })
+}
+
 fn grant(
     stream: &UnixStream,
     start: &LogonStart,
@@ -947,180 +1126,28 @@ fn grant(
     attempt: &mut Attempt,
 ) -> io::Result<()> {
     let source_name = conversation.source_name();
-    if start
-        .required_credential_type
-        .is_some_and(|required| assertion.authenticated_credential_type != Some(required))
-        || assertion
-            .authenticated_credential_type
-            .is_some_and(|actual| !start.supported_credential_types.contains(&actual))
-    {
-        return attempt.refuse(
-            stream,
-            Denial::AuthenticationFailed,
-            "Authentication failed.",
-        );
-    }
-    // A source's assertion is bytes until proven otherwise. Validating the SID
-    // here — before it becomes identity — is why auth-core carries it untyped:
-    // the codec has no business knowing what a SID is, and the process that
-    // mints tokens has every business checking.
-    let Some(user) = SidRef::from_bytes(&assertion.user_sid) else {
-        log::error(format_args!(
-            "source {source_name} asserted {} bytes that are not a valid SID",
-            assertion.user_sid.len()
-        ));
-        return attempt.refuse(
-            stream,
-            Denial::Internal,
-            "The authority returned an unusable identity.",
-        );
+    let validated = match validate_assertion(&start.authentication, conversation, assertion) {
+        Ok(identity) => identity,
+        Err((denial, reason)) => return attempt.refuse(stream, denial, reason),
     };
-
-    // **Logon type restrictions.** The principal's own record says which kinds
-    // of sign-on it may be used for, and the authority enforces it — a source
-    // states the property and has no business acting on it.
-    //
-    // Checked here, after the credential held, rather than before asking. The
-    // authority does not know which principal it is dealing with until the
-    // source says so, and asking first would cost a lookup on every logon to
-    // answer a question that almost never refuses.
-    //
-    // A source that predates the field says nothing, and nothing means the
-    // authority's default rather than "nothing permitted": everything a person
-    // could use, and never `Service`. So no existing principal changes
-    // behaviour, and none becomes usable for a credential-free service logon
-    // by an upgrade.
     if !assertion.permitted_logon_types.permits(start.logon_type) {
-        log::warn(format_args!(
-            "refused {:?} logon for {}: the principal permits {:#x}",
-            start.logon_type,
-            assertion.canonical_name,
-            assertion.permitted_logon_types.effective().bits()
-        ));
         return attempt.refuse(
             stream,
             Denial::AccountRestricted,
             "That account may not be used for this kind of sign-on.",
         );
     }
-
-    // **Identity confinement.** A source is authoritative for its own domain and
-    // no other, whatever else it is permitted. This is not the same restriction
-    // as the membership one below, and no flag lifts it: a source that could
-    // assert identities outside its domain could hand out a *different
-    // authority's* principals to anyone who satisfied *its* credential check —
-    // so the local source, which holds no domain credential, could mint a
-    // domain administrator for anyone who knew a local password.
-    //
-    // Confining it keeps a compromised source at "authority over its own
-    // domain", which is what it already was, rather than "authority over
-    // everyone".
-    if !crate::domain::contains(conversation.domain().as_ref(), user) {
-        log::error(format_args!(
-            "source {source_name} asserted {user}, which is outside the domain it \
-             registered for ({})",
-            conversation.domain()
-        ));
-        return attempt.refuse(
-            stream,
-            Denial::Internal,
-            "The authority returned an identity it is not entitled to assert.",
-        );
-    }
-
-    // Group SIDs get the same treatment, and a malformed one fails the logon
-    // rather than being skipped. Dropping it would silently sign someone in
-    // with less authority than the source granted them, which is a confusing
-    // way to be wrong; a source that cannot encode a SID is broken, and saying
-    // so is more useful than half-believing it.
-    let mut memberships: Vec<(Sid, u32)> = Vec::with_capacity(assertion.groups.len() + 1);
-    for group in &assertion.groups {
-        let Some(sid) = SidRef::from_bytes(&group.sid) else {
-            log::error(format_args!(
-                "source {source_name} asserted a group of {} bytes that is not a valid SID",
-                group.sid.len()
-            ));
-            return attempt.refuse(
-                stream,
-                Denial::Internal,
-                "The authority returned an unusable group membership.",
-            );
-        };
-        memberships.push((sid.to_sid(), group.unix_id));
-    }
-    let mut memberships = drop_unassertable(memberships, source_name);
-
-    // The primary group. Empty means the source did not say, and Authenticated
-    // Users is the answer: it is a membership authd derives for every principal
-    // anyway, so naming it as primary asserts nothing new.
-    //
-    // Peios deliberately has no per-user group. That Linux convention exists so
-    // a file's *group ownership* means something, and under KACS it means
-    // nothing — every managed credential carries `CAP_DAC_OVERRIDE`.
-    // Whether the primary group is the source's claim or authd's own default.
-    // The distinction decides whether membership scope applies to it: PSI
-    // authority obligation 26 says never to apply scope to a primary_group the
-    // authority substituted itself for an empty field.
-    //
-    // Conflating the two cancelled two correct rules against each other. The
-    // default is Authenticated Users, S-1-5-11 — a two-sub-authority NT SID —
-    // and a principal is S-1-5-21-A-B-C-RID, so domain::siblings can never hold
-    // between them. Every source that omitted primary_group therefore had every
-    // logon denied, naming the source for a claim it never made. lpsd escaped
-    // only because it always sets one *and* ships with
-    // MayAssertForeignMemberships; a directory-backed source — exactly the case
-    // that should not have that permission — hit it on its first logon.
-    let primary_group_asserted = !assertion.primary_group.is_empty();
-    let primary_group = if assertion.primary_group.is_empty() {
-        Sid::well_known(peios::security::WellKnown::AuthenticatedUsers)
-    } else {
-        match SidRef::from_bytes(&assertion.primary_group) {
-            Some(sid) => sid.to_sid(),
-            None => {
-                log::error(format_args!(
-                    "source {source_name} asserted a primary group of {} bytes that is not a \
-                     valid SID",
-                    assertion.primary_group.len()
-                ));
-                return attempt.refuse(
-                    stream,
-                    Denial::Internal,
-                    "The authority returned an unusable primary group.",
-                );
-            }
-        }
-    };
-
-    // KACS requires the primary group to be a group on the token, so a source
-    // naming one it did not list is taken to be asserting the membership too.
-    // Added *before* the check below rather than after, which matters: naming a
-    // group as primary is as much a membership claim as listing it, and a
-    // source must not be able to reach `BUILTIN\Administrators` through the one
-    // field that skipped the scope check.
+    let user_sid = validated.user;
+    let user = user_sid.as_ref();
+    let mut memberships = validated.memberships;
+    let primary_group = validated
+        .primary_group
+        .unwrap_or_else(|| Sid::well_known(peios::security::WellKnown::AuthenticatedUsers));
     if !memberships.iter().any(|(sid, _)| *sid == primary_group) {
         memberships.push((primary_group, 0));
     }
-
-    let groups = scoped_groups(&memberships, primary_group.as_ref(), primary_group_asserted);
-
-    // A source vouches for its own users and its own groups. Asserting a group
-    // from another domain — a BUILTIN alias, or another directory's — is the
-    // local source's privilege alone, because local membership is a local
-    // decision and a directory must not be able to make its users
-    // administrators of this machine.
-    if !conversation.may_assert_foreign_memberships()
-        && let Some(foreign) = foreign_membership(user, &groups)
-    {
-        log::error(format_args!(
-            "source {source_name} asserted {foreign} for {user}, which is outside that \
-                 principal's domain, and it may not assert foreign memberships"
-        ));
-        return attempt.refuse(
-            stream,
-            Denial::Internal,
-            "The authority returned a membership it is not permitted to assert.",
-        );
-    }
+    let groups: Vec<&SidRef> = memberships.iter().map(|(sid, _)| sid.as_ref()).collect();
+    let claims = validated.claims;
 
     // The SID set the token will carry, derived SIDs included. Built here
     // because everything below is a statement about *this* set rather than
@@ -1158,35 +1185,6 @@ fn grant(
         primary_group.as_ref(),
         &numbered,
     );
-
-    // Claims are the one asserted field that is a *trusted input to access
-    // decisions* rather than a statement of identity — a conditional ACE can
-    // turn one into a grant. So they are held to the same standard as a group
-    // SID: checked here, and a source that cannot produce a usable one fails
-    // the logon rather than having it quietly dropped.
-    for claim in &assertion.claims {
-        if let Err(error) = claim.validate() {
-            log::error(format_args!(
-                "source {source_name} asserted an unusable claim for {user}: {error}"
-            ));
-            return attempt.refuse(
-                stream,
-                Denial::Internal,
-                "The authority returned an unusable claim.",
-            );
-        }
-    }
-    let Some(claims) = derive::kacs_claims(&assertion.claims) else {
-        log::error(format_args!(
-            "source {source_name} asserted a claim for {user} carrying a value that is not a \
-             valid SID"
-        ));
-        return attempt.refuse(
-            stream,
-            Denial::Internal,
-            "The authority returned an unusable claim.",
-        );
-    };
 
     // Read per logon rather than cached at startup, so a policy change takes
     // effect on the next sign-on rather than on the next restart of the one
@@ -1312,6 +1310,7 @@ pub(crate) fn deny(stream: &UnixStream, denial: Denial, reason: &str) -> io::Res
 
 /// What a client opened with.
 enum Opening {
+    Authenticate(wire::AuthenticateStart),
     /// A logon conversation, which will exchange credentials.
     Logon(LogonStart),
     /// A service attestation, which will not. See [`crate::attest`].
@@ -1360,6 +1359,9 @@ fn read_opening(stream: &UnixStream) -> Result<Opening, (Denial, &'static str)> 
         _ => (Denial::MalformedRequest, "Malformed message header."),
     })?;
     match msg_type {
+        wire::MSG_AUTHENTICATE_START => wire::decode_authenticate_start(received.expose())
+            .map(Opening::Authenticate)
+            .map_err(|_| (Denial::MalformedRequest, "Malformed AuthenticateStart.")),
         MSG_LOGON_START => decode_logon_start(received.expose())
             .map(Opening::Logon)
             .map_err(|_| (Denial::MalformedRequest, "Malformed LogonStart.")),
@@ -1410,18 +1412,6 @@ fn client_already_answered(stream: &UnixStream) -> bool {
     received > 0
 }
 
-/// Whether a principal may originate logons at all.
-///
-/// SYSTEM unconditionally, plus any peer whose policy record grants at
-/// least one logon type. Widening the originator set is therefore a
-/// registry edit — a `LogonTypes` list on the peer's record under
-/// `Machine\Generic\Authn\Policy` — which is the visible, deliberate act
-/// this check exists to require.
-fn may_originate(peer: &Sid) -> bool {
-    peer::is_system(peer)
-        || policy::originator_logon_types(peer.as_ref()).is_some_and(|types| types.bits() != 0)
-}
-
 /// Whether a given originator may request a given logon type.
 ///
 /// The constraint half of "client proposes, authority constrains" (PGSS
@@ -1448,21 +1438,115 @@ fn may_request(peer: &Sid, logon_type: LogonType) -> bool {
 }
 
 #[cfg(test)]
+mod general_authentication_tests {
+    use super::*;
+
+    fn request() -> wire::AuthenticationRequest {
+        wire::AuthenticationRequest {
+            identifier_type: wire::IdentifierType::Username,
+            identifier: b"jack".to_vec(),
+            supported_credential_types: vec![wire::CredentialType::Password],
+            required_credential_type: Some(wire::CredentialType::Password),
+            ssh_binding: None,
+        }
+    }
+
+    fn assertion() -> auth_core::psi::Assertion {
+        let user: Sid = "S-1-5-21-1-2-3-1000".parse().unwrap();
+        auth_core::psi::Assertion {
+            user_sid: user.as_ref().as_bytes().to_vec(),
+            canonical_name: "jack".into(),
+            authenticated_credential_type: Some(wire::CredentialType::Password),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn shared_validation_does_not_synthesize_local_token_groups() {
+        let domain: Sid = "S-1-5-21-1-2-3".parse().unwrap();
+        let source = assertion();
+        let identity =
+            validate_source_assertion(&request(), domain.as_ref(), false, "test", &source).unwrap();
+        assert!(identity.memberships.is_empty());
+        assert!(identity.primary_group.is_none());
+    }
+
+    #[test]
+    fn shared_validation_refuses_unusable_asserted_names() {
+        let domain: Sid = "S-1-5-21-1-2-3".parse().unwrap();
+        for name in ["", "jack\nadmin", "jack@local", " jack", "jack:"] {
+            let mut source = assertion();
+            source.canonical_name = name.into();
+            assert!(
+                validate_source_assertion(&request(), domain.as_ref(), false, "test", &source)
+                    .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn source_scope_checks_cover_primary_group_and_user_identity() {
+        let domain: Sid = "S-1-5-21-1-2-3".parse().unwrap();
+        let mut source = assertion();
+        let administrator: Sid = "S-1-5-32-544".parse().unwrap();
+        source.primary_group = administrator.as_ref().as_bytes().to_vec();
+        assert!(
+            validate_source_assertion(&request(), domain.as_ref(), false, "test", &source).is_err()
+        );
+        assert!(
+            validate_source_assertion(&request(), domain.as_ref(), true, "test", &source).is_ok()
+        );
+        source.user_sid = administrator.as_ref().as_bytes().to_vec();
+        assert!(
+            validate_source_assertion(&request(), domain.as_ref(), true, "test", &source).is_err()
+        );
+    }
+
+    #[test]
+    fn proof_requirements_and_invalid_claim_values_apply_before_both_finalizers() {
+        let domain: Sid = "S-1-5-21-1-2-3".parse().unwrap();
+        let mut source = assertion();
+        source.authenticated_credential_type = None;
+        assert!(
+            validate_source_assertion(&request(), domain.as_ref(), false, "test", &source).is_err()
+        );
+        source.authenticated_credential_type = Some(wire::CredentialType::Password);
+        source.claims.push(auth_core::Claim {
+            name: "department".into(),
+            flags: 0,
+            values: auth_core::claim::Values::Sid(vec![vec![0xff]]),
+        });
+        assert!(
+            validate_source_assertion(&request(), domain.as_ref(), false, "test", &source).is_err()
+        );
+        source.claims[0].values = auth_core::claim::Values::String(vec!["engineering".into()]);
+        let mut duplicate = source.claims[0].clone();
+        duplicate.name = "Department".into();
+        source.claims.push(duplicate);
+        assert!(
+            validate_source_assertion(&request(), domain.as_ref(), false, "test", &source).is_err()
+        );
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use auth_core::wire::{CredentialType, IdentifierType, Prompt};
 
     fn start_supporting(types: Vec<CredentialType>) -> LogonStart {
         LogonStart {
-            required_credential_type: None,
-            ssh_binding: None,
+            authentication: auth_core::wire::AuthenticationRequest {
+                required_credential_type: None,
+                ssh_binding: None,
+                identifier_type: IdentifierType::Username,
+                identifier: b"jack".to_vec(),
+                supported_credential_types: types,
+            },
 
             logon_type: LogonType::Interactive,
-            identifier_type: IdentifierType::Username,
-            identifier: b"jack".to_vec(),
             tty: None,
             remote_host: None,
-            supported_credential_types: types,
         }
     }
 
@@ -1511,16 +1595,7 @@ mod tests {
 
         let mut attempt = Attempt::new(&peer, &start);
         let deadline = Instant::now() + CONVERSATION_DEADLINE;
-        logon(
-            &registry,
-            &ours,
-            &peer,
-            false,
-            &start,
-            deadline,
-            &mut attempt,
-        )
-        .unwrap();
+        logon(&registry, &ours, &peer, &start, deadline, &mut attempt).unwrap();
         attempt.finish();
         drop(theirs);
 
@@ -1602,48 +1677,6 @@ mod tests {
     /// one *and* shipping with MayAssertForeignMemberships. A directory-backed
     /// source, which should not have that permission, hit it on first logon.
     #[test]
-    fn an_authority_substituted_primary_group_is_not_scope_checked() {
-        let user = sid_of("S-1-5-21-1-2-3-1000");
-        let authenticated_users = sid_of("S-1-5-11");
-        let memberships = vec![(authenticated_users, 0u32)];
-
-        let substituted = scoped_groups(&memberships, authenticated_users.as_ref(), false);
-        assert!(
-            foreign_membership(user.as_ref(), &substituted).is_none(),
-            "authd's own default must not be held against the source"
-        );
-
-        // Asserted by the source, the same SID *is* checked — otherwise the
-        // exemption would be a bypass.
-        let asserted = scoped_groups(&memberships, authenticated_users.as_ref(), true);
-        assert!(
-            foreign_membership(user.as_ref(), &asserted).is_some(),
-            "a source-asserted foreign primary group must still be caught"
-        );
-    }
-
-    /// The exemption covers only the substituted SID. Any other membership the
-    /// source claimed is still checked.
-    #[test]
-    fn the_exemption_does_not_extend_to_other_memberships() {
-        let user = sid_of("S-1-5-21-1-2-3-1000");
-        let authenticated_users = sid_of("S-1-5-11");
-        let builtin_admins = sid_of("S-1-5-32-544");
-        let memberships = vec![(authenticated_users, 0u32), (builtin_admins, 0u32)];
-
-        let groups = scoped_groups(&memberships, authenticated_users.as_ref(), false);
-        assert_eq!(
-            foreign_membership(user.as_ref(), &groups).map(|s| s.to_sid()),
-            Some(builtin_admins),
-            "a foreign group the source did claim must still be caught"
-        );
-    }
-
-    /// Obligation 20: the `credential_ref`s in one request are unique. Nothing
-    /// checked, so a source sending duplicates was relayed verbatim and the
-    /// client's answers became ambiguous — two prompts asking for different
-    /// things, one ref to carry both answers back under.
-    #[test]
     fn a_repeated_credential_ref_is_caught() {
         let mut request = requesting(&[CredentialType::Password, CredentialType::Password]);
         assert_eq!(
@@ -1698,30 +1731,6 @@ mod tests {
     /// membership scope can never accept one. Running scope first therefore
     /// refused the logon that rule 4 says to survive by dropping — the two
     /// rules gave opposite answers for the same input.
-    #[test]
-    fn an_asserted_logon_sid_is_dropped_before_the_scope_check_sees_it() {
-        let user = sid_of("S-1-5-21-1-2-3-1000");
-        let logon = sid_of("S-1-5-5-7-7");
-        let staff = sid_of("S-1-5-21-1-2-3-1001");
-
-        // The scope check would have caught the logon SID and refused.
-        assert!(
-            !crate::domain::siblings(user.as_ref(), logon.as_ref()),
-            "the premise: a logon SID is never a sibling of its principal"
-        );
-
-        let kept = drop_unassertable(vec![(staff, 0), (logon, 0)], "corp");
-        let groups = scoped_groups(&kept, staff.as_ref(), true);
-        assert!(
-            foreign_membership(user.as_ref(), &groups).is_none(),
-            "the logon SID must be gone before scope runs, not refused by it"
-        );
-        assert_eq!(kept.len(), 1, "and the real membership must survive");
-    }
-
-    /// Rule 5. Harmless either way — a duplicate of a legitimate group passes
-    /// scope anyway — but dropping it keeps what reaches the check equal to
-    /// what the source is actually claiming.
     #[test]
     fn a_duplicate_membership_is_dropped() {
         let staff = sid_of("S-1-5-21-1-2-3-1001");

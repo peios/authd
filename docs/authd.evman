@@ -55,6 +55,28 @@ field: outcome.reason                       when outcome.success == false
   minted that could not be handed over; its session is reaped once nothing
   holds it.
 
+--- event authd.authentication.attempted
+tier: essential
+gating: decoded general authentication requests reaching authority handling
+cardinality: once per decoded AuthenticateStart handled
+
+A client requested credential verification without a local logon.
+
+Success means the validated, explicitly requested identity result reached
+the caller. It creates no OS token, logon session or local user environment.
+The requested username, credentials and disclosed claims are not recorded.
+
+field: source.token.sid                     required
+  The connected caller's kernel-verified user SID.
+field: object.account.sid                   when outcome.success == true
+  The authenticated principal's validated SID.
+field: outcome.success                      required
+  True only when the Authenticated reply reached the caller.
+field: outcome.reason                       when outcome.success == false
+  values: malformed-request | unsupported-version | permission-denied | authentication-failed | account-restricted | authority-unavailable | conversation-limit | internal | abandoned
+  closed: false
+  The refusal sent, or abandoned when no terminal answer could be delivered.
+
 --- event authd.service.attested
 tier: standard
 gating: none — every decoded service-attestation request is recorded

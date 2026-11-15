@@ -382,15 +382,17 @@ mod tests {
     fn a_logon_message_is_not_served_here() {
         let (stream, handle) = client();
         let start = auth_core::wire::encode_logon_start(&auth_core::wire::LogonStart {
-            required_credential_type: None,
-            ssh_binding: None,
+            authentication: auth_core::wire::AuthenticationRequest {
+                required_credential_type: None,
+                ssh_binding: None,
+                identifier_type: auth_core::wire::IdentifierType::Username,
+                identifier: b"jack".to_vec(),
+                supported_credential_types: vec![auth_core::wire::CredentialType::Password],
+            },
 
             logon_type: auth_core::wire::LogonType::Interactive,
-            identifier_type: auth_core::wire::IdentifierType::Username,
-            identifier: b"jack".to_vec(),
             tty: None,
             remote_host: None,
-            supported_credential_types: vec![auth_core::wire::CredentialType::Password],
         })
         .unwrap();
         send_message(&stream, &start).expect("must send");

@@ -1,5 +1,7 @@
 peios_auth_abi_version
 peios_auth_account_self_begin
+peios_auth_authenticate_begin
+peios_auth_authentication_absent_claim
 peios_auth_client_create
 peios_auth_client_destroy
 peios_auth_display_name_set_begin
@@ -10,6 +12,7 @@ peios_auth_key_remove_begin
 peios_auth_logon_begin
 peios_auth_operation_account
 peios_auth_operation_account_key
+peios_auth_operation_authentication
 peios_auth_operation_cancel
 peios_auth_operation_destroy
 peios_auth_operation_ended

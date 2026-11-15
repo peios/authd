@@ -7,6 +7,10 @@ unsafe extern "C" {
     pub fn peios_auth_abi_version() -> u32;
     pub fn peios_auth_client_create(options: *const ClientOptions) -> *mut Client;
     pub fn peios_auth_client_destroy(client: *mut Client) -> ();
+    pub fn peios_auth_authenticate_begin(
+        client: *const Client,
+        request: *const AuthenticateRequest,
+    ) -> *mut Operation;
     pub fn peios_auth_logon_begin(
         client: *const Client,
         request: *const LogonRequest,
@@ -75,6 +79,15 @@ unsafe extern "C" {
     pub fn peios_auth_operation_grant(operation: *const Operation, out: *mut GrantView) -> i32;
     pub fn peios_auth_operation_take_token(operation: *mut Operation) -> i32;
     pub fn peios_auth_operation_ended(operation: *const Operation, out: *mut EndedView) -> i32;
+    pub fn peios_auth_operation_authentication(
+        operation: *const Operation,
+        out: *mut AuthenticationView,
+    ) -> i32;
+    pub fn peios_auth_authentication_absent_claim(
+        operation: *const Operation,
+        index: usize,
+        out: *mut Bytes,
+    ) -> i32;
     pub fn peios_auth_operation_identity(
         operation: *const Operation,
         out: *mut IdentityView,

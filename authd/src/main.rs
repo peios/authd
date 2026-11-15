@@ -62,6 +62,7 @@
 
 mod attest;
 mod audit;
+mod auth_access;
 mod change;
 mod conversation;
 mod derive;

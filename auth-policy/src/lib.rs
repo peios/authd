@@ -72,6 +72,7 @@ use auth_core::wire::{LogonType, LogonTypes};
 use peios::registry::{Key, KeyAccess, OpenFlags, ValueType};
 use peios::security::{Acl, IntegrityLevel, Privileges, Sid, SidRef, WellKnown, sddl};
 
+pub mod authentication;
 pub mod service_sid;
 mod values;
 pub mod well_known;

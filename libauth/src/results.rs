@@ -1,7 +1,7 @@
 //! Borrowed result views; no wire layouts or Rust collections cross the ABI.
 use auth_abi::{
-    AccountKeyView, AccountView, Bytes, ClaimValue, ClaimView, IdentityView, RecordView,
-    ReferenceView,
+    AuthenticationView, AccountKeyView, AccountView, Bytes, ClaimValue, ClaimView, IdentityView,
+    RecordView, ReferenceView,
 };
 use auth_core::{claim::Values, ident};
 use crate::api::{bytes, write};
@@ -15,6 +15,7 @@ fn record(operation: &Operation, index: usize) -> Option<&ident::Record> {
     match &operation.state {
         State::Complete(Output::Lookup(reply)) if index == 0 => reply.record.as_ref(),
         State::Complete(Output::Listing(reply)) => reply.entries.get(index),
+        State::Complete(Output::Authenticated(result)) if index == 0 => Some(&result.record),
         _ => None,
     }
 }
@@ -31,6 +32,49 @@ macro_rules! view {
         }
     }};
 }
+/// Read completed authentication metadata; identity/claim accessors use record 0.
+/// This result never grants an OS token.
+///
+/// # Safety
+/// Operation is a live, immutable handle; out is aligned writable storage.
+/// Returned views borrow the operation and expire at its next mutation/drop.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn peios_auth_operation_authentication(
+    operation: *const Operation,
+    out: *mut AuthenticationView,
+) -> i32 {
+    view!(out, {
+        let State::Complete(Output::Authenticated(result)) = &unsafe { operation.as_ref()? }.state
+        else {
+            return None;
+        };
+        Some(AuthenticationView {
+            verified_credentials: result.verified_credentials,
+            absent_claim_count: result.absent_claims.len(),
+        })
+    })
+}
+
+/// Read one requested, authorized claim name absent from the source result.
+///
+/// # Safety
+/// Operation is live and immutable; out is aligned writable storage. The span
+/// borrows the operation and must not be freed or kept after mutation/drop.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn peios_auth_authentication_absent_claim(
+    operation: *const Operation,
+    index: usize,
+    out: *mut Bytes,
+) -> i32 {
+    view!(out, {
+        let State::Complete(Output::Authenticated(result)) = &unsafe { operation.as_ref()? }.state
+        else {
+            return None;
+        };
+        Some(bytes(result.absent_claims.get(index)?.as_bytes()))
+    })
+}
+
 /// Copy identity outcome, record count, cursor, and incomplete-source count.
 ///
 /// # Safety

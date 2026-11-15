@@ -11,6 +11,7 @@ use crate::connection::Connection;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Kind {
     Logon,
+    Authenticate,
     Attest,
     Change,
     Lookup,
@@ -25,7 +26,7 @@ impl Kind {
     fn mutates(self) -> bool {
         !matches!(
             self,
-            Self::Lookup | Self::Enumerate | Self::Account | Self::Query
+            Self::Authenticate | Self::Lookup | Self::Enumerate | Self::Account | Self::Query
         )
     }
     fn framing(self) -> Framing {
@@ -37,7 +38,14 @@ impl Kind {
     }
 }
 
+pub(crate) struct AuthenticationOutput {
+    pub record: ident::Record,
+    pub verified_credentials: u32,
+    pub absent_claims: Vec<String>,
+}
+
 pub(crate) enum Output {
+    Authenticated(AuthenticationOutput),
     Grant {
         token: Option<OwnedFd>,
         grant: wire::AccessGranted,
@@ -72,6 +80,7 @@ pub(crate) struct Operation {
     connection: Option<Connection>,
     kind: Kind,
     capabilities: Vec<wire::CredentialType>,
+    authentication: Option<wire::AuthenticateStart>,
     timeout: Duration,
     deadline: Instant,
 }
@@ -84,6 +93,11 @@ impl Operation {
         request: Secret,
         capabilities: Vec<wire::CredentialType>,
     ) -> Self {
+        let authentication = if kind == Kind::Authenticate {
+            wire::decode_authenticate_start(request.expose()).ok()
+        } else {
+            None
+        };
         let connection = Connection::open(path, kind.framing(), request);
         let (connection, state) = match connection {
             Ok(connection) => (Some(connection), State::Pending),
@@ -102,6 +116,7 @@ impl Operation {
             state,
             kind,
             capabilities,
+            authentication,
             round: 0,
             timeout,
             deadline: Instant::now() + timeout,
@@ -241,7 +256,7 @@ impl Operation {
             }));
         }
         if message_type == wire::MSG_CREDENTIAL_REQUEST
-            && matches!(self.kind, Kind::Logon | Kind::Change)
+            && matches!(self.kind, Kind::Logon | Kind::Authenticate | Kind::Change)
         {
             let request = wire::decode_credential_request(message)?;
             let mut seen = std::collections::HashSet::new();
@@ -256,6 +271,41 @@ impl Operation {
             return Ok(State::Prompt(request));
         }
         let result = match self.kind {
+            Kind::Authenticate => {
+                let result = wire::decode_authenticated(message)?;
+                result.validate_for(
+                    self.authentication
+                        .as_ref()
+                        .ok_or(WireError::UnknownValue)?,
+                )?;
+                let mut values = Vec::new();
+                if let Some(groups) = result.groups {
+                    values.push(ident::Value::Groups(
+                        groups
+                            .into_iter()
+                            .map(|sid| ident::Reference {
+                                sid,
+                                ..Default::default()
+                            })
+                            .collect(),
+                    ));
+                }
+                values.push(ident::Value::Claims(result.claims));
+                Output::Authenticated(AuthenticationOutput {
+                    record: ident::Record {
+                        sid: result.user_sid,
+                        qualified_name: result.canonical_name,
+                        kind_found: ident::Kind::Principal,
+                        values,
+                        withheld: Vec::new(),
+                    },
+                    verified_credentials: result
+                        .verified_credentials
+                        .iter()
+                        .fold(0, |mask, value| mask | (1 << (*value as u8 - 1))),
+                    absent_claims: result.absent_claims,
+                })
+            }
             Kind::Logon | Kind::Attest => Output::Grant {
                 token,
                 grant: wire::decode_access_granted(message)?,

@@ -82,6 +82,7 @@
 
 #![deny(unsafe_op_in_unsafe_fn)]
 
+pub mod authentication;
 pub mod claim;
 pub mod frame;
 pub mod ident;

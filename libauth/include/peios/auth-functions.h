@@ -4,6 +4,8 @@
 uint32_t peios_auth_abi_version(void);
 peios_auth_client *peios_auth_client_create(const peios_auth_client_options *options);
 void peios_auth_client_destroy(peios_auth_client *client);
+peios_auth_operation *peios_auth_authenticate_begin(const peios_auth_client *client,
+                                                    const peios_auth_authenticate_request *request);
 peios_auth_operation *peios_auth_logon_begin(const peios_auth_client *client,
                                              const peios_auth_logon_request *request);
 peios_auth_operation *peios_auth_service_attest_begin(const peios_auth_client *client,
@@ -49,6 +51,10 @@ int32_t peios_auth_operation_grant(const peios_auth_operation *operation,
 int32_t peios_auth_operation_take_token(peios_auth_operation *operation);
 int32_t peios_auth_operation_ended(const peios_auth_operation *operation,
                                    peios_auth_ended_view *out);
+int32_t peios_auth_operation_authentication(const peios_auth_operation *operation,
+                                            peios_auth_authentication_view *out);
+int32_t peios_auth_authentication_absent_claim(const peios_auth_operation *operation, size_t index,
+                                               peios_auth_bytes *out);
 int32_t peios_auth_operation_identity(const peios_auth_operation *operation,
                                       peios_auth_identity_view *out);
 int32_t peios_auth_operation_incomplete_source(const peios_auth_operation *operation, size_t index,

@@ -14,6 +14,36 @@ the Peios authentication authority. It carries credential conversations,
 identity queries, self-account changes, and requests to end logon sessions.
 The authority checks the connected caller and decides what it can do.
 
+## Authenticate and Logon
+
+Both operations use the same credential conversation. Authenticate returns
+an established identity and the requested groups and claims. It creates no
+OS token, session, home directory or user registry. Logon additionally checks
+local logon policy and returns a token and session for the caller to install.
+An Authenticate result cannot be exchanged for a token later.
+
+Use Authenticate for a service that needs to check identity before applying
+its own access policy. Authd does not need to understand a Wi-Fi network or
+the meaning of a department claim. The service interprets the identity data.
+
+The shared authentication request supplies the identifier, supported
+credential types, an optional required type and any method binding. A
+password-based consumer sets Password as required: advertising support alone
+also permits an account whose source intentionally requires no credential.
+
+Authenticate separately requests full source group membership and individual
+claim names. AuthenticationSecurity checks those permissions before credential
+collection. Forbidden disclosure fails the request. An authorized claim absent
+from the source is listed explicitly; unrequested groups differ from an empty
+membership set. Group results exclude locally synthesized token groups.
+
+In C, begin with peios_auth_authenticate_begin, read AuthenticationView and
+the existing identity getters at record index zero, and enumerate absent
+claims with peios_auth_authentication_absent_claim. The operation owns the
+result until destroyed. The Rust Client::authenticate wrapper returns an owned
+Authenticated result through Operation::authenticated. No token accessor
+succeeds for this operation. The coordinated C ABI version is 2.
+
 ## Credential collection
 
 A logon begins with a proposed identity, logon type, and the credential types

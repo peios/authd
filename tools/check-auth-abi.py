@@ -22,7 +22,7 @@ CALLER_SOURCE = r"""
 #include <peios/auth.h>
 int main(int argc, char **argv) {
     assert(argc == 2);
-    assert(peios_auth_abi_version() == 1);
+    assert(peios_auth_abi_version() == 2);
     peios_auth_client_options options = {0};
     options.size = sizeof(options);
     options.logon_socket.data = (const uint8_t *)argv[1];

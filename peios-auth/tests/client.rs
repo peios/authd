@@ -9,6 +9,65 @@ use peios_auth::{Answer, Capabilities, Client, IdentityKind, Key, Options, Progr
 static NEXT_SOCKET: AtomicUsize = AtomicUsize::new(0);
 
 #[test]
+fn authenticated_results_are_owned_and_preserve_explicit_absence() {
+    let path = format!(
+        "/tmp/auth-rust-{}-{}",
+        std::process::id(),
+        NEXT_SOCKET.fetch_add(1, Ordering::Relaxed)
+    );
+    let listener = UnixListener::bind(&path).unwrap();
+    let server = std::thread::spawn(move || {
+        let (socket, _) = listener.accept().unwrap();
+        let opening = recv_message(&wire::FRAMING, &socket).unwrap();
+        let request = wire::decode_authenticate_start(opening.expose()).unwrap();
+        assert!(request.disclosure.groups);
+        send_message(
+            &socket,
+            &wire::encode_authenticated(&wire::Authenticated {
+                user_sid: vec![1, 1, 0, 0, 0, 0, 0, 5, 18, 0, 0, 0],
+                canonical_name: "jack".into(),
+                verified_credentials: vec![wire::CredentialType::Password],
+                groups: Some(Vec::new()),
+                claims: Vec::new(),
+                absent_claims: vec!["department".into()],
+            })
+            .unwrap(),
+        )
+        .unwrap();
+    });
+    let client = Client::with_options(Options {
+        logon_socket: &path,
+        ..Options::default()
+    })
+    .unwrap();
+    let mut operation = client
+        .authenticate(peios_auth::AuthenticateRequest {
+            authentication: peios_auth::AuthenticationRequest {
+                username: "jack",
+                supported_credentials: Capabilities::PASSWORD,
+                required_credential_type: Some(1),
+                ssh_binding: None,
+            },
+            groups: true,
+            claims: &["department"],
+        })
+        .unwrap();
+    assert_eq!(operation.wait().unwrap(), Progress::Complete);
+    assert!(operation.take_token().is_err());
+    let result = operation.authenticated().unwrap();
+    drop(operation);
+    assert_eq!(result.identity.name, "jack");
+    assert_eq!(result.verified_credentials, Capabilities::PASSWORD);
+    assert_eq!(result.absent_claims, ["department"]);
+    assert!(
+        matches!(&result.identity.fields[&peios_auth::fields::GROUPS],
+        peios_auth::Field::References(groups) if groups.is_empty())
+    );
+    server.join().unwrap();
+    std::fs::remove_file(path).unwrap();
+}
+
+#[test]
 fn rust_wrapper_drives_the_shared_library_and_preserves_failure_details() {
     let path = format!(
         "/tmp/auth-rust-{}-{}",

@@ -332,15 +332,17 @@ fn attempt(
     })?;
 
     let start = LogonStart {
-        required_credential_type: None,
-        ssh_binding: None,
+        authentication: auth_core::wire::AuthenticationRequest {
+            required_credential_type: None,
+            ssh_binding: None,
+            identifier_type: IdentifierType::Username,
+            identifier: username.as_bytes().to_vec(),
+            supported_credential_types: collectable.to_vec(),
+        },
 
         logon_type: LogonType::Interactive,
-        identifier_type: IdentifierType::Username,
-        identifier: username.as_bytes().to_vec(),
         tty: current_tty(),
         remote_host: remote.map(str::to_string),
-        supported_credential_types: collectable.to_vec(),
     };
 
     let encoded = encode_logon_start(&start).map_err(|e| Rejected {

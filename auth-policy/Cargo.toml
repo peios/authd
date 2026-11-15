@@ -14,6 +14,9 @@ peios = { git = "https://github.com/peios/peios-rs.git", rev = "4c9c0106550e3b7d
 # computation with no I/O and no unsafe; peinit carries the same dependency
 # for the same derivation.
 sha1 = "0.10"
+# Capability SID derivation is the platform's SHA-256 name derivation. This
+# shares digest machinery with the existing service/claim identifier helpers.
+sha2 = "0.10"
 
 [features]
 # Writing the policy key, for the programs that edit it. authd does not turn

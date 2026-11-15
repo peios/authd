@@ -17,18 +17,39 @@ pub struct ClientOptions {
 }
 #[repr(C)]
 #[derive(Clone, Copy)]
-pub struct LogonRequest {
+pub struct AuthenticationRequest {
     pub size: usize,
-    pub logon_type: u32,
     pub identifier_type: u32,
     pub identifier: Bytes,
-    pub tty: Bytes,
-    pub remote_host: Bytes,
     pub required_credential_type: u32,
     pub supported_credentials: u32,
     pub ssh_connection: Bytes,
     pub ssh_session: Bytes,
     pub ssh_username: Bytes,
+}
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct AuthenticateRequest {
+    pub size: usize,
+    pub authentication: AuthenticationRequest,
+    pub groups: u32,
+    pub claims: *const Bytes,
+    pub claim_count: usize,
+}
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct LogonRequest {
+    pub size: usize,
+    pub authentication: AuthenticationRequest,
+    pub logon_type: u32,
+    pub tty: Bytes,
+    pub remote_host: Bytes,
+}
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct AuthenticationView {
+    pub verified_credentials: u32,
+    pub absent_claim_count: usize,
 }
 #[repr(C)]
 #[derive(Clone, Copy)]

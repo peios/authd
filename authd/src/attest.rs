@@ -333,7 +333,17 @@ fn mint_and_send(
     // It is what keeps two services running as the same identity
     // distinguishable in an ACL, which is the whole reason a virtual account is
     // usually enough and a real one usually is not.
+    let capabilities = match auth_policy::authentication::service_capabilities(service) {
+        Ok(capabilities) => capabilities,
+        Err(error) => {
+            log::error(format_args!(
+                "invalid capability assignments for {service}: {error}"
+            ));
+            return attestation.refuse(stream, Denial::Internal, "The service policy is unusable.");
+        }
+    };
     let mut asserted: Vec<&SidRef> = vec![service.as_ref()];
+    asserted.extend(capabilities.iter().map(Sid::as_ref));
     asserted.extend(memberships.iter().map(Sid::as_ref));
     let token_groups = derive::token_groups(user, &asserted, LogonType::Service);
     let token_sids: Vec<&SidRef> = token_groups.iter().map(|(sid, _)| sid.as_ref()).collect();
