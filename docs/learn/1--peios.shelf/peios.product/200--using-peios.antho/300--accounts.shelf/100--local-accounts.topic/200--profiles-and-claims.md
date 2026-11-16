@@ -47,7 +47,9 @@ The claim has an effect only where an access rule evaluates it. A string named
 `Administrator` does not grant administrator membership or a privilege by
 itself.
 
-Claim names are matched without case. Setting `department` replaces an
+Claim names use per-character Unicode lowercase matching without normalization
+or full case folding. Équipe and équipe name one claim; ß and ss do not.
+Setting `department` replaces an
 existing `Department` claim. A claim with no values remains present and is
 different from removing the claim; access rules can distinguish the states.
 

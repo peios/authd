@@ -43,7 +43,13 @@ lps group create developers
 lps group add dev-auth developers
 lps claim set dev-auth Department string Engineering
 lps claim set dev-auth Salary uint64 42
+lps claim set dev-auth équipe string Engineering
+lps claim set dev-auth Équipe string Engineering
 descriptor="O:SYG:SYD:(A;;0xf;;;SY)(A;;0x1;;;${auth_cap})(A;;0x2;;;${logon_cap})(A;;0x4;;;${probe_sid})(OA;;0x8;c4abd379-a4d6-5910-bccf-9f01f9a4738f;;${probe_sid})(OA;;0x8;52508a99-75c5-5ea8-957f-7f1d15433b4e;;${probe_sid})"
+reg set "$policy" AuthenticationSecurity "sz:$descriptor"
+unicode_guid=7c2573c6-9c3a-5f76-a102-d6d5acec1216
+absent_guid=ddaf8315-a0da-51fa-83c6-498a8364b896
+descriptor="${descriptor}(OA;;0x8;${unicode_guid};;${probe_sid})(OA;;0x8;${absent_guid};;${probe_sid})"
 reg set "$policy" AuthenticationSecurity "sz:$descriptor"
 for entry in 'authn-probe allowed' 'authn-denied denied' 'authn-logon type-restricted'; do
     read -r service mode <<<"$entry"
@@ -67,6 +73,27 @@ for entry in 'authn-probe allowed' 'authn-denied denied' 'authn-logon type-restr
         exit 1
     fi
 done
+svctl definition edit authn-probe --set Arguments=-c \
+    --set 'Arguments=exec /lcl/bin/authn-probe unicode >/run/authn-probe/result 2>&1'
+svctl start authn-probe
+output=$(</run/authn-probe/result)
+printf '%s\n' "$output"
+if [[ "$output" != *'NATIVE CLAIM NAMES: unicode passed'* ]]; then
+    echo 'Native Unicode disclosure probe failed' >&2
+    exit 1
+fi
+# An ACE derived from the lowercase spelling also denies its uppercase alias.
+reg set "$policy" AuthenticationSecurity "sz:O:SYG:SYD:(OD;;0x8;${unicode_guid};;${probe_sid})(A;;0xf;;;${probe_sid})"
+svctl definition edit authn-probe --set Arguments=-c \
+    --set 'Arguments=exec /lcl/bin/authn-probe unicode-denied >/run/authn-probe/result 2>&1'
+svctl start authn-probe
+output=$(</run/authn-probe/result)
+printf '%s\n' "$output"
+if [[ "$output" != *'NATIVE CLAIM NAMES: unicode-denied passed'* ]]; then
+    echo 'Native Unicode claim deny probe failed' >&2
+    exit 1
+fi
+reg set "$policy" AuthenticationSecurity "sz:$descriptor"
 svctl definition edit authn-probe --set Arguments=-c \
     --set 'Arguments=exec /lcl/bin/authn-probe all-filtered >/run/authn-probe/result 2>&1'
 svctl start authn-probe

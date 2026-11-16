@@ -96,11 +96,33 @@ name, split into eight little-endian 32-bit words. Neither capability grants
 group or claim disclosure. Direct service-SID grants are also supported.
 
 ReadClaim object ACEs target a claim GUID. Derive UUID v5 using namespace
-7503a8f1-bb10-4b57-a1d2-d4946256f404 and the UTF-8 claim name after ASCII
-lowercasing. Non-ASCII spelling is exact. Department and department both
+7503a8f1-bb10-4b57-a1d2-d4946256f404 and the UTF-8 claim name after KACS's
+per-character Unicode lowercasing, without normalization or full case folding.
+Équipe and équipe are equivalent. Department and department both
 select c4abd379-a4d6-5910-bccf-9f01f9a4738f. GUIDs use the platform's
 little-endian wire layout. Use auth-policy's shared claim_guid helper rather
 than reimplementing the derivation in administration tools.
+
+The unpublished ASCII-only development rule is replaced without legacy alias
+support. Before deploying this revision, inventory custom claim grants and
+denies and regenerate affected non-ASCII object-ACE GUIDs from their original
+claim names. Retain each ACE's type, trustee, mask, flags and intended scope;
+in particular, do not drop a deny. Recreate ambiguous development policy from
+its named definition rather than guessing a name from an opaque GUID. ASCII
+identifiers are unchanged. No installed policy is rewritten automatically.
+Sources containing names that collide under the new rule are refused by
+authd before either Authenticate or Logon can succeed; resolve such records
+explicitly before the cutover. Deploy matching clients for named disclosure.
+Public framing and the client ABI version check are 4; message bodies and
+C struct layouts are unchanged. Older authority/library versions are refused
+so their ASCII-only named absence cannot be used as Unicode-aware knowledge.
+The principal-source protocol remains version 2.
+
+The pure Rust rule is kernel-owned and vendored byte-for-byte into auth-core,
+without adding OS dependencies. Refresh it with tools/update-claim-names.py
+update --kernel-root PATH --commit FULL_COMMIT; the claim_names_snapshot gate
+checks its pinned provenance. Unicode tables come from the pinned Rust
+toolchain; toolchain upgrades must qualify this name contract again.
 
 Operation and group checks address the descriptor's root. A claim-specific
 object ACE affects only that claim, including when its mask uses generic

@@ -157,7 +157,7 @@ fn disclose_claims(
             for name in names {
                 match asserted
                     .iter()
-                    .find(|claim| claim.name.eq_ignore_ascii_case(name))
+                    .find(|claim| auth_core::authentication::claim_names_equal(&claim.name, name))
                 {
                     Some(claim) => result.values.push(claim.clone()),
                     None => result.absent.push(name.clone()),
@@ -189,6 +189,23 @@ pub fn permits(stream: &UnixStream, right: u32) -> bool {
 mod tests {
     use super::*;
     use auth_core::{Claim, claim::Values, wire::ClaimCoverage};
+    #[test]
+    fn named_disclosure_cannot_turn_a_unicode_alias_into_absence() {
+        let source = [Claim {
+            name: "Équipe".into(),
+            flags: 0,
+            values: Values::String(vec!["Engineering".into()]),
+        }];
+        let result = disclose_claims(
+            &ClaimSelection::Named(vec!["équipe".into(), "Bureau".into()]),
+            &source,
+            false,
+            |_| panic!("Named disclosure was already authorized"),
+        );
+        assert_eq!(result.values, source);
+        assert_eq!(result.absent, ["Bureau"]);
+    }
+
     #[test]
     fn coverage_depends_on_policy_rather_than_presence_of_hidden_claims() {
         let visible = Claim {

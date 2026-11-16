@@ -43,6 +43,27 @@ let PACKAGES = [
     "terminal-input",
 ]
 
+# The dependency-free helper must remain byte-identical to its kernel provenance.
+def test claim_names_snapshot(
+    sources: List<{at: String, place: Dir | File}> = [
+        {at = "/work/tools/update-claim-names.py"; place = file("tools/update-claim-names.py")},
+        {at = "/work/auth-core/src/vendor"; place = dir("auth-core/src/vendor")},
+    ],
+    py: python.PythonToolchain = toolchain.get(Toolchain::Python),
+) {
+    let placed: List<{at: String, place: Dir | File | FileSet}> = [
+        {at = "/"; place = py.runtime},
+        {at = "/opt/python"; place = py.root},
+        ...(for each in sources { = {at = each.at; place = each.place} }),
+    ]
+    let box = fs.compose(placed).sandbox(cwd = "/work", env = {PYTHONDONTWRITEBYTECODE = "1"})
+    let executable = "/opt/python/{py.python.path.strip_prefix(py.root.path).strip_prefix("/")}"
+    let ran = box.exec(executable, "/work/tools/update-claim-names.py", "check", panic = false)
+    if ran.status != 0 {
+        panic("the claim-name snapshot differs from its origin:\n{ran.stdout}{ran.stderr}")
+    }
+}
+
 # What every test is given: libpeios, by its soname, which a program that
 # links it loads (see peios-rs's `runtime`).
 def loaded() -> List<{at: String, place: Dir | File}> {

@@ -54,7 +54,7 @@ pub const MAGIC: [u8; 4] = *b"PGSL";
 /// of, and a new client meeting an old authority is refused. Both directions
 /// fail safe without a bump, which a bump would only have turned into a flat
 /// refusal of every mixed pair.
-pub const VERSION: u16 = 3;
+pub const VERSION: u16 = 4;
 
 pub const HEADER_BYTES: usize = frame::COMMON_HEADER_BYTES;
 

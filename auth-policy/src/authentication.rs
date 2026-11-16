@@ -121,6 +121,17 @@ mod tests {
         );
         assert!(claim_guid("").is_err());
         assert!(claim_guid("department\0private").is_err());
+        for (left, right) in [("Équipe", "équipe"), ("İ", "i\u{307}"), ("K", "k")] {
+            assert_eq!(claim_guid(left).unwrap(), claim_guid(right).unwrap());
+        }
+        assert_ne!(claim_guid("é").unwrap(), claim_guid("e\u{301}").unwrap());
+        assert_eq!(
+            claim_guid("Équipe").unwrap(),
+            [
+                0xc6, 0x73, 0x25, 0x7c, 0x3a, 0x9c, 0x76, 0x5f, 0xa1, 0x02, 0xd6, 0xd5, 0xac, 0xec,
+                0x12, 0x16
+            ]
+        );
         // Independently generated with Python uuid.uuid5; the bytes here are
         // GUID little-endian, not RFC UUID network order.
         assert_eq!(

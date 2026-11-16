@@ -11,7 +11,7 @@ pekit build -j 2 authd lpsd lps authn_probe libpeios
 ```
 
 Build matching `peinit2` and `svctl` in peinit's worktree. All consumers must
-use the same version-3 public auth-core revision. The source protocol remains
+use the same version-4 public auth-core revision. The source protocol remains
 version 2. No package, kernel or image build is needed.
 
 Boot an existing console image with its kernel and initramfs and add
@@ -53,6 +53,13 @@ Filtered results for a selected-claim service, and a claim-specific deny under
 a blanket grant. The same coverage is required for an account with no claims,
 so metadata does not reveal whether restricted information exists. Restricted
 names are never reported as known absent.
+
+Unicode probes set and replace equivalent équipe/Équipe names, request the
+lowercase alias while preserving the returned spelling, and distinguish a
+genuinely absent Unicode name. A claim-specific deny derived from équipe
+must also deny ÉQUIPE before prompting. Existing development fixture claim
+permissions were ASCII-only; their GUIDs remain unchanged. The new Unicode
+fixture permissions use the replacement rule, with no legacy aliases.
 
 Identity probes exercise lookup, principal enumeration and enumeration of a
 group's members. A selected-claim service grant cannot read the complete CLAIMS

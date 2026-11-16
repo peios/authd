@@ -54,13 +54,19 @@ impl AuthenticationRequest {
     }
 }
 
-/// Names follow existing claim lookup: ASCII letters are case-insensitive,
-/// while non-ASCII characters retain their existing exact spelling.
+/// Names follow KACS's per-character Unicode lowercase mapping, without
+/// normalization or full case folding. The original spelling stays on the wire.
 pub fn canonical_claim_name(name: &str) -> Result<String, WireError> {
     if name.is_empty() || name.len() > claim::MAX_NAME_BYTES || name.contains('\0') {
         return Err(WireError::UnknownValue);
     }
-    Ok(name.to_ascii_lowercase())
+    Ok(crate::claim_name::canonical_chars(name).collect())
+}
+
+/// Compare names using the same allocation-free rule as KACS. Validate names
+/// separately when accepting untrusted protocol or source inputs.
+pub fn claim_names_equal(left: &str, right: &str) -> bool {
+    crate::claim_name::names_equal(left, right)
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -541,6 +547,64 @@ mod tests {
             }
             .validate()
             .is_err()
+        );
+    }
+
+    #[test]
+    fn unicode_equivalence_applies_to_requests_values_and_absences() {
+        assert_eq!(canonical_claim_name("Équipe").unwrap(), "équipe");
+        assert_eq!(canonical_claim_name("İ").unwrap(), "i\u{307}");
+        assert!(!claim_names_equal("é", "e\u{301}"));
+        let mut request = AuthenticateStart {
+            authentication: password(),
+            disclosure: DisclosureRequest {
+                groups: false,
+                claims: ClaimSelection::Named(vec!["équipe".into()]),
+            },
+        };
+        let mut result = Authenticated {
+            user_sid: vec![1, 1, 0, 0, 0, 0, 0, 5, 18, 0, 0, 0],
+            verified_credentials: vec![CredentialType::Password],
+            claim_coverage: ClaimCoverage::Named,
+            claims: vec![Claim {
+                name: "Équipe".into(),
+                flags: 0,
+                values: claim::Values::String(vec!["Engineering".into()]),
+            }],
+            ..Default::default()
+        };
+        assert!(result.validate_for(&request).is_ok());
+        result.absent_claims.push("équipe".into());
+        assert!(result.validate_for(&request).is_err());
+        result.claims.clear();
+        assert!(result.validate_for(&request).is_ok());
+        request.disclosure.claims = ClaimSelection::Named(vec!["Équipe".into(), "équipe".into()]);
+        assert!(request.disclosure.validate().is_err());
+        request.disclosure.claims = ClaimSelection::AllPermitted;
+        result.claim_coverage = ClaimCoverage::Complete;
+        result.absent_claims.clear();
+        result.claims = ["Équipe", "équipe"]
+            .map(|name| Claim {
+                name: name.into(),
+                flags: 0,
+                values: claim::Values::String(vec!["Engineering".into()]),
+            })
+            .to_vec();
+        assert!(result.validate_for(&request).is_err());
+    }
+
+    #[test]
+    fn legacy_ascii_only_absence_is_rejected_by_framing() {
+        let result = Authenticated {
+            claim_coverage: ClaimCoverage::Named,
+            absent_claims: vec!["équipe".into()],
+            ..Default::default()
+        };
+        let mut encoded = encode_authenticated(&result).unwrap();
+        encoded[4..6].copy_from_slice(&3u16.to_le_bytes());
+        assert_eq!(
+            decode_authenticated(&encoded).unwrap_err(),
+            WireError::UnsupportedVersion(3)
         );
     }
 

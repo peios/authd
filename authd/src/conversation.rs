@@ -1544,6 +1544,26 @@ mod general_authentication_tests {
             validate_source_assertion(&request(), domain.as_ref(), false, "test", &source).is_err()
         );
     }
+
+    #[test]
+    fn unicode_claim_aliases_are_refused_before_either_finalizer() {
+        let domain: Sid = "S-1-5-21-1-2-3".parse().unwrap();
+        let mut source = assertion();
+        source.claims = ["Équipe", "équipe"]
+            .map(|name| auth_core::Claim {
+                name: name.into(),
+                flags: 0,
+                values: auth_core::claim::Values::String(vec!["Engineering".into()]),
+            })
+            .to_vec();
+        assert!(
+            validate_source_assertion(&request(), domain.as_ref(), false, "test", &source).is_err()
+        );
+        source.claims.pop();
+        assert!(
+            validate_source_assertion(&request(), domain.as_ref(), false, "test", &source).is_ok()
+        );
+    }
 }
 
 #[cfg(test)]

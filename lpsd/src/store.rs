@@ -1351,7 +1351,7 @@ impl Store {
         let claims = &mut self.principals[at].claims;
         if let Some(existing) = claims
             .iter_mut()
-            .find(|c| c.name.eq_ignore_ascii_case(&claim.name))
+            .find(|c| auth_core::authentication::claim_names_equal(&c.name, &claim.name))
         {
             if *existing == claim {
                 return Ok(false);
@@ -1374,7 +1374,7 @@ impl Store {
         let at = self.position(name)?;
         let claims = &mut self.principals[at].claims;
         let before = claims.len();
-        claims.retain(|c| !c.name.eq_ignore_ascii_case(claim_name));
+        claims.retain(|c| !auth_core::authentication::claim_names_equal(&c.name, claim_name));
         Ok(claims.len() != before)
     }
 
@@ -3663,6 +3663,21 @@ mod tests {
             ),
             Err(StoreError::Invalid(_))
         ));
+    }
+
+    #[test]
+    fn unicode_claim_aliases_replace_and_remove_one_logical_claim() {
+        let mut store = seeded();
+        store
+            .set_claim("jack", claim("Équipe", "Engineering"))
+            .unwrap();
+        store
+            .set_claim("jack", claim("équipe", "Platform"))
+            .unwrap();
+        let claims = store.record("jack").unwrap().claims;
+        assert_eq!(claims, [claim("équipe", "Platform")]);
+        assert!(store.remove_claim("jack", "ÉQUIPE").unwrap());
+        assert!(store.record("jack").unwrap().claims.is_empty());
     }
 
     #[test]

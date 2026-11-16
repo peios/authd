@@ -38,6 +38,23 @@ disclosure fails the request. An authorized named claim absent from the source
 is listed explicitly; unrequested groups differ from an empty membership set.
 Group results exclude locally synthesized token groups.
 
+Claim names use KACS's per-character Unicode lowercase mapping, without
+normalization or full case folding. Équipe and équipe name the same claim;
+ß and ss do not. This applies to lookup, duplicate detection, known absence
+and claim-specific permission GUIDs. Results retain the source's spelling;
+claim-value matching is unchanged. A Named absence can therefore supply
+partial KACS claim knowledge using the same name rule. Other sources must
+establish matching semantics before their absence assertions are adapted.
+
+This replaces the unpublished ASCII-only development rule. Before upgrading,
+regenerate affected non-ASCII claim permission GUIDs using auth-policy's
+claim_guid helper while preserving grants and denies. ASCII identifiers stay
+unchanged. Resolve source records containing newly equivalent duplicate names;
+authd refuses their assertions rather than choosing one. Rebuild named-disclosure
+clients with the matching auth-core revision. Public framing and the C ABI
+version check move to 4 so an older authority/library cannot supply an unsafe
+ASCII-only absence result. Message bodies and C struct layouts are unchanged.
+
 AllPermitted returns readable claims and a coverage marker. Complete means
 the result is the whole claim set and omitted names are absent. Filtered means
 some names may be restricted; omitted names remain unknown. Authd determines
@@ -53,7 +70,7 @@ result until destroyed. The Rust Client::authenticate wrapper returns an owned
 Authenticated result through Operation::authenticated. No token accessor
 succeeds for this operation. AuthenticationView.claim_coverage preserves this
 knowledge through the C ABI; the owned Rust result exposes ClaimCoverage.
-The coordinated unpublished C ABI and public PGSS framing versions are 3.
+The coordinated unpublished C ABI and public PGSS framing versions are 4.
 Rebuild clients with the matching library; the source protocol remains version 2.
 
 ## Credential collection

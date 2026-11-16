@@ -1,0 +1,8 @@
+{
+  "repository": "https://github.com/peios/kernel",
+  "commit": "9d8717b321021e580d821d19bd521bf8e5a22484",
+  "source": "security/pkm/kacs/kacs_core/claim_name.rs",
+  "sha256": "9d173604f9aa6dd237896e6d430f3bd0eb4d89e01546b36b3125a4d0cd9cc35f",
+  "license": "LICENSES/preferred/MIT",
+  "license_sha256": "323c587d0ccf10e376f8bf9a7f31fb4ca6078105194b42e0b1e0ee2bc9bde71f"
+}

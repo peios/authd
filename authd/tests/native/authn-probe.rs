@@ -250,6 +250,23 @@ fn local_logon(kind: LogonType) -> Result<AccessGranted, Denial> {
 
 fn main() {
     let mode = std::env::args().nth(1).unwrap_or_else(|| "allowed".into());
+    if mode == "unicode" || mode == "unicode-denied" {
+        if mode == "unicode-denied" {
+            immediate_denial(
+                &encode_authenticate_start(&request("dev-auth", &["ÉQUIPE"], false)).unwrap(),
+                Denial::PermissionDenied,
+            );
+        } else {
+            let start = request("dev-auth", &["équipe", "ÉquipeAbsente"], false);
+            let result = converse(&start, "development-only-password").unwrap();
+            result.validate_for(&start).unwrap();
+            assert_eq!(result.claims.len(), 1);
+            assert_eq!(result.claims[0].name, "Équipe");
+            assert_eq!(result.absent_claims, ["ÉquipeAbsente"]);
+        }
+        println!("NATIVE CLAIM NAMES: {mode} passed");
+        return;
+    }
     if matches!(
         mode.as_str(),
         "all-complete" | "all-filtered" | "all-denied-claim"

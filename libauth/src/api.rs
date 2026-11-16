@@ -14,7 +14,7 @@ use auth_core::{Secret, ident, lps, wire};
 use crate::engine::{Kind, Operation, Output, State};
 
 // These discriminants are fixed by the public constants in peios/auth.h.
-const ABI_VERSION: u32 = 3;
+const ABI_VERSION: u32 = 4;
 const SUPPORT_PASSWORD: u32 = 1;
 const SUPPORT_SSH_PUBLIC_KEY: u32 = 2;
 const SUPPORTED_CREDENTIALS: u32 = SUPPORT_PASSWORD | SUPPORT_SSH_PUBLIC_KEY;

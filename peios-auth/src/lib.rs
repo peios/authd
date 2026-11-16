@@ -198,7 +198,7 @@ impl Client {
     /// Create a client with copied configuration; reject an incompatible library ABI.
     pub fn with_options(options: Options<'_>) -> Result<Self, Error> {
         // SAFETY: this scalar query takes no pointers or mutable state.
-        if unsafe { sys::peios_auth_abi_version() } != 3 {
+        if unsafe { sys::peios_auth_abi_version() } != 4 {
             return Err(invalid());
         }
         let raw = abi::ClientOptions {

@@ -10,7 +10,7 @@ extern "C" {
 typedef struct peios_auth_client peios_auth_client;
 typedef struct peios_auth_operation peios_auth_operation;
 
-/* ABI 3. Requests/options start with size = sizeof(object). Zero-initialize
+/* ABI 4. Requests/options start with size = sizeof(object). Zero-initialize
  * them before setting fields. A NULL options pointer selects the system sockets
  * and a 90-second reply timeout. Zero timeout selects that default; explicit
  * timeouts are 1..86400000 milliseconds. Empty socket paths select defaults.
@@ -89,8 +89,8 @@ typedef struct peios_auth_operation peios_auth_operation;
  * This API does not install tokens, change process identity, launch programs,
  * or read credentials from a terminal. ABI-compatible additions preserve the
  * layouts and meanings here; published incompatible changes require a new SONAME.
- * ABI 3 is a coordinated unpublished development replacement retaining
- * libauth.so.1; rebuild all clients and use public PGSS framing version 3.
+ * ABI 4 is a coordinated unpublished development replacement retaining
+ * libauth.so.1; rebuild all clients and use public PGSS framing version 4.
  */
 #define PEIOS_AUTH_WAIT 0
 #define PEIOS_AUTH_CLAIMS_NONE 0

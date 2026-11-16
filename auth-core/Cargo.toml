@@ -10,6 +10,8 @@ publish = false
 # PeiosTcb process holding SeCreateTokenPrivilege, and every dependency there is
 # attack surface in the most privileged userspace component on the system — a
 # message parser especially. It is small enough to own outright.
+# The allocation-free claim-name rule is an exact, provenance-checked source
+# snapshot from KACS, rather than a dependency on its evaluator or OS bindings.
 #
 # libc is the one exception, and only for the transport: passing a file
 # descriptor requires sendmsg/recvmsg with ancillary data, which std does not
