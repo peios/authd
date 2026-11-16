@@ -55,7 +55,8 @@ pub fn capability_sid(name: &str) -> Result<Sid, String> {
 pub fn default_sddl() -> String {
     let authenticate = capability_sid(AUTHENTICATE_CAPABILITY).expect("constant capability name");
     let logon = capability_sid(LOGON_CAPABILITY).expect("constant capability name");
-    format!("O:SYG:SYD:(A;;0xf;;;SY)(A;;0x1;;;{authenticate})(A;;0x2;;;{logon})")
+    let radius = crate::service_sid::of("radiusd").expect("constant service name");
+    format!("O:SYG:SYD:(A;;0xf;;;SY)(A;;0x1;;;{authenticate})(A;;0x2;;;{logon})(A;;0xc;;;{radius})")
 }
 
 pub fn descriptor() -> Result<SecurityDescriptor, String> {
@@ -154,6 +155,8 @@ mod tests {
         );
         assert!(default_sddl().contains(&format!("(A;;0x1;;;{auth})")));
         assert!(default_sddl().contains(&format!("(A;;0x2;;;{logon})")));
+        let radius = crate::service_sid::of("radiusd").expect("constant service name");
+        assert!(default_sddl().contains(&format!("(A;;0xc;;;{radius})")));
         sddl::parse(&default_sddl()).expect("default descriptor must parse");
     }
 }

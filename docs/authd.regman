@@ -76,7 +76,7 @@ to prevent inherited access from changing the intended grants.
 --- machine\generic\authn\policy authenticationsecurity
 canonical: Machine\Generic\Authn\Policy AuthenticationSecurity
 type: REG_SZ
-default: SYSTEM has all four rights; distinct capability SIDs grant Authenticate and Logon
+default: SYSTEM has all four rights; capabilities grant Authenticate and Logon; radiusd can read groups and claims
 valid: nonempty SDDL; unreadable, incorrectly typed or malformed policy denies access
 applies: live (one descriptor snapshot per request)
 
@@ -94,6 +94,13 @@ The default grants Authenticate to the capability named
 capability SID is S-1-15-3 followed by SHA-256 of the exact UTF-8 capability
 name, split into eight little-endian 32-bit words. Neither capability grants
 group or claim disclosure. Direct service-SID grants are also supported.
+
+The radiusd service SID additionally receives ReadGroups and ReadClaim for
+the complete namespace by default. This grants neither Authenticate nor
+Logon: trusted service policy still assigns the Authenticate capability.
+An administrator can replace this descriptor to restrict sensitive claims
+with ordinary claim-specific object ACEs. An explicit configured descriptor
+is authoritative and is never silently expanded.
 
 ReadClaim object ACEs target a claim GUID. Derive UUID v5 using namespace
 7503a8f1-bb10-4b57-a1d2-d4946256f404 and the UTF-8 claim name after KACS's
