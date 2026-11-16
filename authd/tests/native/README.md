@@ -28,10 +28,11 @@ exec /lcl/bin/peinit2
 
 Use the explicit development path. The composed `/bin/peinit2` can still name
 the image's original binary after a copy into `/lcl`; that would keep PID 1 on
-the old protocol. After boot, run `setup.sh` from this directory in the guest:
+the old protocol. Put this fixture directory at `native/` in the development
+share mounted on `/mnt/dev`. After boot, run:
 
 ```sh
-PEIOS_DISPOSABLE_AUTH_TEST=yes bash /mnt/dev/authd-authenticate/authd/tests/native/setup.sh
+PEIOS_DISPOSABLE_AUTH_TEST=yes bash /mnt/dev/native/setup.sh
 ```
 
 The allowed probe runs as a distinct virtual service account with Authenticate
