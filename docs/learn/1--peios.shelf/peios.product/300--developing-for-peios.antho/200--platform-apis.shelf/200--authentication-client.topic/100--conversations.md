@@ -14,11 +14,11 @@ the Peios authentication authority. It carries credential conversations,
 identity queries, self-account changes, and requests to end logon sessions.
 The authority checks the connected caller and decides what it can do.
 
-## Authenticate and Logon
+## Authentication and logon
 
 Both operations use the same credential conversation. Authenticate returns
 an established identity and the requested groups and claims. It creates no
-OS token, session, home directory or user registry. Logon additionally checks
+OS token, session, home directory, or user registry. Logon additionally checks
 local logon policy and returns a token and session for the caller to install.
 An Authenticate result cannot be exchanged for a token later.
 
@@ -33,14 +33,15 @@ also permits an account whose source intentionally requires no credential.
 
 Authenticate separately requests full source group membership and selects
 None, Named or AllPermitted claim disclosure. AuthenticationSecurity checks
-group and named-claim permissions before credential collection. Forbidden named
-disclosure fails the request. An authorized named claim absent from the source
-is listed explicitly; unrequested groups differ from an empty membership set.
+group and named-claim permissions before credential collection. Forbidden
+named disclosure fails the request. An authorized named claim absent from
+the source is listed explicitly; unrequested groups differ from an empty
+membership set.
 Group results exclude locally synthesized token groups.
 
 Claim names use KACS's per-character Unicode lowercase mapping, without
 normalization or full case folding. Équipe and équipe name the same claim;
-ß and ss do not. This applies to lookup, duplicate detection, known absence
+ß and ss do not. This applies to lookup, duplicate detection, known absence,
 and claim-specific permission GUIDs. Results retain the source's spelling;
 claim-value matching is unchanged. A Named absence can therefore supply
 partial KACS claim knowledge using the same name rule. Other sources must
@@ -50,14 +51,14 @@ This replaces the unpublished ASCII-only development rule. Before upgrading,
 regenerate affected non-ASCII claim permission GUIDs using auth-policy's
 claim_guid helper while preserving grants and denies. ASCII identifiers stay
 unchanged. Resolve source records containing newly equivalent duplicate names;
-authd refuses their assertions rather than choosing one. Rebuild named-disclosure
-clients with the matching auth-core revision. Public framing and the C ABI
-version check move to 4 so an older authority/library cannot supply an unsafe
-ASCII-only absence result. Message bodies and C struct layouts are unchanged.
+authd refuses their assertions rather than choosing one. Rebuild
+named-disclosure clients with matching auth-core and libauth revisions. An
+older authority's ASCII-only absence result cannot be accepted safely. Use
+the current framing and ABI versions described below.
 
 AllPermitted returns readable claims and a coverage marker. Complete means
 the result is the whole claim set and omitted names are absent. Filtered means
-some names may be restricted; omitted names remain unknown. Authd determines
+some names might be restricted; omitted names remain unknown. Authd determines
 coverage from policy rather than the presence of hidden claims, and never
 reports restricted names or counts. A consumer must deny a policy decision
 that needs unknown information. Conditions using returned values or complete
@@ -77,7 +78,7 @@ An MSCHAPv2 originator advertises `Capabilities::MSCHAPV2` and requires
 credential type 3. The source's single typed prompt supplies a 16-byte
 authenticator challenge in `parameters`. The answer contains the peer
 challenge (16 bytes) followed by the NT response (24 bytes). The source
-owns challenge freshness, account eligibility and credential-version checks.
+owns challenge freshness, account eligibility, and credential-version checks.
 The completed result includes a 20-byte authenticator response for this
 exchange, exposed as `mschapv2_authenticator_response` through the C view
 and owned Rust result. Other proof types carry no MSCHAPv2 output. This

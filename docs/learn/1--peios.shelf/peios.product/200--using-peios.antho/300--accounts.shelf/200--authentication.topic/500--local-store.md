@@ -73,7 +73,7 @@ an additional credential-encryption layer. Protect offline copies too.
 `BackfillNtHashes`, under the same key, separately defaults to 1. When
 both settings are enabled, a successful password check can populate a
 missing NT hash while the verified password is transiently available.
-This is maintenance, without another login step or a login failure if
+This is maintenance, without another sign-in step or sign-in failure if
 the save fails. Existing Argon2 records cannot be converted without the
 password. MSCHAPv2 success itself cannot perform this backfill.
 
@@ -93,7 +93,7 @@ UTF-16LE with no normalization; legacy non-UTF-8 password bytes retain
 Argon2 verification but cannot acquire NT material through this conversion.
 
 `lps show NAME` reports whether NT material is present. No administrative,
-identity or authentication API returns the stored NT hash. An authorized
+identity, or authentication API returns the stored NT hash. An authorized
 MSCHAPv2 authentication returns only its exchange-specific server proof.
 
 ## Administrative requests
