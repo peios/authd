@@ -11,7 +11,8 @@ pekit build -j 2 authd lpsd lps authn_probe libpeios
 ```
 
 Build matching `peinit2` and `svctl` in peinit's worktree. All consumers must
-use the same version-2 auth-core revision. No package or image build is needed.
+use the same version-3 public auth-core revision. The source protocol remains
+version 2. No package, kernel or image build is needed.
 
 Boot an existing console image with its kernel and initramfs and add
 `init=/bin/bash` to the kernel command line. Mount a read-only 9p development
@@ -45,6 +46,12 @@ malformed policy, the PID-1 attestation gate, and ordinary Logon finalization.
 Generic all in a claim-specific object ACE must neither grant Authenticate,
 Logon or group disclosure, nor deny separately granted operations or groups.
 The scoped-only, scoped-groups and scoped-deny probes exercise these boundaries.
+
+AllPermitted probes verify Complete results for an unrestricted SYSTEM reader,
+Filtered results for a selected-claim service, and a claim-specific deny under
+a blanket grant. The same coverage is required for an account with no claims,
+so metadata does not reveal whether restricted information exists. Restricted
+names are never reported as known absent.
 
 Identity probes exercise lookup, principal enumeration and enumeration of a
 group's members. A selected-claim service grant cannot read the complete CLAIMS

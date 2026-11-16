@@ -9,6 +9,84 @@ use peios_auth::{Answer, Capabilities, Client, IdentityKind, Key, Options, Progr
 static NEXT_SOCKET: AtomicUsize = AtomicUsize::new(0);
 
 #[test]
+fn all_permitted_coverage_survives_the_c_abi_and_owned_rust_result() {
+    for (coverage, expected) in [
+        (
+            wire::ClaimCoverage::Complete,
+            peios_auth::ClaimCoverage::Complete,
+        ),
+        (
+            wire::ClaimCoverage::Filtered,
+            peios_auth::ClaimCoverage::Filtered,
+        ),
+    ] {
+        let path = format!(
+            "/tmp/auth-coverage-{}-{}",
+            std::process::id(),
+            NEXT_SOCKET.fetch_add(1, Ordering::Relaxed)
+        );
+        let listener = UnixListener::bind(&path).unwrap();
+        let server = std::thread::spawn(move || {
+            let (socket, _) = listener.accept().unwrap();
+            let opening = recv_message(&wire::FRAMING, &socket).unwrap();
+            let request = wire::decode_authenticate_start(opening.expose()).unwrap();
+            assert_eq!(
+                request.disclosure.claims,
+                wire::ClaimSelection::AllPermitted
+            );
+            send_message(
+                &socket,
+                &wire::encode_authenticated(&wire::Authenticated {
+                    user_sid: vec![1, 1, 0, 0, 0, 0, 0, 5, 18, 0, 0, 0],
+                    canonical_name: "jack".into(),
+                    verified_credentials: vec![wire::CredentialType::Password],
+                    groups: None,
+                    claims: vec![auth_core::Claim {
+                        name: "Department".into(),
+                        flags: 0,
+                        values: auth_core::claim::Values::String(vec!["Household".into()]),
+                    }],
+                    absent_claims: Vec::new(),
+                    claim_coverage: coverage,
+                })
+                .unwrap(),
+            )
+            .unwrap();
+        });
+        let client = Client::with_options(Options {
+            logon_socket: &path,
+            ..Options::default()
+        })
+        .unwrap();
+        let mut operation = client
+            .authenticate(peios_auth::AuthenticateRequest {
+                authentication: peios_auth::AuthenticationRequest {
+                    username: "jack",
+                    supported_credentials: Capabilities::PASSWORD,
+                    required_credential_type: Some(1),
+                    ssh_binding: None,
+                },
+                groups: false,
+                claims: peios_auth::ClaimSelection::AllPermitted,
+            })
+            .unwrap();
+        assert_eq!(operation.wait().unwrap(), Progress::Complete);
+        let result = operation.authenticated().unwrap();
+        drop(operation);
+        assert_eq!(result.claim_coverage, expected);
+        assert!(result.absent_claims.is_empty());
+        assert!(
+            result
+                .identity
+                .fields
+                .contains_key(&peios_auth::fields::CLAIMS)
+        );
+        server.join().unwrap();
+        std::fs::remove_file(path).unwrap();
+    }
+}
+
+#[test]
 fn authenticated_results_are_owned_and_preserve_explicit_absence() {
     let path = format!(
         "/tmp/auth-rust-{}-{}",
@@ -30,6 +108,7 @@ fn authenticated_results_are_owned_and_preserve_explicit_absence() {
                 groups: Some(Vec::new()),
                 claims: Vec::new(),
                 absent_claims: vec!["department".into()],
+                claim_coverage: wire::ClaimCoverage::Named,
             })
             .unwrap(),
         )
@@ -49,7 +128,7 @@ fn authenticated_results_are_owned_and_preserve_explicit_absence() {
                 ssh_binding: None,
             },
             groups: true,
-            claims: &["department"],
+            claims: peios_auth::ClaimSelection::Named(&["department"]),
         })
         .unwrap();
     assert_eq!(operation.wait().unwrap(), Progress::Complete);

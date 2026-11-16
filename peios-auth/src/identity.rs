@@ -89,6 +89,7 @@ pub struct Authenticated {
     pub identity: Record,
     pub verified_credentials: super::Capabilities,
     pub absent_claims: Vec<String>,
+    pub claim_coverage: super::ClaimCoverage,
 }
 #[derive(Debug)]
 pub struct Identity {
@@ -170,6 +171,13 @@ impl Operation {
                 identity: self.record(0)?,
                 verified_credentials: super::Capabilities(view.verified_credentials),
                 absent_claims,
+                claim_coverage: match view.claim_coverage {
+                    0 => super::ClaimCoverage::None,
+                    1 => super::ClaimCoverage::Named,
+                    2 => super::ClaimCoverage::Complete,
+                    3 => super::ClaimCoverage::Filtered,
+                    _ => return Err(invalid()),
+                },
             })
         }
     }

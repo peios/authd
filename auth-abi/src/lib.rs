@@ -33,6 +33,7 @@ pub struct AuthenticateRequest {
     pub size: usize,
     pub authentication: AuthenticationRequest,
     pub groups: u32,
+    pub claim_selection: u32,
     pub claims: *const Bytes,
     pub claim_count: usize,
 }
@@ -49,6 +50,7 @@ pub struct LogonRequest {
 #[derive(Clone, Copy)]
 pub struct AuthenticationView {
     pub verified_credentials: u32,
+    pub claim_coverage: u32,
     pub absent_claim_count: usize,
 }
 #[repr(C)]

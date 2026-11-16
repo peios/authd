@@ -158,7 +158,23 @@ impl AuthenticationRequest<'_> {
 pub struct AuthenticateRequest<'a> {
     pub authentication: AuthenticationRequest<'a>,
     pub groups: bool,
-    pub claims: &'a [&'a str],
+    pub claims: ClaimSelection<'a>,
+}
+
+/// Select the claim information to disclose; AllPermitted can return a filtered view.
+pub enum ClaimSelection<'a> {
+    None,
+    Named(&'a [&'a str]),
+    AllPermitted,
+}
+
+/// Whether omitted claim names are known absent or remain undisclosed/unknown.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClaimCoverage {
+    None,
+    Named,
+    Complete,
+    Filtered,
 }
 
 /// The shared authentication followed by local logon policy and token creation.
@@ -182,7 +198,7 @@ impl Client {
     /// Create a client with copied configuration; reject an incompatible library ABI.
     pub fn with_options(options: Options<'_>) -> Result<Self, Error> {
         // SAFETY: this scalar query takes no pointers or mutable state.
-        if unsafe { sys::peios_auth_abi_version() } != 2 {
+        if unsafe { sys::peios_auth_abi_version() } != 3 {
             return Err(invalid());
         }
         let raw = abi::ClientOptions {
@@ -214,11 +230,17 @@ impl Client {
     }
     /// Authenticate and request explicit disclosure, without creating an OS token.
     pub fn authenticate(&self, request: AuthenticateRequest<'_>) -> Result<Operation, Error> {
-        let claims: Vec<_> = request.claims.iter().map(|name| string(name)).collect();
+        let (claim_selection, names) = match request.claims {
+            ClaimSelection::None => (0, &[][..]),
+            ClaimSelection::Named(names) => (1, names),
+            ClaimSelection::AllPermitted => (2, &[][..]),
+        };
+        let claims: Vec<_> = names.iter().map(|name| string(name)).collect();
         let raw = abi::AuthenticateRequest {
             size: size_of::<abi::AuthenticateRequest>(),
             authentication: request.authentication.raw(),
             groups: u32::from(request.groups),
+            claim_selection,
             claims: claims.as_ptr(),
             claim_count: claims.len(),
         };

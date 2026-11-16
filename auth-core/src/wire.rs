@@ -54,7 +54,7 @@ pub const MAGIC: [u8; 4] = *b"PGSL";
 /// of, and a new client meeting an old authority is refused. Both directions
 /// fail safe without a bump, which a bump would only have turned into a flat
 /// refusal of every mixed pair.
-pub const VERSION: u16 = 2;
+pub const VERSION: u16 = 3;
 
 pub const HEADER_BYTES: usize = frame::COMMON_HEADER_BYTES;
 
@@ -113,8 +113,8 @@ pub const MSG_SESSION_END_QUERY: u16 = 0x0041;
 pub const MSG_SESSION_END_ALLOWED: u16 = 0x8041;
 
 pub use crate::authentication::{
-    AuthenticationRequest, AuthenticateStart, Authenticated, DisclosureRequest,
-    MSG_AUTHENTICATE_START, MSG_AUTHENTICATED, encode_authenticate_start,
+    AuthenticationRequest, AuthenticateStart, Authenticated, DisclosureRequest, ClaimSelection,
+    ClaimCoverage, MSG_AUTHENTICATE_START, MSG_AUTHENTICATED, encode_authenticate_start,
     decode_authenticate_start, encode_authenticated, decode_authenticated,
 };
 

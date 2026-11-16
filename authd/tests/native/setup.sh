@@ -42,6 +42,7 @@ lps add dev-none --no-password --no-prompt --shell /bin/bash
 lps group create developers
 lps group add dev-auth developers
 lps claim set dev-auth Department string Engineering
+lps claim set dev-auth Salary uint64 42
 descriptor="O:SYG:SYD:(A;;0xf;;;SY)(A;;0x1;;;${auth_cap})(A;;0x2;;;${logon_cap})(A;;0x4;;;${probe_sid})(OA;;0x8;c4abd379-a4d6-5910-bccf-9f01f9a4738f;;${probe_sid})(OA;;0x8;52508a99-75c5-5ea8-957f-7f1d15433b4e;;${probe_sid})"
 reg set "$policy" AuthenticationSecurity "sz:$descriptor"
 for entry in 'authn-probe allowed' 'authn-denied denied' 'authn-logon type-restricted'; do
@@ -66,6 +67,16 @@ for entry in 'authn-probe allowed' 'authn-denied denied' 'authn-logon type-restr
         exit 1
     fi
 done
+svctl definition edit authn-probe --set Arguments=-c \
+    --set 'Arguments=exec /lcl/bin/authn-probe all-filtered >/run/authn-probe/result 2>&1'
+svctl start authn-probe
+output=$(</run/authn-probe/result)
+printf '%s\n' "$output"
+if [[ "$output" != *'NATIVE DISCLOSURE: all-filtered passed'* ]]; then
+    echo 'Native filtered disclosure probe failed' >&2
+    exit 1
+fi
+authn-probe all-complete
 for mode in scoped-only scoped-groups; do
     scoped="O:SYG:SYD:(A;;0xf;;;SY)(OA;;GA;c4abd379-a4d6-5910-bccf-9f01f9a4738f;;${probe_sid})"
     if [[ $mode == scoped-groups ]]; then
@@ -88,6 +99,7 @@ authn-probe ident-refresh
 # A blanket grant must not defeat a Department-specific deny, even for SYSTEM.
 reg set "$policy" AuthenticationSecurity "sz:O:SYG:SYD:(OD;;GA;c4abd379-a4d6-5910-bccf-9f01f9a4738f;;SY)(A;;0xf;;;SY)"
 authn-probe ident-restricted
+authn-probe all-denied-claim
 authn-probe scoped-deny
 authn-probe logon
 reg set "$policy" AuthenticationSecurity "sz:$descriptor"

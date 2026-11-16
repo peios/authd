@@ -106,10 +106,19 @@ Operation and group checks address the descriptor's root. A claim-specific
 object ACE affects only that claim, including when its mask uses generic
 rights; it cannot grant or deny Authenticate, Logon or group disclosure.
 
-Authenticate checks every requested disclosure before collecting credentials.
-An unauthorized request is refused; an authorized absent claim is reported
+Authenticate checks groups and explicitly named claims before collecting credentials.
+An unauthorized named request is refused; an authorized absent claim is reported
 as absent. Group disclosure returns validated source memberships, excluding
 groups synthesized for a local token.
+
+AllPermitted claim selection instead returns the readable subset. Complete
+coverage guarantees the entire source set and permission throughout the claim
+namespace; omitted names are absent. Filtered coverage leaves omitted names
+unknown and never identifies restricted names or counts. Authd conservatively
+reports Filtered when policy may narrow disclosure, including claim-deny ACEs
+or SACL policy processing, independently of whether hidden claims exist.
+Named selection keeps its strict pre-collection authorization and explicit
+authorized-absence results. None selection discloses no claims.
 
 Identity lookup and enumeration also check ReadClaim against the querying
 caller's token. Their CLAIMS field requests all claims: it needs an unscoped

@@ -28,6 +28,7 @@ typedef struct peios_auth_authenticate_request {
     size_t size;
     peios_auth_authentication_request authentication;
     uint32_t groups;
+    uint32_t claim_selection;
     const peios_auth_bytes *claims;
     size_t claim_count;
 } peios_auth_authenticate_request;
@@ -40,6 +41,7 @@ typedef struct peios_auth_logon_request {
 } peios_auth_logon_request;
 typedef struct peios_auth_authentication_view {
     uint32_t verified_credentials;
+    uint32_t claim_coverage;
     size_t absent_claim_count;
 } peios_auth_authentication_view;
 typedef struct peios_auth_service_request {

@@ -79,6 +79,10 @@
             "u32"
         ],
         [
+            "claim_selection",
+            "u32"
+        ],
+        [
             "claims",
             "*const Bytes"
         ],
@@ -112,6 +116,10 @@
     "AuthenticationView": [
         [
             "verified_credentials",
+            "u32"
+        ],
+        [
+            "claim_coverage",
             "u32"
         ],
         [

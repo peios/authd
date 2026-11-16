@@ -10,7 +10,7 @@ extern "C" {
 typedef struct peios_auth_client peios_auth_client;
 typedef struct peios_auth_operation peios_auth_operation;
 
-/* ABI 2. Requests/options start with size = sizeof(object). Zero-initialize
+/* ABI 3. Requests/options start with size = sizeof(object). Zero-initialize
  * them before setting fields. A NULL options pointer selects the system sockets
  * and a 90-second reply timeout. Zero timeout selects that default; explicit
  * timeouts are 1..86400000 milliseconds. Empty socket paths select defaults.
@@ -68,12 +68,16 @@ typedef struct peios_auth_operation peios_auth_operation;
  * remote_host are absent. SSH binding fields are all absent or all present:
  * connection is 16 nonzero-as-a-whole bytes, session is 16..64 bytes, and
  * username is nonempty UTF-8. These describe the authorized live transport.
- * Authenticate requests groups as a boolean and named claims explicitly.
- * Unauthorized disclosure fails before collection; authorized absent claims
+ * Authenticate requests groups as a boolean. claim_selection is CLAIMS_NONE,
+ * CLAIMS_NAMED, or CLAIMS_ALL_PERMITTED; claims/count are nonempty only for NAMED.
+ * Unauthorized named disclosure fails before collection; authorized absent claims
  * are available through authentication_absent_claim. Success uses record index
  * zero with the identity/claim getters and never supplies a token descriptor.
  * AuthenticationView.verified_credentials reports checks actually completed;
  * require PASSWORD when no-credential source success must not be accepted.
+ * AuthenticationView.claim_coverage is COVERAGE_NONE, NAMED, COMPLETE or FILTERED.
+ * ALL_PERMITTED succeeds with readable claims. COMPLETE proves missing names
+ * absent; FILTERED leaves them unknown and reveals no restricted names/counts.
  * Key.kind selects NAME (UTF-8 value), SID (binary value), or UNIX_ID (unix_id).
  * LookupRequest.kind can be ANY; EnumerateRequest.kind must be PRINCIPAL or
  * GROUP. A NULL group enumerates all; otherwise it names the group whose
@@ -84,9 +88,18 @@ typedef struct peios_auth_operation peios_auth_operation;
  *
  * This API does not install tokens, change process identity, launch programs,
  * or read credentials from a terminal. ABI-compatible additions preserve the
- * layouts and meanings here; incompatible changes require a new SONAME.
+ * layouts and meanings here; published incompatible changes require a new SONAME.
+ * ABI 3 is a coordinated unpublished development replacement retaining
+ * libauth.so.1; rebuild all clients and use public PGSS framing version 3.
  */
 #define PEIOS_AUTH_WAIT 0
+#define PEIOS_AUTH_CLAIMS_NONE 0
+#define PEIOS_AUTH_CLAIMS_NAMED 1
+#define PEIOS_AUTH_CLAIMS_ALL_PERMITTED 2
+#define PEIOS_AUTH_COVERAGE_NONE 0
+#define PEIOS_AUTH_COVERAGE_NAMED 1
+#define PEIOS_AUTH_COVERAGE_COMPLETE 2
+#define PEIOS_AUTH_COVERAGE_FILTERED 3
 #define PEIOS_AUTH_PROMPT 1
 #define PEIOS_AUTH_COMPLETE 2
 #define PEIOS_AUTH_DENIED 3

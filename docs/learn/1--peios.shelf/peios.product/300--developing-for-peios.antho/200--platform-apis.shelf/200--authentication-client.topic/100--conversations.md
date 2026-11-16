@@ -31,18 +31,30 @@ credential types, an optional required type and any method binding. A
 password-based consumer sets Password as required: advertising support alone
 also permits an account whose source intentionally requires no credential.
 
-Authenticate separately requests full source group membership and individual
-claim names. AuthenticationSecurity checks those permissions before credential
-collection. Forbidden disclosure fails the request. An authorized claim absent
-from the source is listed explicitly; unrequested groups differ from an empty
-membership set. Group results exclude locally synthesized token groups.
+Authenticate separately requests full source group membership and selects
+None, Named or AllPermitted claim disclosure. AuthenticationSecurity checks
+group and named-claim permissions before credential collection. Forbidden named
+disclosure fails the request. An authorized named claim absent from the source
+is listed explicitly; unrequested groups differ from an empty membership set.
+Group results exclude locally synthesized token groups.
+
+AllPermitted returns readable claims and a coverage marker. Complete means
+the result is the whole claim set and omitted names are absent. Filtered means
+some names may be restricted; omitted names remain unknown. Authd determines
+coverage from policy rather than the presence of hidden claims, and never
+reports restricted names or counts. A consumer must deny a policy decision
+that needs unknown information. Conditions using returned values or complete
+group membership can still be evaluated normally.
 
 In C, begin with peios_auth_authenticate_begin, read AuthenticationView and
 the existing identity getters at record index zero, and enumerate absent
 claims with peios_auth_authentication_absent_claim. The operation owns the
 result until destroyed. The Rust Client::authenticate wrapper returns an owned
 Authenticated result through Operation::authenticated. No token accessor
-succeeds for this operation. The coordinated C ABI version is 2.
+succeeds for this operation. AuthenticationView.claim_coverage preserves this
+knowledge through the C ABI; the owned Rust result exposes ClaimCoverage.
+The coordinated unpublished C ABI and public PGSS framing versions are 3.
+Rebuild clients with the matching library; the source protocol remains version 2.
 
 ## Credential collection
 

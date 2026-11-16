@@ -14,7 +14,7 @@ use auth_core::{Secret, ident, lps, wire};
 use crate::engine::{Kind, Operation, Output, State};
 
 // These discriminants are fixed by the public constants in peios/auth.h.
-const ABI_VERSION: u32 = 2;
+const ABI_VERSION: u32 = 3;
 const SUPPORT_PASSWORD: u32 = 1;
 const SUPPORT_SSH_PUBLIC_KEY: u32 = 2;
 const SUPPORTED_CREDENTIALS: u32 = SUPPORT_PASSWORD | SUPPORT_SSH_PUBLIC_KEY;
@@ -303,6 +303,12 @@ pub unsafe extern "C" fn peios_auth_authenticate_begin(
             .iter()
             .map(|name| unsafe { text(*name) })
             .collect::<Option<Vec<_>>>()?;
+        let claims = match request.claim_selection {
+            0 if claims.is_empty() => wire::ClaimSelection::None,
+            1 if !claims.is_empty() => wire::ClaimSelection::Named(claims),
+            2 if claims.is_empty() => wire::ClaimSelection::AllPermitted,
+            _ => return None,
+        };
         let start = wire::AuthenticateStart {
             authentication,
             disclosure: wire::DisclosureRequest {

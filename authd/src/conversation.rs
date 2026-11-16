@@ -591,18 +591,7 @@ fn authenticate(
             Err((denial, reason)) => return attempt.refuse(stream, denial, reason),
         };
         let assertion = &authenticated.assertion;
-        let mut claims = Vec::new();
-        let mut absent_claims = Vec::new();
-        for requested in &start.disclosure.claims {
-            match assertion
-                .claims
-                .iter()
-                .find(|c| c.name.eq_ignore_ascii_case(requested))
-            {
-                Some(claim) => claims.push(claim.clone()),
-                None => absent_claims.push(requested.clone()),
-            }
-        }
+        let claims = authorization.disclosed_claims(&start.disclosure.claims, &assertion.claims);
         let disclosed = wire::Authenticated {
             user_sid: identity.user.as_ref().as_bytes().to_vec(),
             canonical_name: assertion.canonical_name.clone(),
@@ -617,8 +606,9 @@ fn authenticate(
                     .map(|(sid, _)| sid.as_ref().as_bytes().to_vec())
                     .collect()
             }),
-            claims,
-            absent_claims,
+            claims: claims.values,
+            claim_coverage: claims.coverage,
+            absent_claims: claims.absent,
         };
         let message = match wire::encode_authenticated(&disclosed) {
             Ok(message) => message,

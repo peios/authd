@@ -42,6 +42,7 @@ pub(crate) struct AuthenticationOutput {
     pub record: ident::Record,
     pub verified_credentials: u32,
     pub absent_claims: Vec<String>,
+    pub claim_coverage: wire::ClaimCoverage,
 }
 
 pub(crate) enum Output {
@@ -290,7 +291,9 @@ impl Operation {
                             .collect(),
                     ));
                 }
-                values.push(ident::Value::Claims(result.claims));
+                if result.claim_coverage != wire::ClaimCoverage::None {
+                    values.push(ident::Value::Claims(result.claims));
+                }
                 Output::Authenticated(AuthenticationOutput {
                     record: ident::Record {
                         sid: result.user_sid,
@@ -304,6 +307,7 @@ impl Operation {
                         .iter()
                         .fold(0, |mask, value| mask | (1 << (*value as u8 - 1))),
                     absent_claims: result.absent_claims,
+                    claim_coverage: result.claim_coverage,
                 })
             }
             Kind::Logon | Kind::Attest => Output::Grant {

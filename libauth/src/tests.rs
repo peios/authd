@@ -44,6 +44,7 @@ fn authenticate_uses_the_shared_conversation_and_never_exposes_a_token() {
                     values: auth_core::claim::Values::String(vec!["engineering".into()]),
                 }],
                 absent_claims: vec!["office".into()],
+                claim_coverage: wire::ClaimCoverage::Named,
             })
             .unwrap(),
         )
@@ -56,6 +57,7 @@ fn authenticate_uses_the_shared_conversation_and_never_exposes_a_token() {
             size: size_of::<AuthenticateRequest>(),
             authentication: start().authentication,
             groups: 1,
+            claim_selection: 1,
             claims: names.as_ptr(),
             claim_count: names.len(),
         };

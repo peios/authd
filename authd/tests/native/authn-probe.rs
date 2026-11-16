@@ -124,7 +124,13 @@ fn request(name: &str, claims: &[&str], groups: bool) -> AuthenticateStart {
         },
         disclosure: DisclosureRequest {
             groups,
-            claims: claims.iter().map(|s| (*s).to_owned()).collect(),
+            claims: if claims.is_empty() {
+                auth_core::wire::ClaimSelection::None
+            } else {
+                auth_core::wire::ClaimSelection::Named(
+                    claims.iter().map(|s| (*s).to_owned()).collect(),
+                )
+            },
         },
     }
 }
@@ -244,6 +250,40 @@ fn local_logon(kind: LogonType) -> Result<AccessGranted, Denial> {
 
 fn main() {
     let mode = std::env::args().nth(1).unwrap_or_else(|| "allowed".into());
+    if matches!(
+        mode.as_str(),
+        "all-complete" | "all-filtered" | "all-denied-claim"
+    ) {
+        for name in ["dev-auth", "dev-state"] {
+            let mut start = request(name, &[], false);
+            start.disclosure.claims = ClaimSelection::AllPermitted;
+            let result = converse(&start, "development-only-password").unwrap();
+            result.validate_for(&start).unwrap();
+            assert!(result.absent_claims.is_empty());
+            assert_eq!(
+                result.claim_coverage,
+                if mode == "all-complete" {
+                    ClaimCoverage::Complete
+                } else {
+                    ClaimCoverage::Filtered
+                }
+            );
+            let has = |name: &str| {
+                result
+                    .claims
+                    .iter()
+                    .any(|claim| claim.name.eq_ignore_ascii_case(name))
+            };
+            if name == "dev-auth" {
+                assert_eq!(has("Department"), mode != "all-denied-claim");
+                assert_eq!(has("Salary"), mode != "all-filtered");
+            } else {
+                assert!(result.claims.is_empty());
+            }
+        }
+        println!("NATIVE DISCLOSURE: {mode} passed; omitted names are not reported absent");
+        return;
+    }
     if mode == "scoped-only" || mode == "scoped-groups" {
         if mode == "scoped-only" {
             immediate_denial(

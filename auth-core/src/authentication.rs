@@ -64,18 +64,65 @@ pub fn canonical_claim_name(name: &str) -> Result<String, WireError> {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum ClaimSelection {
+    /// Do not disclose claims.
+    #[default]
+    None,
+    /// Resolve exactly these names, including explicit authorized absence.
+    Named(Vec<String>),
+    /// Disclose readable claims without revealing restricted names or counts.
+    AllPermitted,
+}
+
+impl ClaimSelection {
+    pub fn names(&self) -> &[String] {
+        match self {
+            Self::Named(names) => names,
+            _ => &[],
+        }
+    }
+}
+
+/// The knowledge supplied by the claim result, independently of its length.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[repr(u8)]
+pub enum ClaimCoverage {
+    #[default]
+    None = 0,
+    Named = 1,
+    Complete = 2,
+    Filtered = 3,
+}
+
+impl ClaimCoverage {
+    fn from_u8(value: u8) -> Result<Self, WireError> {
+        match value {
+            0 => Ok(Self::None),
+            1 => Ok(Self::Named),
+            2 => Ok(Self::Complete),
+            3 => Ok(Self::Filtered),
+            _ => Err(WireError::UnknownValue),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct DisclosureRequest {
     pub groups: bool,
-    pub claims: Vec<String>,
+    pub claims: ClaimSelection,
 }
 
 impl DisclosureRequest {
     pub fn validate(&self) -> Result<(), WireError> {
-        if self.claims.len() > claim::MAX_CLAIMS {
+        let claims = self.claims.names();
+        if matches!(&self.claims, ClaimSelection::Named(names) if names.is_empty()) {
+            return Err(WireError::UnknownValue);
+        }
+        if claims.len() > claim::MAX_CLAIMS {
             return Err(WireError::TooLong);
         }
-        let mut names = Vec::with_capacity(self.claims.len());
-        for name in &self.claims {
+        let mut names = Vec::with_capacity(claims.len());
+        for name in claims {
             let canonical = canonical_claim_name(name)?;
             if names.contains(&canonical) {
                 return Err(WireError::UnknownValue);
@@ -101,6 +148,7 @@ pub struct Authenticated {
     /// None means not requested. Some(empty) is a complete empty membership set.
     pub groups: Option<Vec<Vec<u8>>>,
     pub claims: Vec<Claim>,
+    pub claim_coverage: ClaimCoverage,
     /// Requested and authorized, but absent from the source result.
     pub absent_claims: Vec<String>,
 }
@@ -109,6 +157,7 @@ impl Authenticated {
     /// A success must answer precisely the requested disclosure and proof.
     /// Do not turn an omitted group set into a complete empty membership set.
     pub fn validate_for(&self, request: &AuthenticateStart) -> Result<(), WireError> {
+        request.disclosure.validate()?;
         let invalid = || WireError::UnknownValue;
         let valid_sid = |sid: &[u8]| {
             sid.len() >= 8
@@ -146,9 +195,28 @@ impl Authenticated {
         let requested = request
             .disclosure
             .claims
+            .names()
             .iter()
             .map(|name| canonical_claim_name(name))
             .collect::<Result<Vec<_>, _>>()?;
+        let named = matches!(request.disclosure.claims, ClaimSelection::Named(_));
+        let coverage_valid = match request.disclosure.claims {
+            ClaimSelection::None => {
+                self.claim_coverage == ClaimCoverage::None
+                    && self.claims.is_empty()
+                    && self.absent_claims.is_empty()
+            }
+            ClaimSelection::Named(_) => self.claim_coverage == ClaimCoverage::Named,
+            ClaimSelection::AllPermitted => {
+                matches!(
+                    self.claim_coverage,
+                    ClaimCoverage::Complete | ClaimCoverage::Filtered
+                ) && self.absent_claims.is_empty()
+            }
+        };
+        if !coverage_valid || self.claims.len() > claim::MAX_CLAIMS {
+            return Err(invalid());
+        }
         let mut answered = Vec::new();
         for claim in &self.claims {
             claim.validate().map_err(|_| invalid())?;
@@ -160,12 +228,12 @@ impl Authenticated {
             .chain(&self.absent_claims)
         {
             let name = canonical_claim_name(name)?;
-            if !requested.contains(&name) || answered.contains(&name) {
+            if (named && !requested.contains(&name)) || answered.contains(&name) {
                 return Err(invalid());
             }
             answered.push(name);
         }
-        if answered.len() != requested.len() {
+        if named && answered.len() != requested.len() {
             return Err(invalid());
         }
         Ok(())
@@ -262,7 +330,14 @@ pub fn encode_authenticate_start(start: &AuthenticateStart) -> Result<Vec<u8>, W
     write_request(&mut w, &start.authentication)?;
     w.close(nested);
     w.u8(u8::from(start.disclosure.groups));
-    write_names(&mut w, &start.disclosure.claims)?;
+    match &start.disclosure.claims {
+        ClaimSelection::None => w.u8(0),
+        ClaimSelection::Named(names) => {
+            w.u8(1);
+            write_names(&mut w, names)?;
+        }
+        ClaimSelection::AllPermitted => w.u8(2),
+    }
     w.close(body);
     w.finish()
 }
@@ -277,7 +352,12 @@ pub fn decode_authenticate_start(buf: &[u8]) -> Result<AuthenticateStart, WireEr
     };
     let disclosure = DisclosureRequest {
         groups,
-        claims: read_names(&mut r)?,
+        claims: match r.u8()? {
+            0 => ClaimSelection::None,
+            1 => ClaimSelection::Named(read_names(&mut r)?),
+            2 => ClaimSelection::AllPermitted,
+            _ => return Err(WireError::UnknownValue),
+        },
     };
     disclosure.validate()?;
     Ok(AuthenticateStart {
@@ -306,6 +386,7 @@ pub fn encode_authenticated(result: &Authenticated) -> Result<Vec<u8>, WireError
             w.close(at);
         }
     }
+    w.u8(result.claim_coverage as u8);
     claim::write_claims(&mut w, &result.claims)?;
     write_names(&mut w, &result.absent_claims)?;
     w.close(body);
@@ -326,6 +407,7 @@ pub fn decode_authenticated(buf: &[u8]) -> Result<Authenticated, WireError> {
         1 => Some(r.array(MAX_GROUPS, |b| Ok(b.bytes(frame::MAX_SID_BYTES)?.to_vec()))?),
         _ => return Err(WireError::UnknownValue),
     };
+    let claim_coverage = ClaimCoverage::from_u8(r.u8()?)?;
     let claims = claim::read_claims(&mut r)?;
     let absent_claims = read_names(&mut r)?;
     Ok(Authenticated {
@@ -334,6 +416,7 @@ pub fn decode_authenticated(buf: &[u8]) -> Result<Authenticated, WireError> {
         verified_credentials,
         groups,
         claims,
+        claim_coverage,
         absent_claims,
     })
 }
@@ -350,6 +433,81 @@ mod tests {
             required_credential_type: Some(CredentialType::Password),
             ssh_binding: None,
         }
+    }
+
+    #[test]
+    fn claim_modes_and_coverage_round_trip_without_inventing_absence() {
+        for selection in [
+            ClaimSelection::None,
+            ClaimSelection::Named(vec!["department".into()]),
+            ClaimSelection::AllPermitted,
+        ] {
+            let request = AuthenticateStart {
+                authentication: password(),
+                disclosure: DisclosureRequest {
+                    groups: false,
+                    claims: selection,
+                },
+            };
+            let decoded =
+                decode_authenticate_start(&encode_authenticate_start(&request).unwrap()).unwrap();
+            assert_eq!(decoded.disclosure, request.disclosure);
+            for coverage in [
+                ClaimCoverage::None,
+                ClaimCoverage::Named,
+                ClaimCoverage::Complete,
+                ClaimCoverage::Filtered,
+            ] {
+                let mut result = Authenticated {
+                    user_sid: vec![1, 1, 0, 0, 0, 0, 0, 5, 18, 0, 0, 0],
+                    verified_credentials: vec![CredentialType::Password],
+                    claim_coverage: coverage,
+                    ..Default::default()
+                };
+                if coverage == ClaimCoverage::Named {
+                    result.absent_claims.push("department".into());
+                }
+                let expected = matches!(
+                    (&request.disclosure.claims, coverage),
+                    (ClaimSelection::None, ClaimCoverage::None)
+                        | (ClaimSelection::Named(_), ClaimCoverage::Named)
+                        | (
+                            ClaimSelection::AllPermitted,
+                            ClaimCoverage::Complete | ClaimCoverage::Filtered
+                        )
+                );
+                let decoded =
+                    decode_authenticated(&encode_authenticated(&result).unwrap()).unwrap();
+                assert_eq!(decoded.validate_for(&request).is_ok(), expected);
+            }
+        }
+    }
+
+    #[test]
+    fn all_permitted_cannot_report_hidden_claim_names_as_absent() {
+        let request = AuthenticateStart {
+            authentication: password(),
+            disclosure: DisclosureRequest {
+                groups: false,
+                claims: ClaimSelection::AllPermitted,
+            },
+        };
+        let result = Authenticated {
+            user_sid: vec![1, 1, 0, 0, 0, 0, 0, 5, 18, 0, 0, 0],
+            verified_credentials: vec![CredentialType::Password],
+            claim_coverage: ClaimCoverage::Filtered,
+            absent_claims: vec!["salary".into()],
+            ..Default::default()
+        };
+        assert!(result.validate_for(&request).is_err());
+        assert!(
+            DisclosureRequest {
+                groups: false,
+                claims: ClaimSelection::Named(Vec::new())
+            }
+            .validate()
+            .is_err()
+        );
     }
 
     #[test]
@@ -379,7 +537,7 @@ mod tests {
         assert!(
             DisclosureRequest {
                 groups: false,
-                claims: vec!["Department".into(), "department".into()]
+                claims: ClaimSelection::Named(vec!["Department".into(), "department".into()])
             }
             .validate()
             .is_err()
@@ -406,7 +564,7 @@ mod tests {
             authentication: password(),
             disclosure: DisclosureRequest {
                 groups: true,
-                claims: vec!["department".into()],
+                claims: ClaimSelection::Named(vec!["department".into()]),
             },
         };
         let messages = [
@@ -434,7 +592,7 @@ mod tests {
             authentication: password(),
             disclosure: DisclosureRequest {
                 groups: true,
-                claims: vec!["department".into()],
+                claims: ClaimSelection::Named(vec!["department".into()]),
             },
         };
         let mut result = Authenticated {
@@ -444,6 +602,7 @@ mod tests {
             groups: Some(Vec::new()),
             absent_claims: vec!["Department".into()],
             claims: Vec::new(),
+            claim_coverage: ClaimCoverage::Named,
         };
         assert!(result.validate_for(&request).is_ok());
         result.groups = None;
