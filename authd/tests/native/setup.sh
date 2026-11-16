@@ -52,8 +52,26 @@ for entry in 'authn-probe allowed' 'authn-denied denied' 'authn-logon type-restr
         --set Identity=Service --set "RuntimeDirectories=$service" --set Requires=lpsd \
         --set RequiredPrivileges=SeChangeNotifyPrivilege
     svctl start "$service"
-    cat "/run/$service/result"
+    output=$(<"/run/$service/result")
+    printf '%s\n' "$output"
+    case "$mode" in
+        allowed) marker='NATIVE AUTHENTICATION: password, groups, claim ACEs, absence, no token/home, and denials passed' ;;
+        denied) marker='NATIVE AUTHENTICATION: capability denial passed' ;;
+        type-restricted) marker='NATIVE LOGON: caller logon-type restriction passed' ;;
+    esac
+    # svctl successfully waiting for an operation is not proof of a clean
+    # service exit. Require the probe's final marker as well.
+    if [[ "$output" != *"$marker" ]]; then
+        echo "Native probe failed: $service" >&2
+        exit 1
+    fi
 done
+authn-probe ident-allowed
+authn-probe ident-refresh
+# A blanket grant must not defeat a Department-specific deny, even for SYSTEM.
+reg set "$policy" AuthenticationSecurity "sz:O:SYG:SYD:(OD;;0x8;c4abd379-a4d6-5910-bccf-9f01f9a4738f;;SY)(A;;0xf;;;SY)"
+authn-probe ident-restricted
+reg set "$policy" AuthenticationSecurity "sz:$descriptor"
 authn-probe no-local-state
 authn-probe logon
 authn-probe attest-denied

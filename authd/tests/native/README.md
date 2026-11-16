@@ -42,6 +42,13 @@ disclosure before prompting, and lack of Logon authority. Separate probes check
 missing capability, caller logon-type policy, SYSTEM operation authorization,
 malformed policy, the PID-1 attestation gate, and ordinary Logon finalization.
 
+Identity probes exercise lookup, principal enumeration and enumeration of a
+group's members. A selected-claim service grant cannot read the complete CLAIMS
+field. A blanket grant permits that field, but a Department-specific deny
+withholds it, including for SYSTEM. Names, numbers and memberships remain
+available. A policy change takes effect on the next request over an existing
+connection. Malformed policy withholds claims without disabling identity lookup.
+
 The SYSTEM no-local-state probe enumerates kernel sessions and checks the
 principal's private registry root and home. Authentication must create none of
 them and must leave its caller's token unchanged. Logon must subsequently

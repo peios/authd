@@ -19,7 +19,8 @@
 //! The descriptor is deliberately open, and restricting it would protect
 //! nothing: a principal excluded from connecting would see numbers where names
 //! should be, while one that *can* connect learns the same names either way.
-//! Restriction, if authd ever wants it, belongs on individual fields.
+//! Claim disclosure is restricted at the field, without restricting ordinary
+//! name, number or membership resolution.
 //!
 //! # Serially, per connection
 //!
@@ -37,10 +38,11 @@ use std::os::unix::net::UnixStream;
 use std::sync::Arc;
 use std::time::Duration;
 
-use auth_core::ident::{self, Kind, Outcome};
+use auth_core::ident::{self, Fields, Kind, Outcome, Record, Value, Withheld, WithheldReason};
 use auth_core::transport::{recv_message, send_message};
 
 use crate::log;
+use crate::auth_access::Authorization;
 use crate::resolve;
 use crate::source::Registry;
 
@@ -98,8 +100,8 @@ pub fn serve(registry: Arc<Registry>, stream: UnixStream) {
         };
 
         let reply = match msg_type {
-            ident::MSG_LOOKUP => lookup(&registry, received.expose()),
-            ident::MSG_ENUMERATE => enumerate(&registry, received.expose()),
+            ident::MSG_LOOKUP => lookup(&registry, &stream, received.expose()),
+            ident::MSG_ENUMERATE => enumerate(&registry, &stream, received.expose()),
             // A logon message on the identity socket. Refused rather than
             // served, which is the whole point of the two message ranges being
             // disjoint: a peer connected to the wrong socket learns so from the
@@ -126,7 +128,66 @@ pub fn serve(registry: Arc<Registry>, stream: UnixStream) {
     ));
 }
 
-fn lookup(registry: &Registry, buf: &[u8]) -> io::Result<Vec<u8>> {
+/// CLAIMS requests the complete field, not a selection of names. A blanket
+/// ReadClaim grant is required before asking a source; object-specific denies
+/// still apply to every returned claim. Keep one policy snapshot per request,
+/// including an enumeration page, rather than per long-lived connection.
+struct ClaimDisclosure {
+    requested: bool,
+    authorization: Option<Authorization>,
+}
+
+impl ClaimDisclosure {
+    fn open(stream: &UnixStream, fields: Fields) -> Self {
+        let requested = fields.contains(Fields::CLAIMS);
+        let authorization = requested
+            .then(|| Authorization::open(stream))
+            .flatten()
+            .filter(|auth| auth.permits(auth_policy::authentication::READ_CLAIM));
+        Self {
+            requested,
+            authorization,
+        }
+    }
+
+    fn source_fields(&self, fields: Fields) -> Fields {
+        if self.authorization.is_none() {
+            fields.difference(Fields::CLAIMS)
+        } else {
+            fields
+        }
+    }
+
+    fn apply(&self, record: &mut Record) {
+        if !self.requested {
+            return;
+        }
+        let allowed = self.authorization.as_ref().is_some_and(|auth| {
+            record.values.iter().all(|value| match value {
+                Value::Claims(claims) => {
+                    claims.iter().all(|claim| auth.discloses_claim(&claim.name))
+                }
+                _ => true,
+            })
+        });
+        if !allowed {
+            // Replace even Absent/Declined/TooLarge: a caller without the
+            // field grant must not learn whether claims exist or fit a reply.
+            record
+                .values
+                .retain(|value| value.field() != Fields::CLAIMS);
+            record
+                .withheld
+                .retain(|value| value.field != Fields::CLAIMS);
+            record.withheld.push(Withheld {
+                field: Fields::CLAIMS,
+                reason: WithheldReason::Restricted,
+            });
+        }
+    }
+}
+
+fn lookup(registry: &Registry, stream: &UnixStream, buf: &[u8]) -> io::Result<Vec<u8>> {
     let request = match ident::decode_lookup(buf) {
         Ok(request) => request,
         // The tag was in the body, so there is none to echo. A caller cannot
@@ -135,7 +196,16 @@ fn lookup(registry: &Registry, buf: &[u8]) -> io::Result<Vec<u8>> {
         Err(_) => return encode_refusal(0, Outcome::Malformed),
     };
 
-    let answer = resolve::lookup(registry, &request.key, request.kind, request.fields);
+    let disclosure = ClaimDisclosure::open(stream, request.fields);
+    let mut answer = resolve::lookup(
+        registry,
+        &request.key,
+        request.kind,
+        disclosure.source_fields(request.fields),
+    );
+    if let Some(record) = &mut answer.record {
+        disclosure.apply(record);
+    }
     ident::encode_lookup_reply(&ident::LookupReply {
         tag: request.tag,
         outcome: answer.outcome,
@@ -144,7 +214,7 @@ fn lookup(registry: &Registry, buf: &[u8]) -> io::Result<Vec<u8>> {
     .map_err(|_| io::Error::other("could not encode a lookup reply"))
 }
 
-fn enumerate(registry: &Registry, buf: &[u8]) -> io::Result<Vec<u8>> {
+fn enumerate(registry: &Registry, stream: &UnixStream, buf: &[u8]) -> io::Result<Vec<u8>> {
     let request = match ident::decode_enumerate(buf) {
         Ok(request) => request,
         Err(_) => return encode_enumerate_refusal(0, Outcome::Malformed),
@@ -154,22 +224,22 @@ fn enumerate(registry: &Registry, buf: &[u8]) -> io::Result<Vec<u8>> {
     if request.kind == Kind::Any {
         return encode_enumerate_refusal(request.tag, Outcome::Malformed);
     }
+    let disclosure = ClaimDisclosure::open(stream, request.fields);
+    let fields = disclosure.source_fields(request.fields);
     // Members of one group are a lookup that overflowed, and belong to the
     // source that holds the group rather than to a walk across all of them —
     // the continuation path for a MEMBERS field withheld as TooLarge
     // (PGSS §2.16-§2.17). No well-known injection here: this is one group's
     // membership, not a table.
     if let Some(of) = &request.of {
-        let page = match resolve::enumerate_members(
-            registry,
-            of,
-            request.kind,
-            request.fields,
-            &request.cursor,
-        ) {
-            Ok(page) => page,
-            Err(outcome) => return encode_enumerate_refusal(request.tag, outcome),
-        };
+        let mut page =
+            match resolve::enumerate_members(registry, of, request.kind, fields, &request.cursor) {
+                Ok(page) => page,
+                Err(outcome) => return encode_enumerate_refusal(request.tag, outcome),
+            };
+        for record in &mut page.entries {
+            disclosure.apply(record);
+        }
         return ident::encode_enumerate_reply(&ident::EnumerateReply {
             tag: request.tag,
             outcome: Outcome::Found,
@@ -180,7 +250,6 @@ fn enumerate(registry: &Registry, buf: &[u8]) -> io::Result<Vec<u8>> {
         .map_err(|_| io::Error::other("could not encode an enumeration reply"));
     }
 
-    let fields = request.fields;
     let page = match resolve::enumerate(registry, request.kind, fields, &request.cursor) {
         Ok(page) => page,
         // A cursor authd did not issue, or can no longer honour. Saying so lets
@@ -197,6 +266,9 @@ fn enumerate(registry: &Registry, buf: &[u8]) -> io::Result<Vec<u8>> {
         let mut first = resolve::well_known_page(registry, request.kind, fields);
         first.extend(entries);
         entries = first;
+    }
+    for record in &mut entries {
+        disclosure.apply(record);
     }
 
     ident::encode_enumerate_reply(&ident::EnumerateReply {

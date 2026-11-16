@@ -33,10 +33,11 @@ impl Authorization {
 
     pub fn discloses(&self, request: &DisclosureRequest) -> bool {
         (!request.groups || self.permits(rights::READ_GROUPS))
-            && request.claims.iter().all(|name| {
-                rights::claim_guid(name)
-                    .is_ok_and(|guid| self.check(rights::READ_CLAIM, Some(guid)))
-            })
+            && request.claims.iter().all(|name| self.discloses_claim(name))
+    }
+
+    pub fn discloses_claim(&self, name: &str) -> bool {
+        rights::claim_guid(name).is_ok_and(|guid| self.check(rights::READ_CLAIM, Some(guid)))
     }
 
     fn check(&self, desired: u32, claim: Option<[u8; 16]>) -> bool {
@@ -56,19 +57,22 @@ impl Authorization {
         if let Some(context) = &context {
             check.audit_context(context);
         }
-        if let Some(guid) = claim {
-            let nodes = [
-                peios_sys::kacs_object_type_entry {
-                    level: 0,
-                    _reserved: 0,
-                    guid: rights::CLAIM_NAMESPACE,
-                },
-                peios_sys::kacs_object_type_entry {
+        if claim.is_some() || desired & rights::READ_CLAIM != 0 {
+            // A scalar access check does not distinguish object ACE targets.
+            // Test the namespace alone for an all-claims grant, or its leaf
+            // for a named claim. A leaf grant cannot authorize the root.
+            let mut nodes = vec![peios_sys::kacs_object_type_entry {
+                level: 0,
+                _reserved: 0,
+                guid: rights::CLAIM_NAMESPACE,
+            }];
+            if let Some(guid) = claim {
+                nodes.push(peios_sys::kacs_object_type_entry {
                     level: 1,
                     _reserved: 0,
                     guid,
-                },
-            ];
+                });
+            }
             check.check_list(&nodes).is_ok_and(|results| {
                 results
                     .last()

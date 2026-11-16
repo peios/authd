@@ -81,7 +81,7 @@ valid: nonempty SDDL; unreadable, incorrectly typed or malformed policy denies a
 applies: live (one descriptor snapshot per request)
 
 Security descriptor authorizing general authentication, local logon and
-Authenticate result disclosure. The registry key's descriptor controls who
+identity disclosure. The registry key's descriptor controls who
 can administer this value; this stored descriptor controls authd requests.
 
 Access rights are Authenticate (0x1), Logon (0x2), ReadGroups (0x4) and
@@ -105,8 +105,22 @@ than reimplementing the derivation in administration tools.
 Authenticate checks every requested disclosure before collecting credentials.
 An unauthorized request is refused; an authorized absent claim is reported
 as absent. Group disclosure returns validated source memberships, excluding
-groups synthesized for a local token. These controls apply to Authenticate;
-the separate identity-lookup interface has its own disclosure contract.
+groups synthesized for a local token.
+
+Identity lookup and enumeration also check ReadClaim against the querying
+caller's token. Their CLAIMS field requests all claims: it needs an unscoped
+ReadClaim grant, and every returned claim must pass its object check. A
+selected-claim grant alone does not permit this field. A failed check
+withholds the complete field as Restricted; no partial claims array is
+returned. Without the unscoped grant, authd does not request claims from the
+source and reports Restricted even if the field is absent. Names, numbers,
+group lookups and membership remain public. These requests collect no account
+credential and need neither Authenticate nor Logon permission.
+
+The default grants claim reads only to SYSTEM. Administrators and services
+need explicit disclosure grants. Unusable policy withholds claims without
+disabling ordinary identity lookup. Every enumeration page captures a fresh
+descriptor snapshot, including on an existing connection.
 
 If this value is absent, the built-in descriptor applies. A present but
 unusable value never restores a default grant. Edits affect later requests,
