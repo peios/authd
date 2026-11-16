@@ -600,6 +600,7 @@ fn dispatch(
                 unix_id: group.unix_id.map(&effective).unwrap_or(0),
             };
             let detail = lps::Detail {
+                nt_hash_present: Some(store.nt_hash_present(&named.name)?),
                 name: record.name,
                 rid: record.rid,
                 enabled: record.enabled,

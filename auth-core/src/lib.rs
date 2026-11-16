@@ -84,6 +84,7 @@
 
 pub mod authentication;
 pub mod claim;
+pub mod mschapv2;
 // Kernel-owned pure Rust source; refresh with tools/update-claim-names.py.
 #[path = "vendor/claim_name.rs"]
 mod claim_name;

@@ -62,6 +62,8 @@ mod audit;
 mod codec;
 mod fs;
 mod log;
+mod mschapv2;
+mod nt_policy;
 mod own;
 mod query;
 mod random;
@@ -118,6 +120,11 @@ const MAX_CONVERSATIONS: usize = 256;
 
 /// What lpsd remembers between asking and being answered.
 enum Pending {
+    Mschapv2 {
+        identifier: Vec<u8>,
+        generation: Option<(u32, u64)>,
+        challenge: [u8; 16],
+    },
     Ssh {
         binding: auth_core::ssh::Binding,
         generation: Option<(u32, u64)>,
@@ -307,6 +314,7 @@ fn wait(
     listener: &UnixListener,
     own: Option<&UnixListener>,
     table: &own::Table,
+    policy: &peios::registry::Key,
 ) -> io::Result<Ready> {
     loop {
         let mut fds = vec![
@@ -327,6 +335,11 @@ fn wait(
                 revents: 0,
             },
         ];
+        fds.push(libc::pollfd {
+            fd: policy.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        });
         fds.extend(table.pollfds());
 
         let timeout = table.next_deadline().map_or(-1, |deadline| {
@@ -351,7 +364,10 @@ fn wait(
         // is discovered by reading end-of-file from it, not by ignoring it and
         // spinning. The table reads them the same way.
         let interesting = libc::POLLIN | libc::POLLHUP | libc::POLLERR;
-        let connections = fds.split_off(3);
+        if fds[3].revents & (libc::POLLHUP | libc::POLLERR | libc::POLLNVAL) != 0 {
+            return Err(io::Error::other("NT policy watch was lost"));
+        }
+        let connections = fds.split_off(4);
         return Ok(Ready {
             logon: fds[0].revents & interesting != 0,
             admin: fds[1].revents & interesting != 0,
@@ -466,9 +482,16 @@ fn pump(
 ) -> io::Result<()> {
     let mut pending: HashMap<u64, Pending> = HashMap::new();
     let mut table = own::Table::new();
+    let policy_watch = nt_policy::watch()?;
+    let mut policy_buffer = vec![0; 65536];
 
     loop {
-        let ready = wait(stream, listener, own, &table)?;
+        refresh_nt_policy(store);
+        let ready = wait(stream, listener, own, &table, &policy_watch)?;
+        policy_watch
+            .read_watch_events(&mut policy_buffer)
+            .map_err(io::Error::from)?;
+        refresh_nt_policy(store);
 
         // The self socket first, and never blocking: each connection is
         // taken only as far as `poll` said it could go, and dropped at its
@@ -757,6 +780,30 @@ fn begin(
         );
         return ask_key(stream, conversation, 1, 0);
     }
+    if request.start.required_credential_type == Some(CredentialType::Mschapv2) {
+        let challenge = random::array::<16>()?;
+        let generation = store.credential_generation(&request.start.identifier);
+        pending.insert(
+            conversation,
+            Pending::Mschapv2 {
+                identifier: request.start.identifier,
+                generation,
+                challenge,
+            },
+        );
+        let request = CredentialRequest {
+            messages: Vec::new(),
+            prompts: vec![Prompt {
+                credential_ref: 1,
+                credential_type: CredentialType::Mschapv2,
+                credential_name: "MSCHAPv2".into(),
+                parameters: challenge.to_vec(),
+            }],
+        };
+        let message = psi::encode_credential_request(conversation, &request)
+            .map_err(|_| io::Error::other("could not encode MSCHAPv2 challenge"))?;
+        return send_message(stream, &message);
+    }
     // What this principal needs, before anything is collected. Unknown and
     // disabled principals follow the decoy password path — see
     // `Store::credential_requirement`.
@@ -927,6 +974,49 @@ fn answer(
     };
 
     match state {
+        Pending::Mschapv2 {
+            identifier,
+            generation,
+            challenge,
+        } => {
+            if response.answers.len() != 1 || response.answers[0].credential_ref != 1 {
+                return refuse(
+                    stream,
+                    conversation,
+                    Denial::AuthenticationFailed,
+                    "Authentication failed.",
+                );
+            }
+            let Ok(proof) =
+                auth_core::mschapv2::Response::decode(response.answers[0].data.expose())
+            else {
+                return refuse(
+                    stream,
+                    conversation,
+                    Denial::AuthenticationFailed,
+                    "Authentication failed.",
+                );
+            };
+            let (verification, success) =
+                store.verify_mschapv2(&identifier, generation, &challenge, &proof);
+            record_verified("mschapv2", &verification);
+            match (verification.result, success) {
+                (Ok(identity), Some(success)) => assert_identity_with_output(
+                    stream,
+                    conversation,
+                    &identity,
+                    unix_id_count,
+                    Some(CredentialType::Mschapv2),
+                    Some(success),
+                ),
+                _ => refuse(
+                    stream,
+                    conversation,
+                    Denial::AuthenticationFailed,
+                    "Authentication failed.",
+                ),
+            }
+        }
         Pending::Ssh {
             binding,
             generation,
@@ -1002,14 +1092,46 @@ fn answer(
                 }
             }
         }
-        Pending::Logon { identifier } => answer_logon(
-            stream,
-            store,
-            conversation,
-            &identifier,
-            &response,
-            unix_id_count,
-        ),
+        Pending::Logon { identifier } => {
+            let generation = store.credential_generation(&identifier);
+            let authenticated = answer_logon(
+                stream,
+                store,
+                conversation,
+                &identifier,
+                &response,
+                unix_id_count,
+            )?;
+            // The successful answer is already sent. Maintenance cannot turn
+            // it into a failed login and never retains plaintext for a job.
+            if authenticated {
+                let mut candidate = store.clone();
+                if candidate.backfill_nt(&identifier, answered(&response, PASSWORD_REF), generation)
+                {
+                    match save(&candidate) {
+                        Ok(()) => {
+                            *store = candidate;
+                            record_nt_maintenance(
+                                "backfill",
+                                store.account_sid(&identifier).as_ref().map(Sid::as_ref),
+                                true,
+                            );
+                        }
+                        Err(error) => {
+                            record_nt_maintenance(
+                                "backfill",
+                                store.account_sid(&identifier).as_ref().map(Sid::as_ref),
+                                false,
+                            );
+                            log::warn(format_args!(
+                                "NT credential backfill was not confirmed saved: {error}"
+                            ));
+                        }
+                    }
+                }
+            }
+            Ok(())
+        }
         Pending::Change(change) => answer_change(
             stream,
             store,
@@ -1076,7 +1198,7 @@ fn answer_logon(
     identifier: &[u8],
     response: &CredentialResponse,
     unix_id_count: u32,
-) -> io::Result<()> {
+) -> io::Result<bool> {
     let secret = answered(response, PASSWORD_REF);
 
     let verification = store.verify_password(identifier, secret);
@@ -1096,6 +1218,7 @@ fn answer_logon(
                 unix_id_count,
                 Some(CredentialType::Password),
             )
+            .map(|_| true)
         }
         Err(_) => {
             // One log line for both "no such principal" and "wrong password".
@@ -1112,6 +1235,7 @@ fn answer_logon(
                 Denial::AuthenticationFailed,
                 "Authentication failed.",
             )
+            .map(|_| false)
         }
     }
 }
@@ -1773,12 +1897,77 @@ fn refuse_enroll(
 /// out (PSI §2.20, obligation 21), exactly as on the query path: an
 /// out-of-range number becomes "no number", loudly, rather than a claim
 /// the authority would refuse.
+fn refresh_nt_policy(store: &mut Store) {
+    match nt_policy::read() {
+        Ok((storage, backfill)) => {
+            store.apply_nt_policy(storage, backfill);
+        }
+        Err(error) => {
+            // Unreadable configuration blocks legacy verification/creation but
+            // is not an explicit request to erase credential material.
+            store.suspend_nt_policy();
+            log::warn(format_args!("NT storage policy unavailable: {error}"));
+            return;
+        }
+    }
+    if store.nt_cleanup_pending {
+        match save_store(store) {
+            Ok(()) => {
+                store.nt_cleanup_pending = false;
+                record_nt_maintenance("purge", None, true);
+            }
+            Err(error) => {
+                record_nt_maintenance("purge", None, false);
+                log::warn(format_args!(
+                    "NT material disabled in memory; durable removal not confirmed: {error}"
+                ));
+            }
+        }
+    }
+}
+
+fn record_nt_maintenance(operation: &str, account: Option<&SidRef>, success: bool) {
+    audit::standard("lpsd.credential.maintained", || {
+        let mut record = audit::Record::new();
+        if let Some(own) = audit::own_sid() {
+            record.sid("subject.token.sid", own);
+        }
+        if let Some(account) = account {
+            record.sid("object.account.sid", account);
+        }
+        record.str("operation.name", operation).outcome(if success {
+            None
+        } else {
+            Some("not-saved")
+        });
+        record
+    });
+}
+
 fn assert_identity(
     stream: &UnixStream,
     conversation: u64,
     identity: &store::Identity,
     unix_id_count: u32,
     credential: Option<CredentialType>,
+) -> io::Result<()> {
+    assert_identity_with_output(
+        stream,
+        conversation,
+        identity,
+        unix_id_count,
+        credential,
+        None,
+    )
+}
+
+fn assert_identity_with_output(
+    stream: &UnixStream,
+    conversation: u64,
+    identity: &store::Identity,
+    unix_id_count: u32,
+    credential: Option<CredentialType>,
+    mschapv2_success: Option<auth_core::mschapv2::Success>,
 ) -> io::Result<()> {
     let confined = |unix_id: u32| {
         if unix_id != 0 && unix_id >= unix_id_count {
@@ -1795,6 +1984,7 @@ fn assert_identity(
     let message = psi::encode_assertion(
         conversation,
         &psi::Assertion {
+            mschapv2_success,
             authenticated_credential_type: credential,
 
             user_sid: identity.sid.as_ref().as_bytes().to_vec(),
@@ -1874,6 +2064,152 @@ mod tests {
 
     fn unsaveable(_: &Store) -> Result<(), StoreError> {
         Err(StoreError::Io(io::Error::other("the disk is full")))
+    }
+
+    #[test]
+    fn mschapv2_conversation_uses_source_challenge_and_rechecks_current_credential() {
+        for invalidate in 0..4 {
+            let mut h = Harness::with("User", Some(b"clientPass"));
+            let request = psi::encode_authenticate(
+                CONVERSATION,
+                &psi::Authenticate {
+                    start: auth_core::wire::AuthenticationRequest {
+                        identifier_type: IdentifierType::Username,
+                        identifier: b"User".to_vec(),
+                        supported_credential_types: vec![CredentialType::Mschapv2],
+                        required_credential_type: Some(CredentialType::Mschapv2),
+                        ssh_binding: None,
+                    },
+                    originator: Vec::new(),
+                    logon: None,
+                },
+            )
+            .unwrap();
+            begin(
+                &h.lpsd,
+                &h.store,
+                &mut h.pending,
+                CONVERSATION,
+                &request,
+                1_000_000,
+            )
+            .unwrap();
+            let encoded = recv_message(&psi::FRAMING, &h.authd).unwrap();
+            let prompts = psi::decode_credential_request(encoded.expose()).unwrap();
+            assert_eq!(prompts.prompts.len(), 1);
+            assert_eq!(prompts.prompts[0].credential_type, CredentialType::Mschapv2);
+            let challenge = prompts.prompts[0].parameters.as_slice().try_into().unwrap();
+            let proof = auth_core::mschapv2::Response {
+                peer_challenge: [9; 16],
+                nt_response: mschapv2::NtHash::derive(b"clientPass")
+                    .unwrap()
+                    .response(&challenge, b"User", &[9; 16]),
+            };
+            match invalidate {
+                1 => h.store.set_password("User", b"reset").unwrap(),
+                2 => {
+                    h.store.apply_nt_policy(false, false);
+                }
+                3 => {
+                    h.store.apply_nt_policy(false, false);
+                    h.store.apply_nt_policy(true, true);
+                }
+                _ => {}
+            }
+            let response = psi::encode_credential_response(
+                CONVERSATION,
+                &CredentialResponse {
+                    answers: vec![Answer {
+                        credential_ref: 1,
+                        data: Secret::from_slice(&proof.encode()),
+                    }],
+                },
+            )
+            .unwrap();
+            answer(
+                &h.lpsd,
+                &mut h.store,
+                &mut h.pending,
+                CONVERSATION,
+                response.expose(),
+                1_000_000,
+                &saved,
+            )
+            .unwrap();
+            let encoded = recv_message(&psi::FRAMING, &h.authd).unwrap();
+            if invalidate == 0 {
+                let assertion = psi::decode_assertion(encoded.expose()).unwrap();
+                assert_eq!(
+                    assertion.authenticated_credential_type,
+                    Some(CredentialType::Mschapv2)
+                );
+                assert!(assertion.mschapv2_success.is_some());
+            } else {
+                let refusal = psi::decode_refusal(encoded.expose()).unwrap();
+                assert_eq!(refusal.denial, Denial::AuthenticationFailed);
+                assert_eq!(refusal.reason, "Authentication failed.");
+            }
+            assert!(h.pending.is_empty());
+        }
+    }
+
+    #[test]
+    fn backfill_is_maintenance_after_password_success_and_failure_preserves_login() {
+        for fail in [true, false] {
+            let mut h = Harness::with("User", Some(b"clientPass"));
+            h.store.apply_nt_policy(false, false);
+            h.store.apply_nt_policy(true, true);
+            h.pending.insert(
+                CONVERSATION,
+                Pending::Logon {
+                    identifier: b"User".to_vec(),
+                },
+            );
+            h.authd
+                .set_read_timeout(Some(std::time::Duration::from_secs(1)))
+                .unwrap();
+            let response = psi::encode_credential_response(
+                CONVERSATION,
+                &CredentialResponse {
+                    answers: vec![Answer {
+                        credential_ref: PASSWORD_REF,
+                        data: Secret::from_slice(b"clientPass"),
+                    }],
+                },
+            )
+            .unwrap();
+            let observed = std::cell::Cell::new(false);
+            let save = |candidate: &Store| {
+                // The success must already be observable before maintenance.
+                let message = recv_message(&psi::FRAMING, &h.authd).unwrap();
+                let assertion = psi::decode_assertion(message.expose()).unwrap();
+                assert_eq!(
+                    assertion.authenticated_credential_type,
+                    Some(CredentialType::Password)
+                );
+                assert!(assertion.mschapv2_success.is_none());
+                assert!(candidate.nt_hash_present("User").unwrap());
+                observed.set(true);
+                if fail {
+                    unsaveable(candidate)
+                } else {
+                    saved(candidate)
+                }
+            };
+            answer(
+                &h.lpsd,
+                &mut h.store,
+                &mut h.pending,
+                CONVERSATION,
+                response.expose(),
+                1_000_000,
+                &save,
+            )
+            .unwrap();
+            assert!(observed.get());
+            assert_eq!(h.store.nt_hash_present("User").unwrap(), !fail);
+            assert!(h.store.authenticate(b"User", b"clientPass").is_some());
+        }
     }
 
     /// What lpsd sent back for one step.

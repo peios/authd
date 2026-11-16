@@ -61,6 +61,41 @@ change to the parameters for newly set passwords does not rewrite existing
 verifiers. Privileges and integrity levels are absent from the store: those
 come from [machine policy](~peios/authentication/granting-access).
 
+### Optional NT compatibility material
+
+`Machine\Software\Lpsd StoreNtHashes` controls an additional NT hash for
+password accounts. It defaults to `REG_DWORD` 1 during compatibility
+development. Argon2id remains present. The NT hash supports MSCHAPv2; it
+is password-equivalent material and substantially cheaper to attack
+offline than Argon2id. The store has access-control protection, without
+an additional credential-encryption layer. Protect offline copies too.
+
+`BackfillNtHashes`, under the same key, separately defaults to 1. When
+both settings are enabled, a successful password check can populate a
+missing NT hash while the verified password is transiently available.
+This is maintenance, without another login step or a login failure if
+the save fails. Existing Argon2 records cannot be converted without the
+password. MSCHAPv2 success itself cannot perform this backfill.
+
+Setting `StoreNtHashes` to 0 disables NT-based verification and creation,
+removes live NT material and attempts to save that removal. Old backups
+are unaffected. Inspect `lpsd.credential.maintained` for a failed save;
+memory remains disabled while durable cleanup is retried on later activity.
+Malformed or unreadable settings disable legacy use without requesting
+deletion. Changes are watched live and checked before source operations;
+multi-value reads are not an atomic Registry snapshot.
+
+Password set/change updates the verifiers together under current policy.
+Password removal removes both. Password-policy restrictions apply to PAP
+and MSCHAPv2 alike. Pending proofs and backfill check credential versions
+to reject a password reset during the exchange. NT derivation uses exact
+UTF-16LE with no normalization; legacy non-UTF-8 password bytes retain
+Argon2 verification but cannot acquire NT material through this conversion.
+
+`lps show NAME` reports whether NT material is present. No administrative,
+identity or authentication API returns the stored NT hash. An authorized
+MSCHAPv2 authentication returns only its exchange-specific server proof.
+
 ## Administrative requests
 
 `lps` reaches `/run/lpsd/admin.sock`; it never edits the file. The socket's
@@ -104,9 +139,10 @@ either view.
 
 ## Format compatibility
 
-The authd 0.0.24 source reads store formats 4 and 5 and writes format 5.
-Format 4 loads with empty group descriptions; the next successful change
-writes format 5. This is a specific compatibility range, not a promise that
+The authd 0.0.24 source reads store formats 4 through 6 and writes format 6.
+Format 4 loads with empty group descriptions. Older password records load
+without NT material; the next successful save writes format 6. This is a
+specific compatibility range, not a promise that
 every release can read its predecessor's store.
 
 Check format compatibility before replacing lpsd with an older build. Preserve

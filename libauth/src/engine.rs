@@ -39,6 +39,7 @@ impl Kind {
 }
 
 pub(crate) struct AuthenticationOutput {
+    pub mschapv2_success: Option<auth_core::mschapv2::Success>,
     pub record: ident::Record,
     pub verified_credentials: u32,
     pub absent_claims: Vec<String>,
@@ -295,6 +296,7 @@ impl Operation {
                     values.push(ident::Value::Claims(result.claims));
                 }
                 Output::Authenticated(AuthenticationOutput {
+                    mschapv2_success: result.mschapv2_success,
                     record: ident::Record {
                         sid: result.user_sid,
                         qualified_name: result.canonical_name,

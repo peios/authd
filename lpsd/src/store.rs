@@ -489,6 +489,8 @@ pub struct Identity {
 /// the caller: on the wire every one of these is "authentication failed".
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Unverified {
+    /// Password authentication is eligible, but compatible material is absent.
+    MissingNtMaterial,
     /// No account by that name.
     NoSuchAccount,
     /// The account exists and the credential did not verify.
@@ -504,6 +506,7 @@ impl Unverified {
     /// The `outcome.reason` of `lpsd.credential.verified`.
     pub fn reason(self) -> &'static str {
         match self {
+            Self::MissingNtMaterial => "missing-nt-material",
             Self::NoSuchAccount => "no-such-account",
             Self::WrongCredential => "wrong-credential",
             Self::Disabled => "disabled",
@@ -566,13 +569,15 @@ pub struct OwnAccount {
     pub keys: Vec<PublicKey>,
 }
 
-/// That a principal's current password held, and against which verifier. See
+/// That a principal's current password held, and against which revision. See
 /// [`Store::prove_current`].
 ///
-/// Holds a verifier, which is not password-equivalent, rather than the password
-/// itself — nothing credential-bearing has to outlive the round that proved it.
+/// Retains only account identity and generation, never a password or NT hash.
 #[derive(Debug, Clone)]
-pub struct Proof(Verifier);
+pub struct Proof {
+    rid: u32,
+    generation: u64,
+}
 
 /// Why a principal's own password was not changed.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -662,6 +667,9 @@ impl NewPrincipal {
 /// inverse for every operation.
 #[derive(Clone)]
 pub struct Store {
+    pub nt_storage: bool,
+    pub nt_backfill: bool,
+    pub nt_cleanup_pending: bool,
     /// The three sub-authorities under `S-1-5-21`.
     domain: [u32; 3],
     next_rid: u32,
@@ -682,6 +690,9 @@ impl Store {
             u32::from_le_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]),
         ];
         Ok(Self {
+            nt_storage: true,
+            nt_backfill: true,
+            nt_cleanup_pending: false,
             domain,
             next_rid: FIRST_RID,
             principals: Vec::new(),
@@ -1153,7 +1164,9 @@ impl Store {
             unix_id: rid,
             name,
             enabled: new.enabled,
-            verifier: credential.map(Verifier::create).transpose()?,
+            verifier: credential
+                .map(|password| Verifier::create_with_nt(password, self.nt_storage))
+                .transpose()?,
             policy: if credential.is_some() {
                 Policy::Password
             } else {
@@ -1261,7 +1274,7 @@ impl Store {
     pub fn set_password(&mut self, name: &str, password: &[u8]) -> Result<(), StoreError> {
         refuse_empty_password(Some(password))?;
         let at = self.position(name)?;
-        self.principals[at].verifier = Some(Verifier::create(password)?);
+        self.principals[at].verifier = Some(Verifier::create_with_nt(password, self.nt_storage)?);
         self.principals[at].credential_generation += 1;
         Ok(())
     }
@@ -1503,9 +1516,9 @@ impl Store {
 
     /// Verify the principal's current password.
     ///
-    /// The [`Proof`] names the verifier the password matched, and
-    /// [`Store::change_proven_password`] refuses unless that verifier is still
-    /// the one in place. So a password an administrator reset between the two
+    /// The [`Proof`] names the credential revision the password matched, and
+    /// [`Store::change_proven_password`] refuses unless it is still current.
+    /// So a password an administrator reset between the two
     /// rounds cannot be overwritten on the strength of the password it
     /// replaced.
     pub fn prove_current(&self, rid: u32, secret: &[u8]) -> Result<Proof, ChangeRefused> {
@@ -1517,7 +1530,10 @@ impl Store {
         if !verifier.verify(secret) {
             return Err(ChangeRefused::WrongPassword);
         }
-        Ok(Proof(verifier.clone()))
+        Ok(Proof {
+            rid: principal.rid,
+            generation: principal.credential_generation,
+        })
     }
 
     /// Replace a principal's password, given proof of the current one.
@@ -1539,10 +1555,12 @@ impl Store {
             .iter()
             .position(|p| p.rid == rid)
             .ok_or(ChangeRefused::NoSuchPrincipal)?;
-        if self.principals[at].verifier.as_ref() != Some(&proof.0) {
+        if self.principals[at].rid != proof.rid
+            || self.principals[at].credential_generation != proof.generation
+        {
             return Err(ChangeRefused::Superseded);
         }
-        let verifier = Verifier::create(password)
+        let verifier = Verifier::create_with_nt(password, self.nt_storage)
             .map_err(|error| ChangeRefused::Rejected(error.to_string()))?;
         self.principals[at].verifier = Some(verifier);
         self.principals[at].credential_generation += 1;
@@ -1711,6 +1729,101 @@ impl Store {
             .map(|p| (p.rid, p.credential_generation))
     }
 
+    /// Disable in-memory NT verification before attempting durable deletion.
+    /// A failed cleanup never restores usable material in this process.
+    pub fn apply_nt_policy(&mut self, storage: bool, backfill: bool) -> bool {
+        self.nt_storage = storage;
+        self.nt_backfill = backfill;
+        let mut changed = false;
+        if !storage {
+            for principal in &mut self.principals {
+                if principal
+                    .verifier
+                    .as_mut()
+                    .is_some_and(|v| v.nt_hash.take().is_some())
+                {
+                    principal.credential_generation += 1;
+                    changed = true;
+                }
+            }
+        }
+        self.nt_cleanup_pending |= changed;
+        changed
+    }
+
+    pub fn suspend_nt_policy(&mut self) {
+        if self.nt_storage {
+            for principal in &mut self.principals {
+                principal.credential_generation += 1;
+            }
+        }
+        self.nt_storage = false;
+        self.nt_backfill = false;
+    }
+
+    /// Called only after successful password verification in the serialized
+    /// source loop. A version comparison prevents stale password backfilling.
+    pub fn backfill_nt(
+        &mut self,
+        identifier: &[u8],
+        password: &[u8],
+        generation: Option<(u32, u64)>,
+    ) -> bool {
+        if !self.nt_storage
+            || !self.nt_backfill
+            || generation != self.credential_generation(identifier)
+        {
+            return false;
+        }
+        let Some(p) = self.principals.iter_mut().find(|p| p.matches(identifier)) else {
+            return false;
+        };
+        if !p.enabled || !p.policy.password() {
+            return false;
+        }
+        let Some(verifier) = &mut p.verifier else {
+            return false;
+        };
+        if verifier.nt_hash.is_some() {
+            return false;
+        }
+        verifier.nt_hash = crate::mschapv2::NtHash::derive(password);
+        verifier.nt_hash.is_some()
+    }
+
+    pub fn verify_mschapv2(
+        &self,
+        identifier: &[u8],
+        generation: Option<(u32, u64)>,
+        challenge: &[u8; 16],
+        response: &auth_core::mschapv2::Response,
+    ) -> (Verification, Option<auth_core::mschapv2::Success>) {
+        let p = self.principals.iter().find(|p| p.matches(identifier));
+        // Equal fixed-cost legacy work even for unknown/unavailable accounts.
+        let decoy = crate::mschapv2::NtHash([0; 16]);
+        let hash = p
+            .and_then(|p| p.verifier.as_ref())
+            .and_then(|v| v.nt_hash.as_ref());
+        let success = hash
+            .unwrap_or(&decoy)
+            .verify(challenge, identifier, response);
+        let account = p.and_then(|p| self.sid_of(p.rid).ok());
+        let result = match p {
+            None => Err(Unverified::NoSuchAccount),
+            Some(p) if !p.enabled => Err(Unverified::Disabled),
+            Some(p) if !self.nt_storage || !p.policy.password() => Err(Unverified::NotPermitted),
+            Some(_) if hash.is_none() => Err(Unverified::MissingNtMaterial),
+            Some(p)
+                if generation != Some((p.rid, p.credential_generation)) || success.is_none() =>
+            {
+                Err(Unverified::WrongCredential)
+            }
+            Some(p) => self.identity_of(p).ok_or(Unverified::WrongCredential),
+        };
+        let success = result.is_ok().then_some(success).flatten();
+        (Verification::of(account, result), success)
+    }
+
     /// Check that an enabled account permits SSH and holds this supported key.
     /// This checks eligibility only; it does not verify the signature.
     pub fn key_eligible(&self, identifier: &[u8], offer: &auth_core::ssh::Offer) -> bool {
@@ -1794,6 +1907,14 @@ impl Store {
     /// Read the policy, or report that the named account does not exist.
     pub fn credential_policy(&self, name: &str) -> Result<Policy, StoreError> {
         Ok(self.principals[self.position(name)?].policy)
+    }
+
+    pub fn nt_hash_present(&self, name: &str) -> Result<bool, StoreError> {
+        let at = self.position(name)?;
+        Ok(self.principals[at]
+            .verifier
+            .as_ref()
+            .is_some_and(|v| v.nt_hash.is_some()))
     }
 
     /// Borrow the enrolled keys, or report that the named account does not exist.
@@ -1918,7 +2039,8 @@ impl Store {
         let sd = store_descriptor().map_err(|error| {
             StoreError::Invalid(format!("could not build the store's descriptor: {error}"))
         })?;
-        let file = codec::seal(&self.encode());
+        let body = zeroize::Zeroizing::new(self.encode());
+        let file = zeroize::Zeroizing::new(codec::seal(&body));
         crate::fs::replace(fs, path, &file, &sd)?;
         Ok(())
     }
@@ -1965,7 +2087,8 @@ impl Store {
             if let Some(verifier) = &principal.verifier {
                 verifier.encode(&mut inner);
             }
-            w.bytes(&inner.finish());
+            let encoded_verifier = zeroize::Zeroizing::new(inner.finish());
+            w.bytes(&encoded_verifier);
 
             w.u32(principal.groups.len() as u32);
             for group in &principal.groups {
@@ -2174,6 +2297,9 @@ impl Store {
         }
 
         let store = Self {
+            nt_storage: true,
+            nt_backfill: true,
+            nt_cleanup_pending: false,
             domain,
             next_rid,
             principals,
@@ -2505,6 +2631,140 @@ pub fn store_descriptor() -> peios::Result<peios::security::SecurityDescriptor> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn nt_material_round_trips_and_password_reset_invalidates_pending_proof() {
+        let mut store = Store::provision().unwrap();
+        store
+            .add(NewPrincipal::named("User"), Some(b"clientPass"))
+            .unwrap();
+        let generation = store.credential_generation(b"User");
+        let challenge = [4; 16];
+        let proof = auth_core::mschapv2::Response {
+            peer_challenge: [5; 16],
+            nt_response: crate::mschapv2::NtHash::derive(b"clientPass")
+                .unwrap()
+                .response(&challenge, b"User", &[5; 16]),
+        };
+        let decoded = Store::decode(codec::VERSION, &store.encode()).unwrap();
+        assert!(
+            decoded
+                .verify_mschapv2(
+                    b"User",
+                    decoded.credential_generation(b"User"),
+                    &challenge,
+                    &proof
+                )
+                .0
+                .result
+                .is_ok()
+        );
+        assert!(
+            store
+                .verify_mschapv2(b"User", generation, &challenge, &proof)
+                .0
+                .result
+                .is_ok()
+        );
+        store.set_password("User", b"replacement").unwrap();
+        assert!(
+            store
+                .verify_mschapv2(b"User", generation, &challenge, &proof)
+                .0
+                .result
+                .is_err()
+        );
+        assert!(
+            store
+                .verify_mschapv2(
+                    b"User",
+                    store.credential_generation(b"User"),
+                    &challenge,
+                    &proof
+                )
+                .0
+                .result
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn nt_policy_purges_and_backfill_obeys_both_toggles_and_generation() {
+        let mut store = seeded();
+        let old = store.credential_generation(b"jack");
+        assert!(store.apply_nt_policy(false, true));
+        assert!(store.nt_cleanup_pending);
+        assert!(
+            store.principals[0]
+                .verifier
+                .as_ref()
+                .unwrap()
+                .nt_hash
+                .is_none()
+        );
+        assert_ne!(store.credential_generation(b"jack"), old);
+        assert!(!store.backfill_nt(b"jack", b"password", store.credential_generation(b"jack")));
+        store.apply_nt_policy(true, false);
+        assert!(!store.backfill_nt(b"jack", b"password", store.credential_generation(b"jack")));
+        store.apply_nt_policy(true, true);
+        assert!(!store.backfill_nt(b"jack", b"password", old));
+        assert!(store.backfill_nt(b"jack", b"password", store.credential_generation(b"jack")));
+        assert!(!store.backfill_nt(b"jack", b"password", store.credential_generation(b"jack")));
+        store.apply_nt_policy(false, true);
+        store.set_password("jack", b"new").unwrap();
+        assert!(
+            store.principals[0]
+                .verifier
+                .as_ref()
+                .unwrap()
+                .nt_hash
+                .is_none()
+        );
+        assert!(store.authenticate(b"jack", b"new").is_some());
+        let decoded = Store::decode(codec::VERSION, &store.encode()).unwrap();
+        assert!(
+            decoded.principals[0]
+                .verifier
+                .as_ref()
+                .unwrap()
+                .nt_hash
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn no_nt_material_is_admin_visible_and_never_grants_identity() {
+        let mut store = seeded();
+        store.apply_nt_policy(false, false);
+        store.apply_nt_policy(true, true);
+        let response = auth_core::mschapv2::Response {
+            peer_challenge: [0; 16],
+            nt_response: [0; 24],
+        };
+        let (result, success) = store.verify_mschapv2(
+            b"jack",
+            store.credential_generation(b"jack"),
+            &[0; 16],
+            &response,
+        );
+        assert_eq!(result.result.unwrap_err(), Unverified::MissingNtMaterial);
+        assert!(success.is_none());
+        let (result, success) = store.verify_mschapv2(b"unknown", None, &[0; 16], &response);
+        assert_eq!(result.result.unwrap_err(), Unverified::NoSuchAccount);
+        assert!(success.is_none());
+    }
+
+    #[test]
+    fn opportunistic_backfill_does_not_supersede_an_existing_password_change_proof() {
+        let mut store = seeded();
+        store.apply_nt_policy(false, false);
+        store.apply_nt_policy(true, true);
+        let (rid, generation) = store.credential_generation(b"jack").unwrap();
+        let proof = store.prove_current(rid, b"password").unwrap();
+        assert!(store.backfill_nt(b"jack", b"password", Some((rid, generation))));
+        store.change_proven_password(rid, &proof, b"new").unwrap();
+        assert!(store.authenticate(b"jack", b"new").is_some());
+    }
     use crate::fs::FaultyFs;
     use peios::security::WellKnown;
 
@@ -4217,7 +4477,7 @@ mod tests {
     #[test]
     fn incompatible_store_versions_are_refused_without_rewriting() {
         let store = seeded();
-        for version in [1, 2, 3, 6] {
+        for version in [1, 2, 3, codec::VERSION + 1] {
             assert!(matches!(Store::decode(version, &store.encode()),
                 Err(StoreError::Corrupt(CodecError::UnsupportedVersion(v))) if v == version));
         }

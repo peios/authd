@@ -414,7 +414,7 @@ fn converse(socket: &UnixStream) -> Result<Granted, Rejected> {
                     // echoing a secret to the screen. Unreachable unless an
                     // authority ignores our advertised capabilities.
                     let data = match prompt.credential_type {
-                        CredentialType::SshPublicKey => {
+                        CredentialType::SshPublicKey | CredentialType::Mschapv2 => {
                             return Err(fatal("Unsupported credential type.".into(), rendered));
                         }
                         CredentialType::Password => {

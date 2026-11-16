@@ -54,7 +54,7 @@ pub const MAGIC: [u8; 4] = *b"PGSL";
 /// of, and a new client meeting an old authority is refused. Both directions
 /// fail safe without a bump, which a bump would only have turned into a flat
 /// refusal of every mixed pair.
-pub const VERSION: u16 = 4;
+pub const VERSION: u16 = 5;
 
 pub const HEADER_BYTES: usize = frame::COMMON_HEADER_BYTES;
 
@@ -293,6 +293,8 @@ pub enum CredentialType {
     Password = 1,
     /// Standard SSH public-key proof, bound to an authorized live transport.
     SshPublicKey = 2,
+    /// MSCHAPv2 challenge-response for a password, never an NT-hash export.
+    Mschapv2 = 3,
 }
 
 impl CredentialType {
@@ -300,6 +302,7 @@ impl CredentialType {
         Some(match value {
             1 => Self::Password,
             2 => Self::SshPublicKey,
+            3 => Self::Mschapv2,
             _ => return None,
         })
     }
@@ -862,6 +865,7 @@ pub(crate) fn read_credential_request_body(
 fn validate_prompt_parameters(prompt: &Prompt) -> Result<(), WireError> {
     match prompt.credential_type {
         CredentialType::Password if prompt.parameters.is_empty() => Ok(()),
+        CredentialType::Mschapv2 if prompt.parameters.len() == 16 => Ok(()),
         CredentialType::SshPublicKey => {
             crate::ssh::read_disposition(&prompt.parameters).map(|_| ())
         }

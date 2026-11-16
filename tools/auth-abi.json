@@ -115,6 +115,10 @@
     ],
     "AuthenticationView": [
         [
+            "mschapv2_authenticator_response",
+            "Bytes"
+        ],
+        [
             "verified_credentials",
             "u32"
         ],

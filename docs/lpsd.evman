@@ -44,17 +44,42 @@ field: object.account.sid                   optional
   The account the credential was checked for. Absent when lpsd holds no
   account by the name it was asked about.
 field: operation.name                       required
-  values: password | ssh-key | none
+  values: password | ssh-key | mschapv2 | none
   closed: false
   What was checked. `none` is an account whose policy is that it signs in
   with no credential, asserted without asking for one.
 field: outcome.success                      required
   True when lpsd told authd who the principal is.
 field: outcome.reason                       when outcome.success == false
-  values: no-such-account | wrong-credential | disabled | not-permitted
+  values: no-such-account | wrong-credential | disabled | not-permitted | missing-nt-material
   closed: false
   `not-permitted` is an account whose credential policy does not allow
   the kind of credential offered, or a key the account does not hold.
+
+--- event lpsd.credential.maintained
+tier: standard
+gating: none — report attempted NT-material maintenance
+cardinality: once per attempted backfill save or purge save
+
+The local source attempted opportunistic NT-hash backfilling or removal
+after NT-hash storage was disabled. This is maintenance, not a user login
+stage. Backfill failure does not fail an otherwise successful password
+authentication. A failed save may have replaced the store before a final
+directory synchronization failed; failure does not prove no disk change.
+No password, hash, challenge, response or protocol key is recorded.
+
+field: subject.token.sid                    required
+  The local source service account.
+field: object.account.sid                   optional
+  The account being backfilled. Absent for a whole-store purge.
+field: operation.name                       required
+  values: backfill | purge
+  closed: true
+field: outcome.success                      required
+  True once the source confirms the save completed.
+field: outcome.reason                       when outcome.success == false
+  values: not-saved
+  closed: true
 
 --- event lpsd.credential.changed
 tier: essential

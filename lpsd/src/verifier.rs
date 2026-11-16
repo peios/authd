@@ -1,14 +1,11 @@
 //! Password verifiers: what lpsd stores instead of a password.
 //!
-//! # Why a memory-hard KDF, and why nothing reversible
+//! # Memory-hard verification and optional legacy compatibility
 //!
-//! The project's standing decision is plaintext over the local socket and an
-//! argon2id-class verifier at rest. The two halves are one argument: a
-//! challenge-response scheme would require storing something a response can be
-//! recomputed from, which is password-equivalent material — the pass-the-hash
-//! failure mode, where stealing the store is as good as knowing the passwords.
-//! Storing only a verifier means compromising lpsd yields the thing an *offline
-//! attack* is run against, not the ability to authenticate.
+//! Argon2id remains the normal password verifier. A Registry-controlled NT hash
+//! may additionally support MSCHAPv2. That legacy material is password-equivalent
+//! and susceptible to much cheaper offline guessing; keeping Argon2 alongside
+//! it does not mitigate extraction of the NT material.
 //!
 //! Memory-hardness is what makes that offline attack expensive. A fast hash
 //! (even a salted one) is a GPU problem; argon2id's memory cost is the
@@ -88,6 +85,7 @@ impl core::fmt::Display for VerifierError {
 /// What is stored in place of a password.
 #[derive(Clone, PartialEq, Eq)]
 pub struct Verifier {
+    pub nt_hash: Option<crate::mschapv2::NtHash>,
     algorithm: Algorithm,
     memory_kib: u32,
     passes: u32,
@@ -107,9 +105,18 @@ impl core::fmt::Debug for Verifier {
 impl Verifier {
     /// Derive a verifier for `password`, with a fresh salt and the current
     /// parameters.
+    #[cfg(test)]
     pub fn create(password: &[u8]) -> Result<Self, VerifierError> {
+        Self::create_with_nt(password, true)
+    }
+
+    pub fn create_with_nt(password: &[u8], enabled: bool) -> Result<Self, VerifierError> {
         let salt = random::array::<SALT_BYTES>().map_err(VerifierError::NoRandomness)?;
-        Self::derive(password, &salt, MEMORY_KIB, PASSES, LANES)
+        let mut value = Self::derive(password, &salt, MEMORY_KIB, PASSES, LANES)?;
+        value.nt_hash = enabled
+            .then(|| crate::mschapv2::NtHash::derive(password))
+            .flatten();
+        Ok(value)
     }
 
     /// A verifier for a password nobody knows.
@@ -121,7 +128,7 @@ impl Verifier {
     /// decoy".
     pub fn decoy() -> Result<Self, VerifierError> {
         let password = random::array::<32>().map_err(VerifierError::NoRandomness)?;
-        Self::create(&password)
+        Self::create_with_nt(&password, false)
     }
 
     fn derive(
@@ -133,6 +140,7 @@ impl Verifier {
     ) -> Result<Self, VerifierError> {
         let hash = run_argon2id(password, salt, memory_kib, passes, lanes)?;
         Ok(Self {
+            nt_hash: None,
             algorithm: Algorithm::Argon2id,
             memory_kib,
             passes,
@@ -169,6 +177,7 @@ impl Verifier {
         w.u32(self.lanes);
         w.bytes(&self.salt);
         w.bytes(&self.hash);
+        w.bytes(self.nt_hash.as_ref().map_or(&[], |hash| &hash.0));
     }
 
     pub fn decode(r: &mut Reader<'_>) -> Result<Self, CodecError> {
@@ -178,6 +187,20 @@ impl Verifier {
         let lanes = r.u32()?;
         let salt = r.bytes()?.to_vec();
         let hash = r.bytes()?.to_vec();
+        let nt_hash = if r.at_end() {
+            None // Existing format-4/5 verifier.
+        } else {
+            match r.bytes()? {
+                [] => None,
+                bytes if bytes.len() == 16 => Some(crate::mschapv2::NtHash(
+                    bytes.try_into().map_err(|_| CodecError::Malformed)?,
+                )),
+                _ => return Err(CodecError::Malformed),
+            }
+        };
+        if !r.at_end() {
+            return Err(CodecError::TrailingBytes);
+        }
 
         // Parameters a future lpsd might write but this one cannot run. Caught
         // here rather than at verification time, where the failure would be
@@ -188,6 +211,7 @@ impl Verifier {
         }
 
         Ok(Self {
+            nt_hash,
             algorithm,
             memory_kib,
             passes,

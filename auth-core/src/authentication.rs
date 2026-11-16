@@ -147,6 +147,7 @@ pub struct AuthenticateStart {
 
 #[derive(Debug, Clone, Default)]
 pub struct Authenticated {
+    pub mschapv2_success: Option<crate::mschapv2::Success>,
     pub user_sid: Vec<u8>,
     pub canonical_name: String,
     /// Empty means a deliberate source-authorized no-credential success.
@@ -163,6 +164,12 @@ impl Authenticated {
     /// A success must answer precisely the requested disclosure and proof.
     /// Do not turn an omitted group set into a complete empty membership set.
     pub fn validate_for(&self, request: &AuthenticateStart) -> Result<(), WireError> {
+        crate::mschapv2::validate_success(
+            self.verified_credentials
+                .contains(&CredentialType::Mschapv2)
+                .then_some(CredentialType::Mschapv2),
+            &self.mschapv2_success,
+        )?;
         request.disclosure.validate()?;
         let invalid = || WireError::UnknownValue;
         let valid_sid = |sid: &[u8]| {
@@ -395,6 +402,7 @@ pub fn encode_authenticated(result: &Authenticated) -> Result<Vec<u8>, WireError
     w.u8(result.claim_coverage as u8);
     claim::write_claims(&mut w, &result.claims)?;
     write_names(&mut w, &result.absent_claims)?;
+    w.bytes(result.mschapv2_success.as_ref().map_or(&[], |v| &v.0), 20)?;
     w.close(body);
     w.finish()
 }
@@ -416,7 +424,9 @@ pub fn decode_authenticated(buf: &[u8]) -> Result<Authenticated, WireError> {
     let claim_coverage = ClaimCoverage::from_u8(r.u8()?)?;
     let claims = claim::read_claims(&mut r)?;
     let absent_claims = read_names(&mut r)?;
+    let mschapv2_success = crate::mschapv2::decode_success(r.bytes(20)?)?;
     Ok(Authenticated {
+        mschapv2_success,
         user_sid,
         canonical_name,
         verified_credentials,
@@ -564,6 +574,7 @@ mod tests {
         };
         let mut result = Authenticated {
             user_sid: vec![1, 1, 0, 0, 0, 0, 0, 5, 18, 0, 0, 0],
+            mschapv2_success: None,
             verified_credentials: vec![CredentialType::Password],
             claim_coverage: ClaimCoverage::Named,
             claims: vec![Claim {
@@ -665,6 +676,7 @@ mod tests {
             verified_credentials: vec![CredentialType::Password],
             groups: Some(Vec::new()),
             absent_claims: vec!["Department".into()],
+            mschapv2_success: None,
             claims: Vec::new(),
             claim_coverage: ClaimCoverage::Named,
         };

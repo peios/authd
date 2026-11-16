@@ -593,6 +593,7 @@ fn authenticate(
         let assertion = &authenticated.assertion;
         let claims = authorization.disclosed_claims(&start.disclosure.claims, &assertion.claims);
         let disclosed = wire::Authenticated {
+            mschapv2_success: assertion.mschapv2_success.clone(),
             user_sid: identity.user.as_ref().as_bytes().to_vec(),
             canonical_name: assertion.canonical_name.clone(),
             verified_credentials: assertion

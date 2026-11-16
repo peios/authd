@@ -40,6 +40,7 @@ typedef struct peios_auth_logon_request {
     peios_auth_bytes remote_host;
 } peios_auth_logon_request;
 typedef struct peios_auth_authentication_view {
+    peios_auth_bytes mschapv2_authenticator_response;
     uint32_t verified_credentials;
     uint32_t claim_coverage;
     size_t absent_claim_count;

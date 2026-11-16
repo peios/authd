@@ -49,6 +49,7 @@ pub struct LogonRequest {
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct AuthenticationView {
+    pub mschapv2_authenticator_response: Bytes,
     pub verified_credentials: u32,
     pub claim_coverage: u32,
     pub absent_claim_count: usize,

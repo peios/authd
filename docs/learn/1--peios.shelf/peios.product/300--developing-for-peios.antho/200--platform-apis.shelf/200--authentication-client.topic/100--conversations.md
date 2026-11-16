@@ -70,8 +70,18 @@ result until destroyed. The Rust Client::authenticate wrapper returns an owned
 Authenticated result through Operation::authenticated. No token accessor
 succeeds for this operation. AuthenticationView.claim_coverage preserves this
 knowledge through the C ABI; the owned Rust result exposes ClaimCoverage.
-The coordinated unpublished C ABI and public PGSS framing versions are 4.
-Rebuild clients with the matching library; the source protocol remains version 2.
+The coordinated unpublished C ABI and public PGSS framing versions are 5.
+Rebuild clients with the matching library; the source protocol is version 3.
+
+An MSCHAPv2 originator advertises `Capabilities::MSCHAPV2` and requires
+credential type 3. The source's single typed prompt supplies a 16-byte
+authenticator challenge in `parameters`. The answer contains the peer
+challenge (16 bytes) followed by the NT response (24 bytes). The source
+owns challenge freshness, account eligibility and credential-version checks.
+The completed result includes a 20-byte authenticator response for this
+exchange, exposed as `mschapv2_authenticator_response` through the C view
+and owned Rust result. Other proof types carry no MSCHAPv2 output. This
+uses the existing Authenticate and disclosure grants and creates no token.
 
 ## Credential collection
 

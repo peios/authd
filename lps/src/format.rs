@@ -239,6 +239,13 @@ pub fn detail(principal: &Detail) -> String {
     if let Some(policy) = principal.credential_policy {
         field(&mut out, "credential", policy_word(policy));
     }
+    if let Some(present) = principal.nt_hash_present {
+        field(
+            &mut out,
+            "NT hash",
+            if present { "present" } else { "absent" },
+        );
+    }
 
     if principal.groups.is_empty() {
         field(&mut out, "groups", "none");

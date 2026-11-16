@@ -97,6 +97,7 @@ impl Capabilities {
     // Bit values are the public libauth capability mask from peios/auth.h.
     pub const PASSWORD: Self = Self(1);
     pub const SSH_PUBLIC_KEY: Self = Self(2);
+    pub const MSCHAPV2: Self = Self(4);
     pub const BOTH: Self = Self(3);
 }
 
@@ -198,7 +199,7 @@ impl Client {
     /// Create a client with copied configuration; reject an incompatible library ABI.
     pub fn with_options(options: Options<'_>) -> Result<Self, Error> {
         // SAFETY: this scalar query takes no pointers or mutable state.
-        if unsafe { sys::peios_auth_abi_version() } != 4 {
+        if unsafe { sys::peios_auth_abi_version() } != 5 {
             return Err(invalid());
         }
         let raw = abi::ClientOptions {

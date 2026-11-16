@@ -106,7 +106,7 @@ use crate::wire::{
 /// hard error on the first four bytes.
 pub const MAGIC: [u8; 4] = *b"PPSI";
 
-pub const VERSION: u16 = 2;
+pub const VERSION: u16 = 3;
 
 /// PGSS Logon's twelve-byte header plus the conversation id.
 pub const HEADER_BYTES: usize = frame::COMMON_HEADER_BYTES + 8;
@@ -330,6 +330,7 @@ pub struct Group {
 /// domain SID.
 #[derive(Debug, Default)]
 pub struct Assertion {
+    pub mschapv2_success: Option<crate::mschapv2::Success>,
     pub authenticated_credential_type: Option<crate::wire::CredentialType>,
     /// Binary SID bytes. Structurally unvalidated here — auth-core deliberately
     /// has no dependency on the security library — so the *recipient* must
@@ -809,6 +810,10 @@ pub fn decode_credential_response(buf: &[u8]) -> Result<CredentialResponse, Wire
 }
 
 pub fn encode_assertion(conversation: u64, assertion: &Assertion) -> Result<Vec<u8>, WireError> {
+    crate::mschapv2::validate_success(
+        assertion.authenticated_credential_type,
+        &assertion.mschapv2_success,
+    )?;
     let mut w = begin(MSG_ASSERTION, conversation);
     let body = w.open();
     w.bytes(&assertion.user_sid, MAX_SID_BYTES)?;
@@ -840,6 +845,10 @@ pub fn encode_assertion(conversation: u64, assertion: &Assertion) -> Result<Vec<
         .authenticated_credential_type
         .map_or(0, |v| v as u8));
 
+    w.bytes(
+        assertion.mschapv2_success.as_ref().map_or(&[], |v| &v.0),
+        20,
+    )?;
     w.close(body);
     w.finish()
 }
@@ -864,7 +873,10 @@ pub fn decode_assertion(buf: &[u8]) -> Result<Assertion, WireError> {
         0 => None,
         v => Some(crate::wire::CredentialType::from_u8(v).ok_or(WireError::UnknownValue)?),
     };
+    let mschapv2_success = crate::mschapv2::decode_success(b.bytes(20)?)?;
+    crate::mschapv2::validate_success(authenticated_credential_type, &mschapv2_success)?;
     Ok(Assertion {
+        mschapv2_success,
         authenticated_credential_type,
         user_sid,
         canonical_name,
@@ -1560,6 +1572,7 @@ mod tests {
 
     fn assertion() -> Assertion {
         Assertion {
+            mschapv2_success: None,
             authenticated_credential_type: None,
 
             permitted_logon_types: LogonTypes::UNSTATED,
@@ -1677,6 +1690,7 @@ mod tests {
         crate::claim::write_claims(&mut w, &[]).unwrap();
         w.u32(0);
         w.u8(0);
+        w.bytes(&[], 20).unwrap();
         w.close(body);
         let bytes = w.finish().unwrap();
 

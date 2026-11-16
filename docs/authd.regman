@@ -515,6 +515,44 @@ groups on this machine.
 An absent value, zero, or a non-`REG_DWORD` leaves the permission off. A
 registered source retains its accepted grant until its connection ends.
 
+--- machine\software\lpsd
+canonical: Machine\Software\Lpsd
+
+Configuration for the local principal source. The optional NT compatibility
+material is controlled here, independently of any network's allowed methods.
+Protect policy edits with the key's normal administrative write descriptor.
+
+--- machine\software\lpsd storenthashes
+canonical: Machine\Software\Lpsd StoreNtHashes
+type: REG_DWORD
+default: 1
+valid: 0 or 1
+applies: live (watched and checked before source operations)
+
+Optional NT-hash retention alongside a password account's Argon2id verifier.
+
+Enabled by default during compatibility development.
+Disabling prevents NT verification/creation, removes live material and
+attempts durable deletion. Failed saves are operational events and retry
+on later activity. Old backups are not purged. Malformed or unreadable
+policy disables NT use without treating the error as a deletion request.
+The protected store has no additional credential-encryption layer.
+
+--- machine\software\lpsd backfillnthashes
+canonical: Machine\Software\Lpsd BackfillNtHashes
+type: REG_DWORD
+default: 1
+valid: 0 or 1
+applies: live (watched and checked before source operations)
+
+Opportunistic population of missing NT material after password verification.
+
+Requires `Machine\Software\Lpsd StoreNtHashes` to be enabled. This is a maintenance
+side effect, not another login stage. A failed save does not fail the
+authentication. Disabled backfill does not prevent creation on password
+set/change while storage is enabled. Existing Argon2 records cannot be
+converted without a verified password; MSCHAPv2 proofs do not supply it.
+
 --- machine\system\locale
 canonical: Machine\System\Locale
 

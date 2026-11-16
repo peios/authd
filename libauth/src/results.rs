@@ -49,6 +49,9 @@ pub unsafe extern "C" fn peios_auth_operation_authentication(
             return None;
         };
         Some(AuthenticationView {
+            mschapv2_authenticator_response: bytes(
+                result.mschapv2_success.as_ref().map_or(&[], |v| &v.0),
+            ),
             verified_credentials: result.verified_credentials,
             claim_coverage: result.claim_coverage as u32,
             absent_claim_count: result.absent_claims.len(),

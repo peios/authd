@@ -34,6 +34,7 @@ fn authenticate_uses_the_shared_conversation_and_never_exposes_a_token() {
         send_message(
             &socket,
             &wire::encode_authenticated(&wire::Authenticated {
+                mschapv2_success: None,
                 user_sid: vec![1, 1, 0, 0, 0, 0, 0, 5, 18, 0, 0, 0],
                 canonical_name: "jack".into(),
                 verified_credentials: vec![wire::CredentialType::Password],

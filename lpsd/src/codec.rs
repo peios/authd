@@ -34,8 +34,8 @@
 /// `PEIOSLPS` — Peios Local Principal Store.
 const MAGIC: [u8; 8] = *b"PEIOSLPS";
 
-/// The layout written. 5 gave groups a description.
-pub const VERSION: u16 = 5;
+/// The layout written. 6 adds optional NT material to framed verifiers.
+pub const VERSION: u16 = 6;
 /// The oldest layout read. A store of format 4 loads, and is written as
 /// [`VERSION`] at the next change; anything older must be reprovisioned.
 pub const OLDEST_READABLE_VERSION: u16 = 4;
@@ -190,7 +190,7 @@ pub fn open(file: &[u8]) -> Result<(u16, &[u8]), CodecError> {
 /// [`crate::store`] already accepted.
 #[derive(Default)]
 pub struct Writer {
-    buf: Vec<u8>,
+    buf: zeroize::Zeroizing<Vec<u8>>,
 }
 
 impl Writer {
@@ -199,19 +199,23 @@ impl Writer {
     }
 
     pub fn u8(&mut self, value: u8) {
+        self.reserve(1);
         self.buf.push(value);
     }
 
     pub fn u32(&mut self, value: u32) {
+        self.reserve(4);
         self.buf.extend_from_slice(&value.to_le_bytes());
     }
 
     pub fn u64(&mut self, value: u64) {
+        self.reserve(8);
         self.buf.extend_from_slice(&value.to_le_bytes());
     }
 
     /// Length-framed bytes, so an unknown field can be skipped whole.
     pub fn bytes(&mut self, value: &[u8]) {
+        self.reserve(4 + value.len());
         self.u32(value.len() as u32);
         self.buf.extend_from_slice(value);
     }
@@ -220,8 +224,25 @@ impl Writer {
         self.bytes(value.as_bytes());
     }
 
-    pub fn finish(self) -> Vec<u8> {
-        self.buf
+    fn reserve(&mut self, additional: usize) {
+        let needed = self
+            .buf
+            .len()
+            .checked_add(additional)
+            .expect("store length overflow");
+        if needed <= self.buf.capacity() {
+            return;
+        }
+        let mut next = zeroize::Zeroizing::new(Vec::with_capacity(
+            needed.max(self.buf.capacity().saturating_mul(2)).max(32),
+        ));
+        next.extend_from_slice(&self.buf);
+        // The old allocation is wiped before release, including on growth.
+        core::mem::swap(&mut self.buf, &mut next);
+    }
+
+    pub fn finish(mut self) -> Vec<u8> {
+        core::mem::take(&mut *self.buf)
     }
 }
 

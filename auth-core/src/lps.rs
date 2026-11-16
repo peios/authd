@@ -345,6 +345,8 @@ pub struct Detail {
     pub permitted_logon_types: LogonTypes,
     /// `None` where the daemon did not say.
     pub credential_policy: Option<Policy>,
+    /// Administrative status only; credential contents are never returned.
+    pub nt_hash_present: Option<bool>,
 }
 
 /// Set part of a principal's profile. An absent field is left alone, which is
@@ -834,6 +836,11 @@ pub fn encode_principal(detail: &Detail) -> Result<Vec<u8>, WireError> {
     w.u32(detail.permitted_logon_types.bits());
     if let Some(policy) = detail.credential_policy {
         w.u8(policy as u8);
+        w.u8(match detail.nt_hash_present {
+            None => 0,
+            Some(false) => 1,
+            Some(true) => 2,
+        });
     }
 
     w.close(body);
@@ -890,7 +897,18 @@ pub fn decode_principal(buf: &[u8]) -> Result<Detail, WireError> {
         Some(Policy::from_u8(b.u8()?).ok_or(WireError::UnknownValue)?)
     };
 
+    let nt_hash_present = if b.at_end() {
+        None
+    } else {
+        match b.u8()? {
+            0 => None,
+            1 => Some(false),
+            2 => Some(true),
+            _ => return Err(WireError::UnknownValue),
+        }
+    };
     Ok(Detail {
+        nt_hash_present,
         name,
         rid,
         enabled,
@@ -1409,6 +1427,7 @@ mod tests {
 
     fn detail() -> Detail {
         Detail {
+            nt_hash_present: None,
             name: "jack".into(),
             rid: 1000,
             enabled: true,

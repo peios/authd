@@ -84,12 +84,30 @@ impl Client {
         })
     }
 }
-#[derive(Debug)]
 pub struct Authenticated {
+    /// Exchange-specific server proof, never an NT hash.
+    pub mschapv2_authenticator_response: Option<[u8; 20]>,
     pub identity: Record,
     pub verified_credentials: super::Capabilities,
     pub absent_claims: Vec<String>,
     pub claim_coverage: super::ClaimCoverage,
+}
+impl core::fmt::Debug for Authenticated {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("Authenticated")
+            .field("identity", &self.identity)
+            .field("verified_credentials", &self.verified_credentials)
+            .field("claim_coverage", &self.claim_coverage)
+            .field("absent_claims", &self.absent_claims)
+            .field(
+                "mschapv2_authenticator_response",
+                &self
+                    .mschapv2_authenticator_response
+                    .as_ref()
+                    .map(|_| "[redacted]"),
+            )
+            .finish()
+    }
 }
 #[derive(Debug)]
 pub struct Identity {
@@ -168,6 +186,14 @@ impl Operation {
                 })?));
             }
             Ok(Authenticated {
+                mschapv2_authenticator_response: {
+                    let bytes = copy_bytes(view.mschapv2_authenticator_response);
+                    if bytes.is_empty() {
+                        None
+                    } else {
+                        Some(bytes.try_into().map_err(|_| invalid())?)
+                    }
+                },
                 identity: self.record(0)?,
                 verified_credentials: super::Capabilities(view.verified_credentials),
                 absent_claims,
