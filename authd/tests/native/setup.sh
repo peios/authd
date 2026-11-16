@@ -66,11 +66,30 @@ for entry in 'authn-probe allowed' 'authn-denied denied' 'authn-logon type-restr
         exit 1
     fi
 done
+for mode in scoped-only scoped-groups; do
+    scoped="O:SYG:SYD:(A;;0xf;;;SY)(OA;;GA;c4abd379-a4d6-5910-bccf-9f01f9a4738f;;${probe_sid})"
+    if [[ $mode == scoped-groups ]]; then
+        scoped="${scoped}(A;;0x1;;;${auth_cap})"
+    fi
+    reg set "$policy" AuthenticationSecurity "sz:$scoped"
+    svctl definition edit authn-probe --set Arguments=-c \
+        --set "Arguments=exec /lcl/bin/authn-probe $mode >/run/authn-probe/result 2>&1"
+    svctl start authn-probe
+    output=$(</run/authn-probe/result)
+    printf '%s\n' "$output"
+    if [[ "$output" != *"NATIVE AUTHORIZATION: $mode passed" ]]; then
+        echo "Native probe failed: $mode" >&2
+        exit 1
+    fi
+done
+reg set "$policy" AuthenticationSecurity "sz:$descriptor"
 authn-probe ident-allowed
 authn-probe ident-refresh
 # A blanket grant must not defeat a Department-specific deny, even for SYSTEM.
-reg set "$policy" AuthenticationSecurity "sz:O:SYG:SYD:(OD;;0x8;c4abd379-a4d6-5910-bccf-9f01f9a4738f;;SY)(A;;0xf;;;SY)"
+reg set "$policy" AuthenticationSecurity "sz:O:SYG:SYD:(OD;;GA;c4abd379-a4d6-5910-bccf-9f01f9a4738f;;SY)(A;;0xf;;;SY)"
 authn-probe ident-restricted
+authn-probe scoped-deny
+authn-probe logon
 reg set "$policy" AuthenticationSecurity "sz:$descriptor"
 authn-probe no-local-state
 authn-probe logon

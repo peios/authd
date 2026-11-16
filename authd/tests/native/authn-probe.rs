@@ -244,6 +244,45 @@ fn local_logon(kind: LogonType) -> Result<AccessGranted, Denial> {
 
 fn main() {
     let mode = std::env::args().nth(1).unwrap_or_else(|| "allowed".into());
+    if mode == "scoped-only" || mode == "scoped-groups" {
+        if mode == "scoped-only" {
+            immediate_denial(
+                &encode_authenticate_start(&request("dev-auth", &[], false)).unwrap(),
+                Denial::PermissionDenied,
+            );
+        } else {
+            immediate_denial(
+                &encode_authenticate_start(&request("dev-auth", &[], true)).unwrap(),
+                Denial::PermissionDenied,
+            );
+            converse(
+                &request("dev-auth", &["Department"], false),
+                "development-only-password",
+            )
+            .unwrap();
+        }
+        immediate_denial(
+            &encode_logon_start(&LogonStart {
+                authentication: request("dev-auth", &[], false).authentication,
+                logon_type: LogonType::Interactive,
+                tty: None,
+                remote_host: None,
+            })
+            .unwrap(),
+            Denial::PermissionDenied,
+        );
+        println!("NATIVE AUTHORIZATION: {mode} passed");
+        return;
+    }
+    if mode == "scoped-deny" {
+        converse(&request("dev-auth", &[], true), "development-only-password").unwrap();
+        immediate_denial(
+            &encode_authenticate_start(&request("dev-auth", &["Department"], false)).unwrap(),
+            Denial::PermissionDenied,
+        );
+        println!("NATIVE AUTHORIZATION: scoped-deny passed");
+        return;
+    }
     if mode == "ident-refresh" {
         use peios::registry::{Key, KeyAccess, OpenFlags, ValueType};
         let key = Key::open(

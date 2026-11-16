@@ -102,6 +102,10 @@ select c4abd379-a4d6-5910-bccf-9f01f9a4738f. GUIDs use the platform's
 little-endian wire layout. Use auth-policy's shared claim_guid helper rather
 than reimplementing the derivation in administration tools.
 
+Operation and group checks address the descriptor's root. A claim-specific
+object ACE affects only that claim, including when its mask uses generic
+rights; it cannot grant or deny Authenticate, Logon or group disclosure.
+
 Authenticate checks every requested disclosure before collecting credentials.
 An unauthorized request is refused; an authorized absent claim is reported
 as absent. Group disclosure returns validated source memberships, excluding

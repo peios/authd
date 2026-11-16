@@ -57,30 +57,27 @@ impl Authorization {
         if let Some(context) = &context {
             check.audit_context(context);
         }
-        if claim.is_some() || desired & rights::READ_CLAIM != 0 {
-            // A scalar access check does not distinguish object ACE targets.
-            // Test the namespace alone for an all-claims grant, or its leaf
-            // for a named claim. A leaf grant cannot authorize the root.
-            let mut nodes = vec![peios_sys::kacs_object_type_entry {
-                level: 0,
+        // A scalar access check does not distinguish object ACE targets.
+        // Operations, groups and the complete claims field address the root;
+        // only a named claim adds its leaf. A claim-specific generic grant or
+        // deny must not change authority to invoke an operation or read groups.
+        let mut nodes = vec![peios_sys::kacs_object_type_entry {
+            level: 0,
+            _reserved: 0,
+            guid: rights::CLAIM_NAMESPACE,
+        }];
+        if let Some(guid) = claim {
+            nodes.push(peios_sys::kacs_object_type_entry {
+                level: 1,
                 _reserved: 0,
-                guid: rights::CLAIM_NAMESPACE,
-            }];
-            if let Some(guid) = claim {
-                nodes.push(peios_sys::kacs_object_type_entry {
-                    level: 1,
-                    _reserved: 0,
-                    guid,
-                });
-            }
-            check.check_list(&nodes).is_ok_and(|results| {
-                results
-                    .last()
-                    .is_some_and(|r| r.status == 0 && r.granted & desired == desired)
-            })
-        } else {
-            check.check().is_ok_and(|decision| decision.allowed)
+                guid,
+            });
         }
+        check.check_list(&nodes).is_ok_and(|results| {
+            results
+                .last()
+                .is_some_and(|r| r.status == 0 && r.granted & desired == desired)
+        })
     }
 }
 

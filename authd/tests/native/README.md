@@ -42,6 +42,10 @@ disclosure before prompting, and lack of Logon authority. Separate probes check
 missing capability, caller logon-type policy, SYSTEM operation authorization,
 malformed policy, the PID-1 attestation gate, and ordinary Logon finalization.
 
+Generic all in a claim-specific object ACE must neither grant Authenticate,
+Logon or group disclosure, nor deny separately granted operations or groups.
+The scoped-only, scoped-groups and scoped-deny probes exercise these boundaries.
+
 Identity probes exercise lookup, principal enumeration and enumeration of a
 group's members. A selected-claim service grant cannot read the complete CLAIMS
 field. A blanket grant permits that field, but a Department-specific deny

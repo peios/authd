@@ -1472,6 +1472,33 @@ mod general_authentication_tests {
     }
 
     #[test]
+    fn shared_validation_drops_logon_sids_before_checking_source_membership_scope() {
+        let domain: Sid = "S-1-5-21-1-2-3".parse().unwrap();
+        let staff: Sid = "S-1-5-21-1-2-3-1001".parse().unwrap();
+        let logon: Sid = "S-1-5-5-7-7".parse().unwrap();
+        let mut source = assertion();
+        source.groups = [&staff, &logon, &staff]
+            .into_iter()
+            .map(|sid| auth_core::psi::Group {
+                sid: sid.as_ref().as_bytes().to_vec(),
+                unix_id: 0,
+            })
+            .collect();
+        let identity =
+            validate_source_assertion(&request(), domain.as_ref(), false, "test", &source).unwrap();
+        assert_eq!(identity.memberships.len(), 1);
+        assert_eq!(identity.memberships[0].0, staff);
+        let foreign: Sid = "S-1-5-32-544".parse().unwrap();
+        source.groups.push(auth_core::psi::Group {
+            sid: foreign.as_ref().as_bytes().to_vec(),
+            unix_id: 0,
+        });
+        assert!(
+            validate_source_assertion(&request(), domain.as_ref(), false, "test", &source).is_err()
+        );
+    }
+
+    #[test]
     fn shared_validation_refuses_unusable_asserted_names() {
         let domain: Sid = "S-1-5-21-1-2-3".parse().unwrap();
         for name in ["", "jack\nadmin", "jack@local", " jack", "jack:"] {
@@ -1666,16 +1693,7 @@ mod tests {
         );
     }
 
-    /// PSI obligation 26: membership scope never applies to a `primary_group`
-    /// the authority substituted for an empty field.
-    ///
-    /// Before this, a source that omitted `primary_group` had *every* logon
-    /// denied: authd substituted `S-1-5-11`, pushed it into the membership set
-    /// so it could not bypass the scope check, and then failed its own check
-    /// against it — because a two-sub-authority NT SID is never a sibling of an
-    /// `S-1-5-21-A-B-C-RID` principal. lpsd escaped it only by always setting
-    /// one *and* shipping with MayAssertForeignMemberships. A directory-backed
-    /// source, which should not have that permission, hit it on first logon.
+    /// A source must not ask two different questions under the same reference.
     #[test]
     fn a_repeated_credential_ref_is_caught() {
         let mut request = requesting(&[CredentialType::Password, CredentialType::Password]);
@@ -1725,12 +1743,7 @@ mod tests {
         );
     }
 
-    /// Obligation 23: rules 4 and 5 run before rule 2.
-    ///
-    /// A logon SID is `S-1-5-5-X-Y` and a principal is `S-1-5-21-A-B-C-RID`, so
-    /// membership scope can never accept one. Running scope first therefore
-    /// refused the logon that rule 4 says to survive by dropping — the two
-    /// rules gave opposite answers for the same input.
+    /// Duplicate source memberships retain only their first occurrence.
     #[test]
     fn a_duplicate_membership_is_dropped() {
         let staff = sid_of("S-1-5-21-1-2-3-1001");
