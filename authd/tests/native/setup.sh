@@ -83,7 +83,7 @@ if [[ "$output" != *'NATIVE CLAIM NAMES: unicode passed'* ]]; then
     exit 1
 fi
 # An ACE derived from the lowercase spelling also denies its uppercase alias.
-reg set "$policy" AuthenticationSecurity "sz:O:SYG:SYD:(OD;;0x8;${unicode_guid};;${probe_sid})(A;;0xf;;;${probe_sid})"
+reg set "$policy" AuthenticationSecurity "sz:O:SYG:SYD:(OD;;0x8;${unicode_guid};;${probe_sid})(A;;0x9;;;${probe_sid})"
 svctl definition edit authn-probe --set Arguments=-c \
     --set 'Arguments=exec /lcl/bin/authn-probe unicode-denied >/run/authn-probe/result 2>&1'
 svctl start authn-probe
