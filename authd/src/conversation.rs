@@ -440,6 +440,9 @@ fn logon(
     )?;
     if attempt.outcome == Some(Ok(())) {
         attempt.shadow_owner = Some(authenticated.source);
+        if let Some(domain) = &authenticated.ntlm_domain {
+            attempt.record.str("object.account.domain", domain);
+        }
     }
     Ok(())
 }
@@ -448,6 +451,9 @@ struct AuthenticatedSource {
     conversation: Conversation,
     assertion: auth_core::psi::Assertion,
     source: Arc<crate::source::Source>,
+    /// The NTLM domain the client named, recorded only on success: only then
+    /// is it covered by a verified proof rather than being raw input.
+    ntlm_domain: Option<String>,
 }
 
 /// One routing/collection implementation for both public operations. A source
@@ -489,6 +495,10 @@ fn run_authentication(
         }
         _ => None,
     };
+    let ntlm_domain = presented
+        .as_ref()
+        .and_then(|presented| presented.ntlmv2().ok())
+        .and_then(|answer| answer.domain_name().ok());
     let route_name = match &presented {
         Some(presented) => presented
             .ntlmv2()
@@ -546,6 +556,7 @@ fn run_authentication(
             conversation,
             assertion,
             source,
+            ntlm_domain,
         })),
         Ok(Ended::Changed) => {
             attempt.refuse(
@@ -651,6 +662,9 @@ fn authenticate(
         attempt
             .record
             .sid("object.account.sid", identity.user.as_ref());
+        if let Some(domain) = &authenticated.ntlm_domain {
+            attempt.record.str("object.account.domain", domain);
+        }
         attempt.outcome = Some(Ok(()));
         Ok(())
     })();

@@ -1,3 +1,14 @@
+--- field object.account.domain
+type: str
+
+The NTLM domain a client named the account in, exactly as sent.
+
+NTLM clients fill the domain unpredictably, often with a name the server
+does not know such as the client's own computer name, so it selects no
+principal source. It is bound into the verified NTLMv2 proof, which is why
+it is recorded only on success; on failure it is unverified input, like the
+account name.
+
 --- event authd.logon.attempted
 tier: essential
 gating: decoded logon requests reaching authority handling
@@ -42,6 +53,11 @@ field: object.session.id                    optional
 field: object.token.id                      optional
   The minted token identifier, when the token statistics query succeeds.
   A session identifier can be present without this field.
+field: object.account.domain                optional
+  The NTLM domain the client named the principal in, exactly as sent. Present
+  only on an NTLMv2 success, where the verified proof covers it; it selects
+  no principal source (PGSS §2.11). Never recorded on failure, for the same
+  reason as the account name.
 field: outcome.success                      required
   True only when the token reached the originator.
 field: outcome.reason                       when outcome.success == false
@@ -70,6 +86,11 @@ field: source.token.sid                     required
   The connected caller's kernel-verified user SID.
 field: object.account.sid                   when outcome.success == true
   The authenticated principal's validated SID.
+field: object.account.domain                optional
+  The NTLM domain the client named the principal in, exactly as sent. Present
+  only on an NTLMv2 success, where the verified proof covers it; it selects
+  no principal source (PGSS §2.11). Never recorded on failure, for the same
+  reason as the account name.
 field: outcome.success                      required
   True only when the Authenticated reply reached the caller.
 field: outcome.reason                       when outcome.success == false
