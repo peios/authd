@@ -71,8 +71,8 @@ result until destroyed. The Rust Client::authenticate wrapper returns an owned
 Authenticated result through Operation::authenticated. No token accessor
 succeeds for this operation. AuthenticationView.claim_coverage preserves this
 knowledge through the C ABI; the owned Rust result exposes ClaimCoverage.
-The coordinated unpublished C ABI and public PGSS framing versions are 5.
-Rebuild clients with the matching library; the source protocol is version 3.
+The coordinated unpublished C ABI and public PGSS framing versions are 6.
+Rebuild clients with the matching library; the source protocol is version 4.
 
 An MSCHAPv2 originator advertises `Capabilities::MSCHAPV2` and requires
 credential type 3. The source's single typed prompt supplies a 16-byte
@@ -83,6 +83,20 @@ The completed result includes a 20-byte authenticator response for this
 exchange, exposed as `mschapv2_authenticator_response` through the C view
 and owned Rust result. Other proof types carry no MSCHAPv2 output. This
 uses the existing Authenticate and disclosure grants and creates no token.
+
+An NTLMv2 originator, such as a file server, names nobody: it sends an
+empty identifier, advertises only `Capabilities::NTLMV2`, and requires
+credential type 4. The authority, not a source, sends the single prompt,
+whose `parameters` are the 8-byte server challenge to put in the NTLM
+CHALLENGE message. Answer with three length-prefixed spans copied from the
+client's AUTHENTICATE message: `UserName` and `DomainName` as UTF-16LE,
+then `NtChallengeResponse`. The authority routes on the user in the answer
+and the owning source verifies it. A logon then returns a token with the
+16-byte `SessionBaseKey` as `ntlmv2_session_key` in the grant; general
+authentication returns it in the authenticated result instead. The key is
+for NTLM key exchange and signing in this one protocol session, and cannot
+be used to sign in again. Key exchange, the message integrity code and the
+client's `AvPairs` remain the originator's to process.
 
 ## Credential collection
 

@@ -14,11 +14,13 @@ use auth_core::{Secret, ident, lps, wire};
 use crate::engine::{Kind, Operation, Output, State};
 
 // These discriminants are fixed by the public constants in peios/auth.h.
-const ABI_VERSION: u32 = 5;
+const ABI_VERSION: u32 = 6;
 const SUPPORT_PASSWORD: u32 = 1;
 const SUPPORT_SSH_PUBLIC_KEY: u32 = 2;
 const SUPPORT_MSCHAPV2: u32 = 4;
-const SUPPORTED_CREDENTIALS: u32 = SUPPORT_PASSWORD | SUPPORT_SSH_PUBLIC_KEY | SUPPORT_MSCHAPV2;
+const SUPPORT_NTLMV2: u32 = 8;
+const SUPPORTED_CREDENTIALS: u32 =
+    SUPPORT_PASSWORD | SUPPORT_SSH_PUBLIC_KEY | SUPPORT_MSCHAPV2 | SUPPORT_NTLMV2;
 const KEY_NAME: u32 = 1;
 const KEY_SID: u32 = 2;
 const KEY_UNIX_ID: u32 = 3;
@@ -128,6 +130,9 @@ fn capabilities(mask: u32) -> Option<Vec<wire::CredentialType>> {
     }
     if mask & SUPPORT_MSCHAPV2 != 0 {
         types.push(wire::CredentialType::Mschapv2);
+    }
+    if mask & SUPPORT_NTLMV2 != 0 {
+        types.push(wire::CredentialType::Ntlmv2);
     }
     Some(types)
 }
@@ -1022,6 +1027,9 @@ pub unsafe extern "C" fn peios_auth_operation_grant(
                 home: bytes(grant.profile.home.as_bytes()),
                 shell: bytes(grant.profile.shell.as_bytes()),
                 display_name: bytes(grant.profile.display_name.as_bytes()),
+                ntlmv2_session_key: bytes(
+                    grant.ntlmv2_session_key.as_ref().map_or(&[], |key| &key.0),
+                ),
             },
         )
     }

@@ -302,11 +302,12 @@ mod tests {
                 start: start().authentication,
                 logon: Some(start().context()),
                 originator: vec![1, 1, 0, 0, 0, 0, 0, 5, 18, 0, 0, 0],
+                presented: None,
             },
         )
         .unwrap();
 
-        send_message(&a, &message).expect("send");
+        send_message(&a, message.expose()).expect("send");
         let received = recv_message(&psi::FRAMING, &b).expect("recv");
         assert_eq!(
             psi::decode_envelope(received.expose())
@@ -344,7 +345,7 @@ mod tests {
             ..Default::default()
         })
         .unwrap();
-        send_message_with_fd(&a, &granted, pipe_r.as_fd()).expect("send with fd");
+        send_message_with_fd(&a, granted.expose(), pipe_r.as_fd()).expect("send with fd");
 
         let (received, fd) = recv_message_with_fd(&wire::FRAMING, &b).expect("recv with fd");
         let decoded = decode_access_granted(received.expose()).expect("decode");
@@ -362,7 +363,7 @@ mod tests {
             ..Default::default()
         })
         .unwrap();
-        send_message_with_fd(&a, &granted, pipe_r.as_fd()).expect("send with fd");
+        send_message_with_fd(&a, granted.expose(), pipe_r.as_fd()).expect("send with fd");
         let (_, fd) = recv_message_with_fd(&wire::FRAMING, &b).expect("recv with fd");
 
         let fd = fd.expect("descriptor");
@@ -384,7 +385,7 @@ mod tests {
             ..Default::default()
         })
         .unwrap();
-        send_message(&a, &granted).expect("send");
+        send_message(&a, granted.expose()).expect("send");
 
         let (_, fd) = recv_message_with_fd(&wire::FRAMING, &b).expect("recv");
         assert!(fd.is_none());

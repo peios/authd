@@ -44,6 +44,7 @@ typedef struct peios_auth_authentication_view {
     uint32_t verified_credentials;
     uint32_t claim_coverage;
     size_t absent_claim_count;
+    peios_auth_bytes ntlmv2_session_key;
 } peios_auth_authentication_view;
 typedef struct peios_auth_service_request {
     size_t size;
@@ -100,6 +101,7 @@ typedef struct peios_auth_grant_view {
     peios_auth_bytes home;
     peios_auth_bytes shell;
     peios_auth_bytes display_name;
+    peios_auth_bytes ntlmv2_session_key;
 } peios_auth_grant_view;
 typedef struct peios_auth_identity_view {
     uint32_t outcome;

@@ -85,6 +85,14 @@ An existing directory is left alone. Changing the recorded home does not move
 files or repair its ownership. If home preparation fails, the logon can still
 succeed; `login` reports an inaccessible home and starts in `/`.
 
+Every kind of logon prepares the home by default, including network logons
+such as file sharing, so a file server can offer users their homes. To limit
+it, list the logon types that should prepare homes in
+`Machine\Software\Authd ProvisionLogonTypes`. For the Windows behaviour,
+where a network logon creates no profile, leave out `Network` and
+`NetworkCleartext`. The same setting governs the account's per-user Registry
+root.
+
 ## The first account
 
 On a machine with no store, `lpsd` creates an empty store and a machine

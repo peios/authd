@@ -55,6 +55,7 @@ pub unsafe extern "C" fn peios_auth_operation_authentication(
             verified_credentials: result.verified_credentials,
             claim_coverage: result.claim_coverage as u32,
             absent_claim_count: result.absent_claims.len(),
+            ntlmv2_session_key: bytes(result.ntlmv2_session_key.as_ref().map_or(&[], |key| &key.0)),
         })
     })
 }

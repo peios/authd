@@ -54,7 +54,10 @@ pub const MAGIC: [u8; 4] = *b"PGSL";
 /// of, and a new client meeting an old authority is refused. Both directions
 /// fail safe without a bump, which a bump would only have turned into a flat
 /// refusal of every mixed pair.
-pub const VERSION: u16 = 5;
+///
+/// Version 6 adds credential type 4, NTLMv2, and its session key on
+/// `Authenticated` and `AccessGranted`.
+pub const VERSION: u16 = 6;
 
 pub const HEADER_BYTES: usize = frame::COMMON_HEADER_BYTES;
 
@@ -295,6 +298,9 @@ pub enum CredentialType {
     SshPublicKey = 2,
     /// MSCHAPv2 challenge-response for a password, never an NT-hash export.
     Mschapv2 = 3,
+    /// NTLMv2 challenge-response. The only identity-in-answer type: the
+    /// authority issues the challenge, and the answer names the principal.
+    Ntlmv2 = 4,
 }
 
 impl CredentialType {
@@ -303,8 +309,14 @@ impl CredentialType {
             1 => Self::Password,
             2 => Self::SshPublicKey,
             3 => Self::Mschapv2,
+            4 => Self::Ntlmv2,
             _ => return None,
         })
+    }
+
+    /// Whether the answer, not the request, names the principal (PGSS §2.11).
+    pub fn identity_in_answer(self) -> bool {
+        self == Self::Ntlmv2
     }
 }
 
@@ -530,10 +542,12 @@ pub const MAX_DESCRIPTION_BYTES: usize = 1024;
 pub struct AccessGranted {
     /// The logon session the token belongs to.
     pub session_id: u64,
-    /// Where to start the session. Appended after `session_id`, so an authority
-    /// that predates it says nothing and every field arrives empty — which is
-    /// exactly what such an authority meant.
+    /// Where to start the session. Mandatory from version 6, because the
+    /// session key follows it; an authority with nothing to say sends it empty.
     pub profile: Profile,
+    /// The NTLM `SessionBaseKey`, exactly when NTLMv2 was verified (§2.9). An
+    /// originator needs it with the token to sign the protocol it serves.
+    pub ntlmv2_session_key: Option<crate::ntlmv2::SessionKey>,
 }
 
 /// The logon failed. Authority to client.
@@ -866,6 +880,9 @@ fn validate_prompt_parameters(prompt: &Prompt) -> Result<(), WireError> {
     match prompt.credential_type {
         CredentialType::Password if prompt.parameters.is_empty() => Ok(()),
         CredentialType::Mschapv2 if prompt.parameters.len() == 16 => Ok(()),
+        CredentialType::Ntlmv2 if prompt.parameters.len() == crate::ntlmv2::CHALLENGE_BYTES => {
+            Ok(())
+        }
         CredentialType::SshPublicKey => {
             crate::ssh::read_disposition(&prompt.parameters).map(|_| ())
         }
@@ -994,27 +1011,38 @@ pub fn decode_access_granted(buf: &[u8]) -> Result<AccessGranted, WireError> {
     let mut b = frame::open_body(&FRAMING, buf, MSG_ACCESS_GRANTED)?;
     let session_id = b.u64()?;
     // Nested rather than inlined, so the profile can grow a field without
-    // displacing anything appended to `AccessGranted` after it.
-    let profile = if b.at_end() {
-        Profile::default()
-    } else {
-        read_profile_body(&mut b.open()?)?
-    };
+    // displacing the session key appended after it.
+    let profile = read_profile_body(&mut b.open()?)?;
+    let ntlmv2_session_key =
+        crate::ntlmv2::decode_session_key(b.bytes(crate::ntlmv2::SESSION_KEY_BYTES)?)?;
     Ok(AccessGranted {
         session_id,
         profile,
+        ntlmv2_session_key,
     })
 }
 
-pub fn encode_access_granted(granted: &AccessGranted) -> Result<Vec<u8>, WireError> {
+/// Returns a [`Secret`] because the message can carry an NTLMv2 session key,
+/// which signs a live protocol session and must not outlive its delivery.
+pub fn encode_access_granted(granted: &AccessGranted) -> Result<Secret, WireError> {
     let mut w = Writer::new(&FRAMING, MSG_ACCESS_GRANTED);
     let body = w.open();
     w.u64(granted.session_id);
     let nested = w.open();
     write_profile_body(&mut w, &granted.profile)?;
     w.close(nested);
+    w.bytes(
+        granted
+            .ntlmv2_session_key
+            .as_ref()
+            .map_or(&[], |key| &key.0),
+        crate::ntlmv2::SESSION_KEY_BYTES,
+    )?;
     w.close(body);
-    w.finish()
+    let encoded = w.finish()?;
+    let secret = Secret::from_slice(&encoded);
+    frame::wipe(encoded);
+    Ok(secret)
 }
 
 pub fn decode_access_denied(buf: &[u8]) -> Result<AccessDenied, WireError> {
@@ -1497,11 +1525,13 @@ mod tests {
             display_name: "Jack Palfrey".into(),
         };
         let granted = decode_access_granted(
-            &encode_access_granted(&AccessGranted {
+            encode_access_granted(&AccessGranted {
                 session_id: 9,
                 profile: profile.clone(),
+                ntlmv2_session_key: None,
             })
-            .unwrap(),
+            .unwrap()
+            .expose(),
         )
         .unwrap();
         assert_eq!(granted.session_id, 9);
@@ -1512,31 +1542,54 @@ mod tests {
     /// an empty profile must survive rather than be confused with an absent one.
     #[test]
     fn an_empty_profile_round_trips() {
-        let granted =
-            decode_access_granted(&encode_access_granted(&AccessGranted::default()).unwrap())
-                .unwrap();
+        let granted = decode_access_granted(
+            encode_access_granted(&AccessGranted::default())
+                .unwrap()
+                .expose(),
+        )
+        .unwrap();
         assert_eq!(granted.profile, Profile::default());
     }
 
-    /// The profile was appended to a message that already existed. An authority
-    /// built against the older shape sends only the session id, and that must
-    /// decode as "said nothing" rather than as a framing error.
+    /// From version 6 the profile is mandatory, because the session key
+    /// follows it: a body carrying only the session id is malformed.
     #[test]
-    fn an_access_granted_without_a_profile_decodes_as_empty() {
+    fn an_access_granted_without_a_profile_is_malformed() {
         let mut w = Writer::new(&FRAMING, MSG_ACCESS_GRANTED);
         let body = w.open();
         w.u64(1234);
         w.close(body);
         let bytes = w.finish().unwrap();
 
-        let granted = decode_access_granted(&bytes).expect("an older authority must decode");
-        assert_eq!(granted.session_id, 1234);
-        assert_eq!(granted.profile, Profile::default());
+        assert!(decode_access_granted(&bytes).is_err());
+    }
+
+    #[test]
+    fn an_ntlmv2_session_key_round_trips_on_access_granted() {
+        let granted = decode_access_granted(
+            encode_access_granted(&AccessGranted {
+                session_id: 3,
+                profile: Profile::default(),
+                ntlmv2_session_key: Some(crate::ntlmv2::SessionKey([0x8d; 16])),
+            })
+            .unwrap()
+            .expose(),
+        )
+        .unwrap();
+        assert_eq!(granted.ntlmv2_session_key.unwrap().0, [0x8d; 16]);
+
+        let plain = decode_access_granted(
+            encode_access_granted(&AccessGranted::default())
+                .unwrap()
+                .expose(),
+        )
+        .unwrap();
+        assert!(plain.ntlmv2_session_key.is_none());
     }
 
     /// The profile is nested for the same reason `LogonStart` is inside PSI's
-    /// `Authenticate`: a field appended to it must not displace anything
-    /// appended to `AccessGranted` afterwards.
+    /// `Authenticate`: a field appended to it must not displace the session
+    /// key appended to `AccessGranted` after it.
     #[test]
     fn a_field_appended_to_a_profile_is_skipped() {
         let mut bytes = encode_access_granted(&AccessGranted {
@@ -1546,13 +1599,17 @@ mod tests {
                 shell: "/bin/sh".into(),
                 display_name: String::new(),
             },
+            ntlmv2_session_key: None,
         })
-        .unwrap();
+        .unwrap()
+        .expose()
+        .to_vec();
 
-        // The profile is the last thing in the body: grow it, fixing up its own
-        // length and the enclosing body's.
+        // Grow the profile in place, ahead of the empty session key's 4-byte
+        // length, fixing up its own length and the enclosing body's.
         let profile_len_at = HEADER_BYTES + 4 + 8;
-        bytes.extend_from_slice(&[0xde, 0xad, 0xbe, 0xef]);
+        let key_at = bytes.len() - 4;
+        bytes.splice(key_at..key_at, [0xde, 0xad, 0xbe, 0xef]);
         let bump = |buf: &mut Vec<u8>, at: usize| {
             let old = u32::from_le_bytes(buf[at..at + 4].try_into().unwrap());
             buf[at..at + 4].copy_from_slice(&(old + 4).to_le_bytes());
@@ -1576,6 +1633,7 @@ mod tests {
                     home: "h".repeat(MAX_PATH_BYTES + 1),
                     ..Profile::default()
                 },
+                ntlmv2_session_key: None,
             })
             .unwrap_err(),
             WireError::TooLong
@@ -1587,6 +1645,7 @@ mod tests {
                     display_name: "d".repeat(MAX_DISPLAY_NAME_BYTES + 1),
                     ..Profile::default()
                 },
+                ntlmv2_session_key: None,
             })
             .unwrap_err(),
             WireError::TooLong
@@ -1596,11 +1655,12 @@ mod tests {
     #[test]
     fn terminal_messages_round_trip() {
         let granted = decode_access_granted(
-            &encode_access_granted(&AccessGranted {
+            encode_access_granted(&AccessGranted {
                 session_id: 42,
                 ..Default::default()
             })
-            .unwrap(),
+            .unwrap()
+            .expose(),
         )
         .unwrap();
         assert_eq!(granted.session_id, 42);
@@ -1757,7 +1817,9 @@ mod tests {
                 session_id: 1,
                 ..Default::default()
             })
-            .unwrap(),
+            .unwrap()
+            .expose()
+            .to_vec(),
             encode_access_denied(&AccessDenied {
                 denial: Denial::Internal,
                 reason: "x".into(),

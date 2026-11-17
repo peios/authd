@@ -73,6 +73,7 @@ mod ident;
 mod log;
 mod peer;
 mod policy;
+mod random;
 mod resolve;
 mod service_sid;
 mod source;

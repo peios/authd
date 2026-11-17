@@ -53,6 +53,7 @@ pub struct AuthenticationView {
     pub verified_credentials: u32,
     pub claim_coverage: u32,
     pub absent_claim_count: usize,
+    pub ntlmv2_session_key: Bytes,
 }
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -129,6 +130,7 @@ pub struct GrantView {
     pub home: Bytes,
     pub shell: Bytes,
     pub display_name: Bytes,
+    pub ntlmv2_session_key: Bytes,
 }
 #[repr(C)]
 #[derive(Clone, Copy)]

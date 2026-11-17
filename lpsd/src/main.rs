@@ -64,6 +64,7 @@ mod fs;
 mod log;
 mod mschapv2;
 mod nt_policy;
+mod ntlmv2;
 mod own;
 mod query;
 mod random;
@@ -760,6 +761,11 @@ fn begin(
     if pending.contains_key(&conversation) {
         return Err(io::Error::other("reused conversation"));
     }
+    // An identity-in-answer proof the authority collected (PSPU §2.11): the
+    // answer names the principal, and there is no prompt left to send.
+    if let Some(presented) = &request.presented {
+        return verify_presented(stream, store, conversation, presented, unix_id_count);
+    }
     if let Some(binding) = &request.start.ssh_binding {
         if request.start.required_credential_type != Some(CredentialType::SshPublicKey) {
             return refuse(
@@ -1007,7 +1013,7 @@ fn answer(
                     &identity,
                     unix_id_count,
                     Some(CredentialType::Mschapv2),
-                    Some(success),
+                    MethodOutput::Mschapv2(success),
                 ),
                 _ => refuse(
                     stream,
@@ -1157,6 +1163,46 @@ fn answered(response: &CredentialResponse, credential_ref: u32) -> &[u8] {
         .iter()
         .find(|answer| answer.credential_ref == credential_ref)
         .map_or(&[], |answer| answer.data.expose())
+}
+
+/// Verify a presented NTLMv2 proof and reach a terminal state.
+fn verify_presented(
+    stream: &UnixStream,
+    store: &Store,
+    conversation: u64,
+    presented: &psi::Presented,
+    unix_id_count: u32,
+) -> io::Result<()> {
+    let answer = match presented.credential_type {
+        CredentialType::Ntlmv2 => presented.ntlmv2().ok(),
+        _ => None,
+    };
+    let Some(answer) = answer else {
+        return refuse(
+            stream,
+            conversation,
+            Denial::AuthenticationFailed,
+            "Authentication failed.",
+        );
+    };
+    let (verification, key) = store.verify_ntlmv2(&presented.challenge, &answer);
+    record_verified("ntlmv2", &verification);
+    match (verification.result, key) {
+        (Ok(identity), Some(key)) => assert_identity_with_output(
+            stream,
+            conversation,
+            &identity,
+            unix_id_count,
+            Some(CredentialType::Ntlmv2),
+            MethodOutput::Ntlmv2(key),
+        ),
+        _ => refuse(
+            stream,
+            conversation,
+            Denial::AuthenticationFailed,
+            "Authentication failed.",
+        ),
+    }
 }
 
 /// Record a credential check as `lpsd.credential.verified`.
@@ -1957,8 +2003,15 @@ fn assert_identity(
         identity,
         unix_id_count,
         credential,
-        None,
+        MethodOutput::None,
     )
+}
+
+/// What a verified method returns besides identity. At most one applies.
+enum MethodOutput {
+    None,
+    Mschapv2(auth_core::mschapv2::Success),
+    Ntlmv2(auth_core::ntlmv2::SessionKey),
 }
 
 fn assert_identity_with_output(
@@ -1967,8 +2020,13 @@ fn assert_identity_with_output(
     identity: &store::Identity,
     unix_id_count: u32,
     credential: Option<CredentialType>,
-    mschapv2_success: Option<auth_core::mschapv2::Success>,
+    output: MethodOutput,
 ) -> io::Result<()> {
+    let (mschapv2_success, ntlmv2_session_key) = match output {
+        MethodOutput::None => (None, None),
+        MethodOutput::Mschapv2(success) => (Some(success), None),
+        MethodOutput::Ntlmv2(key) => (None, Some(key)),
+    };
     let confined = |unix_id: u32| {
         if unix_id != 0 && unix_id >= unix_id_count {
             log::warn(format_args!(
@@ -1985,6 +2043,7 @@ fn assert_identity_with_output(
         conversation,
         &psi::Assertion {
             mschapv2_success,
+            ntlmv2_session_key,
             authenticated_credential_type: credential,
 
             user_sid: identity.sid.as_ref().as_bytes().to_vec(),
@@ -2082,6 +2141,7 @@ mod tests {
                     },
                     originator: Vec::new(),
                     logon: None,
+                    presented: None,
                 },
             )
             .unwrap();
@@ -2090,7 +2150,7 @@ mod tests {
                 &h.store,
                 &mut h.pending,
                 CONVERSATION,
-                &request,
+                request.expose(),
                 1_000_000,
             )
             .unwrap();
@@ -2148,6 +2208,95 @@ mod tests {
                 let refusal = psi::decode_refusal(encoded.expose()).unwrap();
                 assert_eq!(refusal.denial, Denial::AuthenticationFailed);
                 assert_eq!(refusal.reason, "Authentication failed.");
+            }
+            assert!(h.pending.is_empty());
+        }
+    }
+
+    /// The MS-NLMP §4.2.4 example, presented by the authority: no prompt is
+    /// sent, the principal comes from the answer, and the SessionBaseKey is
+    /// asserted. Any change to the challenge, policy or account is refused.
+    #[test]
+    fn a_presented_ntlmv2_proof_is_verified_without_prompting() {
+        let utf16le =
+            |text: &str| -> Vec<u8> { text.encode_utf16().flat_map(u16::to_le_bytes).collect() };
+        let hex = |text: &str| -> Vec<u8> {
+            (0..text.len())
+                .step_by(2)
+                .map(|i| u8::from_str_radix(&text[i..i + 2], 16).unwrap())
+                .collect()
+        };
+        let mut nt_response = hex("68cd0ab851e51c96aabc927bebef6a1c");
+        nt_response.extend(hex(concat!(
+            "0101000000000000",
+            "0000000000000000",
+            "aaaaaaaaaaaaaaaa",
+            "00000000",
+            "02000c0044006f006d00610069006e00",
+            "01000c0053006500720076006500720000000000",
+            "00000000",
+        )));
+        let answer = auth_core::ntlmv2::Answer {
+            user: utf16le("User"),
+            domain: utf16le("Domain"),
+            nt_response,
+        };
+        for case in 0..4 {
+            let mut h = Harness::with("User", Some(b"Password"));
+            let mut challenge = [0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef];
+            match case {
+                1 => challenge[0] ^= 1,
+                2 => {
+                    h.store.apply_nt_policy(false, false);
+                }
+                3 => h.store.set_password("User", b"reset").unwrap(),
+                _ => {}
+            }
+            let request = psi::encode_authenticate(
+                CONVERSATION,
+                &psi::Authenticate {
+                    start: auth_core::wire::AuthenticationRequest {
+                        identifier_type: IdentifierType::Username,
+                        identifier: Vec::new(),
+                        supported_credential_types: vec![CredentialType::Ntlmv2],
+                        required_credential_type: Some(CredentialType::Ntlmv2),
+                        ssh_binding: None,
+                    },
+                    originator: Vec::new(),
+                    logon: None,
+                    presented: Some(psi::Presented {
+                        credential_type: CredentialType::Ntlmv2,
+                        challenge,
+                        answer: Secret::from_slice(&answer.encode().unwrap()),
+                    }),
+                },
+            )
+            .unwrap();
+            begin(
+                &h.lpsd,
+                &h.store,
+                &mut h.pending,
+                CONVERSATION,
+                request.expose(),
+                1_000_000,
+            )
+            .unwrap();
+            let encoded = recv_message(&psi::FRAMING, &h.authd).unwrap();
+            if case == 0 {
+                let assertion = psi::decode_assertion(encoded.expose()).unwrap();
+                assert_eq!(
+                    assertion.authenticated_credential_type,
+                    Some(CredentialType::Ntlmv2)
+                );
+                assert_eq!(assertion.canonical_name, "User");
+                assert_eq!(
+                    assertion.ntlmv2_session_key.unwrap().0.to_vec(),
+                    hex("8de40ccadbc14a82f15cb0ad0de95ca3")
+                );
+                assert!(assertion.mschapv2_success.is_none());
+            } else {
+                let refusal = psi::decode_refusal(encoded.expose()).unwrap();
+                assert_eq!(refusal.denial, Denial::AuthenticationFailed);
             }
             assert!(h.pending.is_empty());
         }

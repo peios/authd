@@ -698,7 +698,10 @@ mod tests {
     #[test]
     fn a_grant_is_not_a_change() {
         let (client, server) = UnixStream::pair().expect("socketpair");
-        let grant = wire::encode_access_granted(&wire::AccessGranted::default()).expect("encodes");
+        let grant = wire::encode_access_granted(&wire::AccessGranted::default())
+            .expect("encodes")
+            .expose()
+            .to_vec();
         let authority = authority(server, MSG_CREDENTIAL_CHANGE_START, vec![grant]);
         assert!(converse(&client, &change_start(), &mut Scripted::new(Vec::new())).is_err());
         authority.join().expect("the authority");

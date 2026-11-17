@@ -44,6 +44,23 @@ impl AuthenticationRequest {
         if let Some(binding) = &self.ssh_binding {
             binding.validate()?;
         }
+        // Identity-in-answer (PGSS §2.11): the answer names the principal, so
+        // the request names nobody, and requires that type and no other.
+        let identity_in_answer = |t: &CredentialType| t.identity_in_answer();
+        if (self
+            .supported_credential_types
+            .iter()
+            .any(identity_in_answer)
+            || self
+                .required_credential_type
+                .as_ref()
+                .is_some_and(identity_in_answer))
+            && (!self.identifier.is_empty()
+                || self.supported_credential_types.len() != 1
+                || self.required_credential_type != Some(self.supported_credential_types[0]))
+        {
+            return Err(WireError::UnknownValue);
+        }
         Ok(())
     }
 
@@ -148,6 +165,7 @@ pub struct AuthenticateStart {
 #[derive(Debug, Clone, Default)]
 pub struct Authenticated {
     pub mschapv2_success: Option<crate::mschapv2::Success>,
+    pub ntlmv2_session_key: Option<crate::ntlmv2::SessionKey>,
     pub user_sid: Vec<u8>,
     pub canonical_name: String,
     /// Empty means a deliberate source-authorized no-credential success.
@@ -169,6 +187,12 @@ impl Authenticated {
                 .contains(&CredentialType::Mschapv2)
                 .then_some(CredentialType::Mschapv2),
             &self.mschapv2_success,
+        )?;
+        crate::ntlmv2::validate_session_key(
+            self.verified_credentials
+                .contains(&CredentialType::Ntlmv2)
+                .then_some(CredentialType::Ntlmv2),
+            &self.ntlmv2_session_key,
         )?;
         request.disclosure.validate()?;
         let invalid = || WireError::UnknownValue;
@@ -403,6 +427,10 @@ pub fn encode_authenticated(result: &Authenticated) -> Result<Vec<u8>, WireError
     claim::write_claims(&mut w, &result.claims)?;
     write_names(&mut w, &result.absent_claims)?;
     w.bytes(result.mschapv2_success.as_ref().map_or(&[], |v| &v.0), 20)?;
+    w.bytes(
+        result.ntlmv2_session_key.as_ref().map_or(&[], |key| &key.0),
+        crate::ntlmv2::SESSION_KEY_BYTES,
+    )?;
     w.close(body);
     w.finish()
 }
@@ -425,8 +453,11 @@ pub fn decode_authenticated(buf: &[u8]) -> Result<Authenticated, WireError> {
     let claims = claim::read_claims(&mut r)?;
     let absent_claims = read_names(&mut r)?;
     let mschapv2_success = crate::mschapv2::decode_success(r.bytes(20)?)?;
+    let ntlmv2_session_key =
+        crate::ntlmv2::decode_session_key(r.bytes(crate::ntlmv2::SESSION_KEY_BYTES)?)?;
     Ok(Authenticated {
         mschapv2_success,
+        ntlmv2_session_key,
         user_sid,
         canonical_name,
         verified_credentials,
@@ -677,6 +708,7 @@ mod tests {
             groups: Some(Vec::new()),
             absent_claims: vec!["Department".into()],
             mschapv2_success: None,
+            ntlmv2_session_key: None,
             claims: Vec::new(),
             claim_coverage: ClaimCoverage::Named,
         };
@@ -690,6 +722,70 @@ mod tests {
         assert!(result.validate_for(&request).is_err());
         result.absent_claims = vec!["department".into()];
         result.verified_credentials.clear();
+        assert!(result.validate_for(&request).is_err());
+    }
+
+    fn ntlmv2() -> AuthenticationRequest {
+        AuthenticationRequest {
+            identifier_type: IdentifierType::Username,
+            identifier: Vec::new(),
+            supported_credential_types: vec![CredentialType::Ntlmv2],
+            required_credential_type: Some(CredentialType::Ntlmv2),
+            ssh_binding: None,
+        }
+    }
+
+    #[test]
+    fn an_ntlmv2_request_names_nobody_and_requires_ntlmv2_alone() {
+        assert!(ntlmv2().validate().is_ok());
+
+        let named = AuthenticationRequest {
+            identifier: b"jack".to_vec(),
+            ..ntlmv2()
+        };
+        assert!(named.validate().is_err());
+
+        let not_required = AuthenticationRequest {
+            required_credential_type: None,
+            ..ntlmv2()
+        };
+        assert!(not_required.validate().is_err());
+
+        let alongside = AuthenticationRequest {
+            supported_credential_types: vec![CredentialType::Ntlmv2, CredentialType::Password],
+            ..ntlmv2()
+        };
+        assert!(alongside.validate().is_err());
+
+        let other_required = AuthenticationRequest {
+            supported_credential_types: vec![CredentialType::Password, CredentialType::Ntlmv2],
+            required_credential_type: Some(CredentialType::Password),
+            identifier: b"jack".to_vec(),
+            ..ntlmv2()
+        };
+        assert!(other_required.validate().is_err());
+    }
+
+    #[test]
+    fn an_ntlmv2_success_carries_exactly_its_session_key() {
+        let request = AuthenticateStart {
+            authentication: ntlmv2(),
+            disclosure: DisclosureRequest {
+                groups: false,
+                claims: ClaimSelection::None,
+            },
+        };
+        let mut result = Authenticated {
+            user_sid: vec![1, 1, 0, 0, 0, 0, 0, 5, 18, 0, 0, 0],
+            canonical_name: "jack".into(),
+            verified_credentials: vec![CredentialType::Ntlmv2],
+            ntlmv2_session_key: Some(crate::ntlmv2::SessionKey([0x8d; 16])),
+            ..Authenticated::default()
+        };
+        assert!(result.validate_for(&request).is_ok());
+        let decoded = decode_authenticated(&encode_authenticated(&result).unwrap()).unwrap();
+        assert_eq!(decoded.ntlmv2_session_key.unwrap().0, [0x8d; 16]);
+        result.ntlmv2_session_key = None;
         assert!(result.validate_for(&request).is_err());
     }
 }

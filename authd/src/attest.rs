@@ -409,10 +409,11 @@ fn mint_and_send(
     let message = encode_access_granted(&AccessGranted {
         session_id: granted.session.0,
         profile: Profile::default(),
+        ntlmv2_session_key: None,
     })
     .map_err(|_| io::Error::other("could not encode grant"))?;
 
-    send_message_with_fd(stream, &message, granted.token.as_fd())?;
+    send_message_with_fd(stream, message.expose(), granted.token.as_fd())?;
     attestation.outcome = Some(Ok(()));
 
     log::info(format_args!(

@@ -98,6 +98,9 @@ impl Capabilities {
     pub const PASSWORD: Self = Self(1);
     pub const SSH_PUBLIC_KEY: Self = Self(2);
     pub const MSCHAPV2: Self = Self(4);
+    /// NTLMv2, alone: the authority issues the challenge, and the answer names
+    /// the principal (PGSS §2.11).
+    pub const NTLMV2: Self = Self(8);
     pub const BOTH: Self = Self(3);
 }
 
@@ -199,7 +202,7 @@ impl Client {
     /// Create a client with copied configuration; reject an incompatible library ABI.
     pub fn with_options(options: Options<'_>) -> Result<Self, Error> {
         // SAFETY: this scalar query takes no pointers or mutable state.
-        if unsafe { sys::peios_auth_abi_version() } != 5 {
+        if unsafe { sys::peios_auth_abi_version() } != 6 {
             return Err(invalid());
         }
         let raw = abi::ClientOptions {
@@ -365,6 +368,33 @@ pub struct Grant {
     pub home: String,
     pub shell: String,
     pub display_name: String,
+    /// The NTLM SessionBaseKey, exactly when NTLMv2 was verified.
+    pub ntlmv2_session_key: Option<SessionKey>,
+}
+
+/// An NTLM SessionBaseKey: exchange-specific, never a reusable credential. It
+/// signs a live protocol session, so it is wiped when dropped and never shown.
+pub struct SessionKey(pub [u8; 16]);
+impl core::fmt::Debug for SessionKey {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("SessionKey([redacted])")
+    }
+}
+impl Drop for SessionKey {
+    fn drop(&mut self) {
+        for byte in self.0.iter_mut() {
+            // SAFETY: byte is exclusively borrowed from this live array. Volatile
+            // stores keep the wipe although the value is released immediately.
+            unsafe { core::ptr::write_volatile(byte, 0) };
+        }
+        core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
+    }
+}
+pub(crate) fn session_key(span: &[u8]) -> Result<Option<SessionKey>, Error> {
+    if span.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(SessionKey(span.try_into().map_err(|_| invalid())?)))
 }
 /// Counts reported by a completed session termination.
 #[derive(Debug)]
@@ -504,6 +534,7 @@ impl Operation {
             home: copy_text(raw.home),
             shell: copy_text(raw.shell),
             display_name: copy_text(raw.display_name),
+            ntlmv2_session_key: session_key(&copy_bytes(raw.ntlmv2_session_key))?,
         })
     }
     /// Transfer the granted token once. The caller owns and closes the returned descriptor.

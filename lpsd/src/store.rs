@@ -1824,6 +1824,39 @@ impl Store {
         (Verification::of(account, result), success)
     }
 
+    /// Verify an NTLMv2 proof presented by the authority (PSPU §2.11). The
+    /// principal is the one the answer names; the challenge is the
+    /// authority's. Unlike MSCHAPv2 there is no prompt round, so the current
+    /// credential revision is the one the proof is checked against.
+    pub fn verify_ntlmv2(
+        &self,
+        challenge: &[u8; 8],
+        answer: &auth_core::ntlmv2::Answer,
+    ) -> (Verification, Option<auth_core::ntlmv2::SessionKey>) {
+        let identifier = answer
+            .user_name()
+            .map(String::into_bytes)
+            .unwrap_or_default();
+        let p = self.principals.iter().find(|p| p.matches(&identifier));
+        // Equal fixed-cost legacy work even for unknown/unavailable accounts.
+        let decoy = crate::mschapv2::NtHash([0; 16]);
+        let hash = p
+            .and_then(|p| p.verifier.as_ref())
+            .and_then(|v| v.nt_hash.as_ref());
+        let key = crate::ntlmv2::verify(hash.unwrap_or(&decoy), challenge, answer);
+        let account = p.and_then(|p| self.sid_of(p.rid).ok());
+        let result = match p {
+            None => Err(Unverified::NoSuchAccount),
+            Some(p) if !p.enabled => Err(Unverified::Disabled),
+            Some(p) if !self.nt_storage || !p.policy.password() => Err(Unverified::NotPermitted),
+            Some(_) if hash.is_none() => Err(Unverified::MissingNtMaterial),
+            Some(_) if key.is_none() => Err(Unverified::WrongCredential),
+            Some(p) => self.identity_of(p).ok_or(Unverified::WrongCredential),
+        };
+        let key = result.is_ok().then_some(key).flatten();
+        (Verification::of(account, result), key)
+    }
+
     /// Check that an enabled account permits SSH and holds this supported key.
     /// This checks eligibility only; it does not verify the signature.
     pub fn key_eligible(&self, identifier: &[u8], offer: &auth_core::ssh::Offer) -> bool {
