@@ -129,6 +129,10 @@
         [
             "absent_claim_count",
             "usize"
+        ],
+        [
+            "ntlmv2_session_key",
+            "Bytes"
         ]
     ],
     "ServiceRequest": [
@@ -292,6 +296,10 @@
         ],
         [
             "display_name",
+            "Bytes"
+        ],
+        [
+            "ntlmv2_session_key",
             "Bytes"
         ]
     ],
