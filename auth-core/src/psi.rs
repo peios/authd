@@ -106,7 +106,9 @@ use crate::wire::{
 /// hard error on the first four bytes.
 pub const MAGIC: [u8; 4] = *b"PPSI";
 
-pub const VERSION: u16 = 3;
+/// Version 4 adds NTLMv2's presented proof to `Authenticate` and its session
+/// key to `Assertion`.
+pub const VERSION: u16 = 4;
 
 /// PGSS Logon's twelve-byte header plus the conversation id.
 pub const HEADER_BYTES: usize = frame::COMMON_HEADER_BYTES + 8;
@@ -294,6 +296,33 @@ pub struct Authenticate {
     /// authenticate for some originators — an account restricted to console
     /// logons, say — and that decision needs a trustworthy input.
     pub originator: Vec<u8>,
+    /// A proof the authority collected itself, for an identity-in-answer type
+    /// only (PSPU §2.11). The source verifies it without prompting.
+    pub presented: Option<Presented>,
+}
+
+/// An identity-in-answer proof: the authority's challenge and the client's
+/// answer, which names the principal. `start` stays the client's request.
+pub struct Presented {
+    pub credential_type: crate::wire::CredentialType,
+    pub challenge: [u8; crate::ntlmv2::CHALLENGE_BYTES],
+    /// The client's answer data, unchanged and validated for its type.
+    pub answer: Secret,
+}
+
+impl core::fmt::Debug for Presented {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("Presented")
+            .field("credential_type", &self.credential_type)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Presented {
+    /// The decoded NTLMv2 answer. Validated when the message was decoded.
+    pub fn ntlmv2(&self) -> Result<crate::ntlmv2::Answer, WireError> {
+        crate::ntlmv2::Answer::decode(self.answer.expose())
+    }
 }
 
 /// A group membership a source asserts.
@@ -331,6 +360,8 @@ pub struct Group {
 #[derive(Debug, Default)]
 pub struct Assertion {
     pub mschapv2_success: Option<crate::mschapv2::Success>,
+    /// The NTLM `SessionBaseKey`, exactly when NTLMv2 was verified.
+    pub ntlmv2_session_key: Option<crate::ntlmv2::SessionKey>,
     pub authenticated_credential_type: Option<crate::wire::CredentialType>,
     /// Binary SID bytes. Structurally unvalidated here — auth-core deliberately
     /// has no dependency on the security library — so the *recipient* must
@@ -706,10 +737,12 @@ pub fn decode_registered(buf: &[u8]) -> Result<Registered, WireError> {
 // The conversation
 // ---------------------------------------------------------------------------
 
+/// Returns a [`Secret`] because a presented proof is credential material: the
+/// encoded message holds it in the clear.
 pub fn encode_authenticate(
     conversation: u64,
     authenticate: &Authenticate,
-) -> Result<Vec<u8>, WireError> {
+) -> Result<Secret, WireError> {
     let mut w = begin(MSG_AUTHENTICATE, conversation);
     let body = w.open();
 
@@ -734,8 +767,34 @@ pub fn encode_authenticate(
         )?;
         w.close(nested);
     }
+    w.u8(u8::from(authenticate.presented.is_some()));
+    if let Some(presented) = &authenticate.presented {
+        validate_presented(&authenticate.start, presented)?;
+        let nested = w.open();
+        w.u8(presented.credential_type as u8);
+        w.bytes(&presented.challenge, crate::ntlmv2::CHALLENGE_BYTES)?;
+        w.bytes(presented.answer.expose(), crate::wire::MAX_CREDENTIAL_BYTES)?;
+        w.close(nested);
+    }
     w.close(body);
-    w.finish()
+    let encoded = w.finish()?;
+    let secret = Secret::from_slice(&encoded);
+    frame::wipe(encoded);
+    Ok(secret)
+}
+
+/// A presented proof is only for an identity-in-answer type the request
+/// requires, and its answer must be well formed for that type.
+fn validate_presented(
+    start: &crate::wire::AuthenticationRequest,
+    presented: &Presented,
+) -> Result<(), WireError> {
+    if !presented.credential_type.identity_in_answer()
+        || start.required_credential_type != Some(presented.credential_type)
+    {
+        return Err(WireError::UnknownValue);
+    }
+    presented.ntlmv2().map(|_| ())
 }
 
 pub fn decode_authenticate(buf: &[u8]) -> Result<Authenticate, WireError> {
@@ -757,10 +816,37 @@ pub fn decode_authenticate(buf: &[u8]) -> Result<Authenticate, WireError> {
         }
         _ => return Err(WireError::UnknownValue),
     };
+    let presented = match b.u8()? {
+        0 => None,
+        1 => {
+            let mut proof = b.open()?;
+            let presented = Presented {
+                credential_type: crate::wire::CredentialType::from_u8(proof.u8()?)
+                    .ok_or(WireError::UnknownValue)?,
+                challenge: proof
+                    .bytes(crate::ntlmv2::CHALLENGE_BYTES)?
+                    .try_into()
+                    .map_err(|_| WireError::UnknownValue)?,
+                answer: Secret::from_slice(proof.bytes(crate::wire::MAX_CREDENTIAL_BYTES)?),
+            };
+            validate_presented(&start, &presented)?;
+            Some(presented)
+        }
+        _ => return Err(WireError::UnknownValue),
+    };
+    // An identity-in-answer request is unanswerable without its proof.
+    if presented.is_none()
+        && start
+            .required_credential_type
+            .is_some_and(|t| t.identity_in_answer())
+    {
+        return Err(WireError::UnknownValue);
+    }
     Ok(Authenticate {
         start,
         originator,
         logon,
+        presented,
     })
 }
 
@@ -814,6 +900,10 @@ pub fn encode_assertion(conversation: u64, assertion: &Assertion) -> Result<Vec<
         assertion.authenticated_credential_type,
         &assertion.mschapv2_success,
     )?;
+    crate::ntlmv2::validate_session_key(
+        assertion.authenticated_credential_type,
+        &assertion.ntlmv2_session_key,
+    )?;
     let mut w = begin(MSG_ASSERTION, conversation);
     let body = w.open();
     w.bytes(&assertion.user_sid, MAX_SID_BYTES)?;
@@ -849,6 +939,10 @@ pub fn encode_assertion(conversation: u64, assertion: &Assertion) -> Result<Vec<
         assertion.mschapv2_success.as_ref().map_or(&[], |v| &v.0),
         20,
     )?;
+    w.bytes(
+        assertion.ntlmv2_session_key.as_ref().map_or(&[], |key| &key.0),
+        crate::ntlmv2::SESSION_KEY_BYTES,
+    )?;
     w.close(body);
     w.finish()
 }
@@ -875,8 +969,12 @@ pub fn decode_assertion(buf: &[u8]) -> Result<Assertion, WireError> {
     };
     let mschapv2_success = crate::mschapv2::decode_success(b.bytes(20)?)?;
     crate::mschapv2::validate_success(authenticated_credential_type, &mschapv2_success)?;
+    let ntlmv2_session_key =
+        crate::ntlmv2::decode_session_key(b.bytes(crate::ntlmv2::SESSION_KEY_BYTES)?)?;
+    crate::ntlmv2::validate_session_key(authenticated_credential_type, &ntlmv2_session_key)?;
     Ok(Assertion {
         mschapv2_success,
+        ntlmv2_session_key,
         authenticated_credential_type,
         user_sid,
         canonical_name,
@@ -1292,12 +1390,14 @@ mod tests {
                 start: start().authentication,
                 logon: Some(start().context()),
                 originator: vec![1, 1, 0, 0, 0, 0, 0, 5, 18, 0, 0, 0],
+                presented: None,
             },
         )
         .unwrap();
 
-        assert_eq!(decode_envelope(&bytes).unwrap().conversation, 7);
-        let decoded = decode_authenticate(&bytes).unwrap();
+        assert_eq!(decode_envelope(bytes.expose()).unwrap().conversation, 7);
+        let decoded = decode_authenticate(bytes.expose()).unwrap();
+        assert!(decoded.presented.is_none());
         assert_eq!(decoded.start.identifier, b"jack");
         assert_eq!(
             decoded.logon.as_ref().unwrap().logon_type,
@@ -1313,6 +1413,71 @@ mod tests {
         );
     }
 
+    fn ntlmv2_start() -> crate::wire::AuthenticationRequest {
+        crate::wire::AuthenticationRequest {
+            identifier_type: crate::wire::IdentifierType::Username,
+            identifier: Vec::new(),
+            supported_credential_types: vec![CredentialType::Ntlmv2],
+            required_credential_type: Some(CredentialType::Ntlmv2),
+            ssh_binding: None,
+        }
+    }
+
+    fn ntlmv2_answer() -> Secret {
+        let utf16le = |text: &str| -> Vec<u8> {
+            text.encode_utf16().flat_map(u16::to_le_bytes).collect()
+        };
+        let mut nt_response = vec![7; crate::ntlmv2::PROOF_BYTES];
+        nt_response.extend_from_slice(&[1, 1]);
+        nt_response.resize(crate::ntlmv2::MIN_NT_RESPONSE_BYTES, 0);
+        let answer = crate::ntlmv2::Answer {
+            user: utf16le("jack"),
+            domain: utf16le("DESKTOP-4F2A"),
+            nt_response,
+        };
+        Secret::from_slice(&answer.encode().unwrap())
+    }
+
+    fn presented(start: crate::wire::AuthenticationRequest) -> Authenticate {
+        Authenticate {
+            start,
+            logon: None,
+            originator: vec![1, 1, 0, 0, 0, 0, 0, 5, 18, 0, 0, 0],
+            presented: Some(Presented {
+                credential_type: CredentialType::Ntlmv2,
+                challenge: [0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef],
+                answer: ntlmv2_answer(),
+            }),
+        }
+    }
+
+    #[test]
+    fn a_presented_ntlmv2_proof_round_trips() {
+        let bytes = encode_authenticate(4, &presented(ntlmv2_start())).unwrap();
+        let decoded = decode_authenticate(bytes.expose()).unwrap();
+        assert!(decoded.start.identifier.is_empty());
+        let proof = decoded.presented.expect("the proof survives");
+        assert_eq!(proof.challenge, [0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef]);
+        assert_eq!(proof.ntlmv2().unwrap().user_name().unwrap(), "jack");
+        assert_eq!(format!("{proof:?}"), "Presented { credential_type: Ntlmv2, .. }");
+    }
+
+    /// A proof is only for the identity-in-answer type its request requires,
+    /// and such a request is unanswerable without one.
+    #[test]
+    fn a_presented_proof_must_match_its_request() {
+        let mut password = ntlmv2_start();
+        password.identifier = b"jack".to_vec();
+        password.supported_credential_types = vec![CredentialType::Password];
+        password.required_credential_type = Some(CredentialType::Password);
+        assert!(encode_authenticate(4, &presented(password)).is_err());
+
+        let mut bare = presented(ntlmv2_start());
+        bare.presented = None;
+        let bytes = encode_authenticate(4, &bare).unwrap();
+        assert!(decode_authenticate(bytes.expose()).is_err());
+    }
+
     /// The nesting exists so PGSS Logon can append a field to `LogonStart`
     /// without displacing PSI's own trailing fields. Simulate that: grow the
     /// nested struct and confirm `originator` still reads correctly.
@@ -1325,9 +1490,12 @@ mod tests {
                 start: start().authentication,
                 logon: Some(start().context()),
                 originator: originator.clone(),
+                presented: None,
             },
         )
-        .unwrap();
+        .unwrap()
+        .expose()
+        .to_vec();
 
         // Splice four bytes onto the end of the nested LogonStart body, as a
         // newer PGSS Logon would, fixing up each enclosing length.
@@ -1573,6 +1741,7 @@ mod tests {
     fn assertion() -> Assertion {
         Assertion {
             mschapv2_success: None,
+            ntlmv2_session_key: None,
             authenticated_credential_type: None,
 
             permitted_logon_types: LogonTypes::UNSTATED,
@@ -1691,6 +1860,7 @@ mod tests {
         w.u32(0);
         w.u8(0);
         w.bytes(&[], 20).unwrap();
+        w.bytes(&[], crate::ntlmv2::SESSION_KEY_BYTES).unwrap();
         w.close(body);
         let bytes = w.finish().unwrap();
 
@@ -1866,9 +2036,12 @@ mod tests {
                     start: start().authentication,
                     logon: Some(start().context()),
                     originator: vec![1, 1, 0, 0, 0, 0, 0, 5, 18, 0, 0, 0],
+                    presented: None,
                 },
             )
-            .unwrap(),
+            .unwrap()
+            .expose()
+            .to_vec(),
             encode_assertion(1, &assertion()).unwrap(),
             encode_refusal(
                 1,

@@ -302,11 +302,12 @@ mod tests {
                 start: start().authentication,
                 logon: Some(start().context()),
                 originator: vec![1, 1, 0, 0, 0, 0, 0, 5, 18, 0, 0, 0],
+                presented: None,
             },
         )
         .unwrap();
 
-        send_message(&a, &message).expect("send");
+        send_message(&a, message.expose()).expect("send");
         let received = recv_message(&psi::FRAMING, &b).expect("recv");
         assert_eq!(
             psi::decode_envelope(received.expose())
