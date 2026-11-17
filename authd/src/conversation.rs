@@ -1366,9 +1366,12 @@ fn grant(
     // itself — it has assumed the principal's token by then, and /home
     // grants Everyone traverse but not create.
     //
-    // Never fatal: a logon is not worth failing over a directory.
-    home::ensure(user, &profile.home);
-    crate::user_registry::ensure(user);
+    // Never fatal: a logon is not worth failing over a directory. Sites can
+    // limit which kinds of logon provision (ProvisionLogonTypes).
+    if crate::policy::provision::provisions(start.logon_type) {
+        home::ensure(user, &profile.home);
+        crate::user_registry::ensure(user);
+    }
 
     // A token exists from here, so the record names it whether or not it is
     // handed over: a session that appears in the kernel's records without a

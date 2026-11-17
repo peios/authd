@@ -370,6 +370,27 @@ Configuration specific to the authd authentication authority.
 The `Sources` subkey controls principal-source registration. General token
 and originator policy belongs under `Machine\Generic\Authn\Policy`.
 
+--- machine\software\authd provisionlogontypes
+canonical: Machine\Software\Authd ProvisionLogonTypes
+type: REG_MULTI_SZ
+default: (absent — every logon type provisions)
+valid: the seven logon-type names; unknown names dropped with a warning
+applies: live (at the next logon)
+
+Which logon types prepare the principal's home and per-user Registry root.
+
+When a granted logon's profile names a home, authd creates a missing home
+directory and a missing `Users\<SID>` root. This value limits that to the
+listed logon types, using the names of policy `LogonTypes`. An empty list
+prepares nothing. Leaving out `Network` and `NetworkCleartext` matches
+Windows, where a network logon creates no profile.
+
+Absent, every type provisions, so a file server can serve homes to users who
+only sign in over the network. A value that is not a `REG_MULTI_SZ` produces
+a warning and is ignored. The setting distinguishes logon types, not the
+services that request logons: two services that both request Network logons
+are treated alike.
+
 --- machine\software\authd\sources
 canonical: Machine\Software\Authd\Sources
 
