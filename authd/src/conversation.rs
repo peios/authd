@@ -64,6 +64,7 @@ use auth_core::wire::{
     decode_session_end, decode_session_end_query, encode_access_denied, encode_access_granted,
     encode_credential_request,
 };
+use auth_core::{ntlmv2, psi};
 use peios::security::{Sid, SidRef};
 
 use crate::audit;
@@ -473,7 +474,30 @@ fn run_authentication(
         )?;
         return Ok(None);
     }
-    let source = match crate::resolve::route(registry, &request.identifier) {
+    // An identity-in-answer type (PGSS §2.11): authd issues the challenge, and
+    // the answer, not the request, names the principal to route on. The proof
+    // then goes to that one source and no other.
+    let presented = match request.required_credential_type {
+        Some(kind) if kind.identity_in_answer() => {
+            match collect_presented(stream, kind, deadline)? {
+                Ok(presented) => Some(presented),
+                Err(denial) => {
+                    attempt.denied(denial);
+                    return Ok(None);
+                }
+            }
+        }
+        _ => None,
+    };
+    let route_name = match &presented {
+        Some(presented) => presented
+            .ntlmv2()
+            .and_then(|answer| answer.user_name())
+            .map(String::into_bytes)
+            .unwrap_or_default(),
+        None => request.identifier.clone(),
+    };
+    let source = match crate::resolve::route(registry, &route_name) {
         crate::resolve::Route::Owner(source) | crate::resolve::Route::Blind(source) => source,
         _ => {
             attempt.refuse(
@@ -498,7 +522,7 @@ fn run_authentication(
         return Ok(None);
     };
     if let Err(error) =
-        conversation.authenticate_request(request, context, peer.as_ref().as_bytes())
+        conversation.authenticate_request(request, context, peer.as_ref().as_bytes(), presented)
     {
         log::warn(format_args!(
             "could not contact source {}: {error}",
@@ -594,6 +618,7 @@ fn authenticate(
         let claims = authorization.disclosed_claims(&start.disclosure.claims, &assertion.claims);
         let disclosed = wire::Authenticated {
             mschapv2_success: assertion.mschapv2_success.clone(),
+            ntlmv2_session_key: assertion.ntlmv2_session_key.clone(),
             user_sid: identity.user.as_ref().as_bytes().to_vec(),
             canonical_name: assertion.canonical_name.clone(),
             verified_credentials: assertion
@@ -694,6 +719,20 @@ pub(crate) fn relay(
 
         match inbound {
             Inbound::Request(request) => {
+                // An identity-in-answer conversation was opened with its proof
+                // already presented; there is nothing left for a source to ask
+                // (PSPU §2.11), and its prompt must not reach the client.
+                if supported.iter().any(|t| t.identity_in_answer()) {
+                    log::error(format_args!(
+                        "source {} prompted on a conversation opened with a presented proof",
+                        conversation.source_name()
+                    ));
+                    return denied(
+                        stream,
+                        Denial::Internal,
+                        &format!("The authority could not complete the {noun}."),
+                    );
+                }
                 if let Some(offending) = unrenderable_prompt(supported, &request) {
                     // The source asked for something this client told us it
                     // cannot render. Relaying it would force the client to
@@ -988,6 +1027,77 @@ fn is_read_timeout(error: &io::Error) -> bool {
     )
 }
 
+/// Issue an identity-in-answer challenge and collect its one answer (PGSS
+/// §2.11). authd asks rather than a source, because no principal, and so no
+/// source, is known until the answer arrives. The challenge comes from the
+/// kernel's CRNG, is asked once, and lives only as long as this conversation.
+fn collect_presented(
+    stream: &UnixStream,
+    kind: CredentialType,
+    deadline: Instant,
+) -> io::Result<Result<psi::Presented, Denial>> {
+    let refuse = |denial: Denial, reason: &str| -> io::Result<Result<psi::Presented, Denial>> {
+        deny(stream, denial, reason)?;
+        Ok(Err(denial))
+    };
+    if expired(deadline) {
+        return refuse(Denial::ConversationLimit, "The logon took too long.");
+    }
+    // As in the relay: an answer already waiting was sent before the question.
+    if client_already_answered(stream) {
+        log::warn(format_args!(
+            "client answered before being asked; refusing the conversation"
+        ));
+        return refuse(
+            Denial::MalformedRequest,
+            "A response arrived before the request for it.",
+        );
+    }
+    let challenge = match crate::random::array::<{ ntlmv2::CHALLENGE_BYTES }>() {
+        Ok(challenge) => challenge,
+        Err(error) => {
+            log::error(format_args!("could not draw an NTLMv2 challenge: {error}"));
+            return refuse(Denial::Internal, "The authority could not continue.");
+        }
+    };
+    let request = CredentialRequest {
+        messages: Vec::new(),
+        prompts: vec![wire::Prompt {
+            credential_ref: 1,
+            credential_type: kind,
+            credential_name: "NTLM".into(),
+            parameters: challenge.to_vec(),
+        }],
+    };
+    let mut response = match ask_client(stream, &request) {
+        Ok(response) => response,
+        Err(ClientFailed::Protocol(denial, reason)) => return refuse(denial, reason),
+        Err(ClientFailed::Io(error)) if is_read_timeout(&error) => {
+            log::warn(format_args!(
+                "client did not answer within {CLIENT_TIMEOUT:?}"
+            ));
+            return refuse(
+                Denial::ConversationLimit,
+                "The logon took too long to answer.",
+            );
+        }
+        Err(ClientFailed::Io(error)) => return Err(error),
+    };
+    // Exactly one answer, to the one prompt: the challenge is single use.
+    let answer = match response.answers.pop() {
+        Some(answer) if response.answers.is_empty() && answer.credential_ref == 1 => answer,
+        _ => return refuse(Denial::MalformedRequest, "Expected one answer."),
+    };
+    if ntlmv2::Answer::decode(answer.data.expose()).is_err() {
+        return refuse(Denial::MalformedRequest, "Malformed NTLMv2 answer.");
+    }
+    Ok(Ok(psi::Presented {
+        credential_type: kind,
+        challenge,
+        answer: answer.data,
+    }))
+}
+
 /// Put a request to the client and read back its answers.
 fn ask_client(
     stream: &UnixStream,
@@ -1258,10 +1368,11 @@ fn grant(
     let message = encode_access_granted(&AccessGranted {
         session_id: granted.session.0,
         profile,
+        ntlmv2_session_key: assertion.ntlmv2_session_key.clone(),
     })
     .map_err(|_| io::Error::other("could not encode grant"))?;
 
-    send_message_with_fd(stream, &message, granted.token.as_fd())?;
+    send_message_with_fd(stream, message.expose(), granted.token.as_fd())?;
     attempt.record.sid("subject.token.sid", user);
     attempt.outcome = Some(Ok(()));
 
@@ -1828,6 +1939,91 @@ mod tests {
             NonOriginatorSlot::take().is_some(),
             "dropped slots must come back"
         );
+    }
+
+    fn ntlmv2_answer(user: &str) -> Vec<u8> {
+        let utf16le =
+            |text: &str| -> Vec<u8> { text.encode_utf16().flat_map(u16::to_le_bytes).collect() };
+        let mut nt_response = vec![7; ntlmv2::PROOF_BYTES];
+        nt_response.extend_from_slice(&[1, 1]);
+        nt_response.resize(ntlmv2::MIN_NT_RESPONSE_BYTES, 0);
+        ntlmv2::Answer {
+            user: utf16le(user),
+            domain: utf16le("DESKTOP-4F2A"),
+            nt_response,
+        }
+        .encode()
+        .unwrap()
+    }
+
+    /// Play the client: read the one prompt, answer with `answers`, and hand
+    /// back the challenge it was sent, with the still-open socket so authd's
+    /// reply has somewhere to go.
+    fn answering(
+        client: UnixStream,
+        answers: Vec<(u32, Vec<u8>)>,
+    ) -> std::thread::JoinHandle<(Vec<u8>, UnixStream)> {
+        std::thread::spawn(move || {
+            let received = recv_message(&wire::FRAMING, &client).unwrap();
+            let request = wire::decode_credential_request(received.expose()).unwrap();
+            assert_eq!(request.prompts.len(), 1);
+            assert_eq!(request.prompts[0].credential_type, CredentialType::Ntlmv2);
+            let challenge = request.prompts[0].parameters.clone();
+            let response = wire::encode_credential_response(&CredentialResponse {
+                answers: answers
+                    .into_iter()
+                    .map(|(credential_ref, data)| wire::Answer {
+                        credential_ref,
+                        data: auth_core::secret::Secret::from_slice(&data),
+                    })
+                    .collect(),
+            })
+            .unwrap();
+            send_message(&client, response.expose()).unwrap();
+            (challenge, client)
+        })
+    }
+
+    /// authd, not a source, issues the challenge: eight fresh bytes in one
+    /// Ntlmv2 prompt. The client's answer becomes the proof, unchanged.
+    #[test]
+    fn authd_issues_the_ntlmv2_challenge_and_presents_the_answer() {
+        let (client, server) = UnixStream::pair().unwrap();
+        let answer = ntlmv2_answer("jack");
+        let client = answering(client, vec![(1, answer.clone())]);
+        let deadline = Instant::now() + CONVERSATION_DEADLINE;
+        let presented = collect_presented(&server, CredentialType::Ntlmv2, deadline)
+            .unwrap()
+            .expect("a well-formed answer is presented");
+        let (challenge, _client) = client.join().unwrap();
+        assert_eq!(challenge.len(), ntlmv2::CHALLENGE_BYTES);
+        assert_eq!(presented.challenge.to_vec(), challenge);
+        assert_eq!(presented.answer.expose(), &answer[..]);
+        assert_eq!(presented.ntlmv2().unwrap().user_name().unwrap(), "jack");
+    }
+
+    /// The challenge takes exactly one answer, to its own prompt, well formed.
+    #[test]
+    fn anything_but_one_well_formed_ntlmv2_answer_is_refused() {
+        let good = ntlmv2_answer("jack");
+        for answers in [
+            vec![(1, b"not an answer".to_vec())],
+            vec![(1, good.clone()), (2, good.clone())],
+            vec![(2, good.clone())],
+            Vec::new(),
+        ] {
+            let (client, server) = UnixStream::pair().unwrap();
+            let client = answering(client, answers);
+            let deadline = Instant::now() + CONVERSATION_DEADLINE;
+            let outcome = collect_presented(&server, CredentialType::Ntlmv2, deadline).unwrap();
+            let (_, client) = client.join().unwrap();
+            assert!(matches!(outcome, Err(Denial::MalformedRequest)));
+            let denial = recv_message(&wire::FRAMING, &client).unwrap();
+            assert_eq!(
+                wire::decode_access_denied(denial.expose()).unwrap().denial,
+                Denial::MalformedRequest
+            );
+        }
     }
 
     fn opening_of(bytes: &[u8]) -> Result<Opening, (Denial, &'static str)> {

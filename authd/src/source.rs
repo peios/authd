@@ -319,12 +319,14 @@ impl Conversation {
         self.source.unix_id_range()
     }
 
-    /// Ask the source to authenticate someone.
+    /// Ask the source to authenticate someone. `presented` carries a proof
+    /// authd collected itself, for an identity-in-answer type (PSPU §2.11).
     pub fn authenticate_request(
         &self,
         request: &auth_core::wire::AuthenticationRequest,
         logon: Option<auth_core::wire::LogonContext>,
         originator: &[u8],
+        presented: Option<psi::Presented>,
     ) -> io::Result<()> {
         let message = psi::encode_authenticate(
             self.id,
@@ -332,10 +334,11 @@ impl Conversation {
                 start: request.clone(),
                 logon,
                 originator: originator.to_vec(),
+                presented,
             },
         )
         .map_err(|_| io::Error::other("could not encode authentication"))?;
-        self.source.send(&message)
+        self.source.send(message.expose())
     }
 
     /// Ask the source to change a principal's own credential. PSPU §2.21.
@@ -1350,7 +1353,12 @@ mod tests {
             remote_host: Some("192.0.2.1".into()),
         };
         conversation
-            .authenticate_request(&start.authentication, Some(start.context()), &[1, 2, 3])
+            .authenticate_request(
+                &start.authentication,
+                Some(start.context()),
+                &[1, 2, 3],
+                None,
+            )
             .unwrap();
         let message = auth_core::transport::recv_message(&psi::FRAMING, &peer).unwrap();
         let decoded = psi::decode_authenticate(message.expose()).unwrap();

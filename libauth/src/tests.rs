@@ -35,6 +35,7 @@ fn authenticate_uses_the_shared_conversation_and_never_exposes_a_token() {
             &socket,
             &wire::encode_authenticated(&wire::Authenticated {
                 mschapv2_success: None,
+                ntlmv2_session_key: None,
                 user_sid: vec![1, 1, 0, 0, 0, 0, 0, 5, 18, 0, 0, 0],
                 canonical_name: "jack".into(),
                 verified_credentials: vec![wire::CredentialType::Password],
@@ -212,15 +213,17 @@ fn logon_handles_fragmented_prompts_and_transfers_token_once() {
         let token = std::fs::File::open("/dev/null").unwrap();
         send_message_with_fd(
             &socket,
-            &wire::encode_access_granted(&wire::AccessGranted {
+            wire::encode_access_granted(&wire::AccessGranted {
                 session_id: 42,
                 profile: wire::Profile {
                     home: "/home/jack".into(),
                     shell: "/bin/sh".into(),
                     display_name: "Jack".into(),
                 },
+                ntlmv2_session_key: None,
             })
-            .unwrap(),
+            .unwrap()
+            .expose(),
             token.as_fd(),
         )
         .unwrap();
@@ -267,7 +270,10 @@ fn grant_without_descriptor_fails_and_unknown_denials_are_preserved() {
         let server = Server::new(move |socket| {
             recv_message(&wire::FRAMING, &socket).unwrap();
             let message = if missing_token {
-                wire::encode_access_granted(&wire::AccessGranted::default()).unwrap()
+                wire::encode_access_granted(&wire::AccessGranted::default())
+                    .unwrap()
+                    .expose()
+                    .to_vec()
             } else {
                 let mut message = denied();
                 message[16..20].copy_from_slice(&99999u32.to_le_bytes());
@@ -606,7 +612,9 @@ fn service_attestation_keeps_its_distinct_message_and_returns_a_token() {
         let token = std::fs::File::open("/dev/null").unwrap();
         send_message_with_fd(
             &socket,
-            &wire::encode_access_granted(&wire::AccessGranted::default()).unwrap(),
+            wire::encode_access_granted(&wire::AccessGranted::default())
+                .unwrap()
+                .expose(),
             token.as_fd(),
         )
         .unwrap();
@@ -665,7 +673,10 @@ fn extra_and_truncated_descriptor_arrays_are_closed() {
         let file = std::fs::File::create(&file_path).unwrap();
         let server = Server::new(move |socket| {
             recv_message(&wire::FRAMING, &socket).unwrap();
-            let message = wire::encode_access_granted(&wire::AccessGranted::default()).unwrap();
+            let message = wire::encode_access_granted(&wire::AccessGranted::default())
+                .unwrap()
+                .expose()
+                .to_vec();
             let mut iov = libc::iovec {
                 iov_base: message.as_ptr().cast_mut().cast(),
                 iov_len: message.len(),

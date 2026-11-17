@@ -345,7 +345,7 @@ mod tests {
             ..Default::default()
         })
         .unwrap();
-        send_message_with_fd(&a, &granted, pipe_r.as_fd()).expect("send with fd");
+        send_message_with_fd(&a, granted.expose(), pipe_r.as_fd()).expect("send with fd");
 
         let (received, fd) = recv_message_with_fd(&wire::FRAMING, &b).expect("recv with fd");
         let decoded = decode_access_granted(received.expose()).expect("decode");
@@ -363,7 +363,7 @@ mod tests {
             ..Default::default()
         })
         .unwrap();
-        send_message_with_fd(&a, &granted, pipe_r.as_fd()).expect("send with fd");
+        send_message_with_fd(&a, granted.expose(), pipe_r.as_fd()).expect("send with fd");
         let (_, fd) = recv_message_with_fd(&wire::FRAMING, &b).expect("recv with fd");
 
         let fd = fd.expect("descriptor");
@@ -385,7 +385,7 @@ mod tests {
             ..Default::default()
         })
         .unwrap();
-        send_message(&a, &granted).expect("send");
+        send_message(&a, granted.expose()).expect("send");
 
         let (_, fd) = recv_message_with_fd(&wire::FRAMING, &b).expect("recv");
         assert!(fd.is_none());

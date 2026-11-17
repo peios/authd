@@ -1022,7 +1022,9 @@ pub fn decode_access_granted(buf: &[u8]) -> Result<AccessGranted, WireError> {
     })
 }
 
-pub fn encode_access_granted(granted: &AccessGranted) -> Result<Vec<u8>, WireError> {
+/// Returns a [`Secret`] because the message can carry an NTLMv2 session key,
+/// which signs a live protocol session and must not outlive its delivery.
+pub fn encode_access_granted(granted: &AccessGranted) -> Result<Secret, WireError> {
     let mut w = Writer::new(&FRAMING, MSG_ACCESS_GRANTED);
     let body = w.open();
     w.u64(granted.session_id);
@@ -1037,7 +1039,10 @@ pub fn encode_access_granted(granted: &AccessGranted) -> Result<Vec<u8>, WireErr
         crate::ntlmv2::SESSION_KEY_BYTES,
     )?;
     w.close(body);
-    w.finish()
+    let encoded = w.finish()?;
+    let secret = Secret::from_slice(&encoded);
+    frame::wipe(encoded);
+    Ok(secret)
 }
 
 pub fn decode_access_denied(buf: &[u8]) -> Result<AccessDenied, WireError> {
@@ -1520,12 +1525,13 @@ mod tests {
             display_name: "Jack Palfrey".into(),
         };
         let granted = decode_access_granted(
-            &encode_access_granted(&AccessGranted {
+            encode_access_granted(&AccessGranted {
                 session_id: 9,
                 profile: profile.clone(),
                 ntlmv2_session_key: None,
             })
-            .unwrap(),
+            .unwrap()
+            .expose(),
         )
         .unwrap();
         assert_eq!(granted.session_id, 9);
@@ -1536,9 +1542,12 @@ mod tests {
     /// an empty profile must survive rather than be confused with an absent one.
     #[test]
     fn an_empty_profile_round_trips() {
-        let granted =
-            decode_access_granted(&encode_access_granted(&AccessGranted::default()).unwrap())
-                .unwrap();
+        let granted = decode_access_granted(
+            encode_access_granted(&AccessGranted::default())
+                .unwrap()
+                .expose(),
+        )
+        .unwrap();
         assert_eq!(granted.profile, Profile::default());
     }
 
@@ -1558,19 +1567,23 @@ mod tests {
     #[test]
     fn an_ntlmv2_session_key_round_trips_on_access_granted() {
         let granted = decode_access_granted(
-            &encode_access_granted(&AccessGranted {
+            encode_access_granted(&AccessGranted {
                 session_id: 3,
                 profile: Profile::default(),
                 ntlmv2_session_key: Some(crate::ntlmv2::SessionKey([0x8d; 16])),
             })
-            .unwrap(),
+            .unwrap()
+            .expose(),
         )
         .unwrap();
         assert_eq!(granted.ntlmv2_session_key.unwrap().0, [0x8d; 16]);
 
-        let plain =
-            decode_access_granted(&encode_access_granted(&AccessGranted::default()).unwrap())
-                .unwrap();
+        let plain = decode_access_granted(
+            encode_access_granted(&AccessGranted::default())
+                .unwrap()
+                .expose(),
+        )
+        .unwrap();
         assert!(plain.ntlmv2_session_key.is_none());
     }
 
@@ -1588,7 +1601,9 @@ mod tests {
             },
             ntlmv2_session_key: None,
         })
-        .unwrap();
+        .unwrap()
+        .expose()
+        .to_vec();
 
         // Grow the profile in place, ahead of the empty session key's 4-byte
         // length, fixing up its own length and the enclosing body's.
@@ -1640,11 +1655,12 @@ mod tests {
     #[test]
     fn terminal_messages_round_trip() {
         let granted = decode_access_granted(
-            &encode_access_granted(&AccessGranted {
+            encode_access_granted(&AccessGranted {
                 session_id: 42,
                 ..Default::default()
             })
-            .unwrap(),
+            .unwrap()
+            .expose(),
         )
         .unwrap();
         assert_eq!(granted.session_id, 42);
@@ -1801,7 +1817,9 @@ mod tests {
                 session_id: 1,
                 ..Default::default()
             })
-            .unwrap(),
+            .unwrap()
+            .expose()
+            .to_vec(),
             encode_access_denied(&AccessDenied {
                 denial: Denial::Internal,
                 reason: "x".into(),

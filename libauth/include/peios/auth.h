@@ -64,7 +64,7 @@ typedef struct peios_auth_operation peios_auth_operation;
  * AuthenticationRequest.identifier is a UTF-8 username (identifier_type USERNAME).
  * Both AuthenticateRequest and LogonRequest embed it and set its size field.
  * supported_credentials is an OR of SUPPORT_* bits. required_credential_type
- * is PASSWORD, SSH_PUBLIC_KEY, MSCHAPV2, or zero to use source policy. Empty tty and
+ * is PASSWORD, SSH_PUBLIC_KEY, MSCHAPV2, NTLMV2, or zero to use source policy. Empty tty and
  * remote_host are absent. SSH binding fields are all absent or all present:
  * connection is 16 nonzero-as-a-whole bytes, session is 16..64 bytes, and
  * username is nonempty UTF-8. These describe the authorized live transport.
@@ -89,12 +89,20 @@ typedef struct peios_auth_operation peios_auth_operation;
  * This API does not install tokens, change process identity, launch programs,
  * or read credentials from a terminal. ABI-compatible additions preserve the
  * layouts and meanings here; published incompatible changes require a new SONAME.
- * ABI 5 is a coordinated unpublished development replacement retaining
- * libauth.so.1; rebuild all clients and use public PGSS framing version 5.
+ * ABI 6 is a coordinated unpublished development replacement retaining
+ * libauth.so.1; rebuild all clients and use public PGSS framing version 6.
  * MSCHAPV2 prompts carry a 16-byte authenticator challenge in parameters.
  * Answers carry peer-challenge[16] followed by NT-response[24]. A completed
  * MSCHAPV2 authentication view carries its 20-byte authenticator response;
  * the span is empty for other methods. It is not a reusable stored credential.
+ * NTLMV2 names no principal: the identifier is empty, NTLMV2 is required and
+ * is the only supported type. Its single prompt carries the authority's
+ * 8-byte server challenge; the answer is three u32-length-prefixed spans,
+ * UTF-16LE UserName, UTF-16LE DomainName and NtChallengeResponse, from the
+ * client's AUTHENTICATE message (PGSS 2.11). A completed NTLMV2 grant or
+ * authentication view carries the 16-byte SessionBaseKey in
+ * ntlmv2_session_key; the span is empty for other methods. Clear copies of it
+ * once the protocol session it signs has ended.
  */
 #define PEIOS_AUTH_WAIT 0
 #define PEIOS_AUTH_CLAIMS_NONE 0
@@ -127,9 +135,11 @@ typedef struct peios_auth_operation peios_auth_operation;
 #define PEIOS_AUTH_PASSWORD 1
 #define PEIOS_AUTH_SSH_PUBLIC_KEY 2
 #define PEIOS_AUTH_MSCHAPV2 3
+#define PEIOS_AUTH_NTLMV2 4
 #define PEIOS_AUTH_SUPPORT_PASSWORD 1
 #define PEIOS_AUTH_SUPPORT_SSH_PUBLIC_KEY 2
 #define PEIOS_AUTH_SUPPORT_MSCHAPV2 4
+#define PEIOS_AUTH_SUPPORT_NTLMV2 8
 #define PEIOS_AUTH_IDENTIFIER_USERNAME 1
 #define PEIOS_AUTH_LOGON_INTERACTIVE 2
 #define PEIOS_AUTH_LOGON_NETWORK 3

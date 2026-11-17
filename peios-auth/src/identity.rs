@@ -87,6 +87,8 @@ impl Client {
 pub struct Authenticated {
     /// Exchange-specific server proof, never an NT hash.
     pub mschapv2_authenticator_response: Option<[u8; 20]>,
+    /// The NTLM SessionBaseKey, exactly when NTLMv2 was verified.
+    pub ntlmv2_session_key: Option<super::SessionKey>,
     pub identity: Record,
     pub verified_credentials: super::Capabilities,
     pub absent_claims: Vec<String>,
@@ -106,6 +108,7 @@ impl core::fmt::Debug for Authenticated {
                     .as_ref()
                     .map(|_| "[redacted]"),
             )
+            .field("ntlmv2_session_key", &self.ntlmv2_session_key)
             .finish()
     }
 }
@@ -194,6 +197,7 @@ impl Operation {
                         Some(bytes.try_into().map_err(|_| invalid())?)
                     }
                 },
+                ntlmv2_session_key: super::session_key(&copy_bytes(view.ntlmv2_session_key))?,
                 identity: self.record(0)?,
                 verified_credentials: super::Capabilities(view.verified_credentials),
                 absent_claims,

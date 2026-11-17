@@ -551,7 +551,7 @@ Requires `Machine\Software\Lpsd StoreNtHashes` to be enabled. This is a maintena
 side effect, not another login stage. A failed save does not fail the
 authentication. Disabled backfill does not prevent creation on password
 set/change while storage is enabled. Existing Argon2 records cannot be
-converted without a verified password; MSCHAPv2 proofs do not supply it.
+converted without a verified password; MSCHAPv2 and NTLMv2 proofs do not supply it.
 
 --- machine\system\locale
 canonical: Machine\System\Locale

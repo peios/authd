@@ -38,6 +38,7 @@ fn all_permitted_coverage_survives_the_c_abi_and_owned_rust_result() {
                 &socket,
                 &wire::encode_authenticated(&wire::Authenticated {
                     mschapv2_success: None,
+                    ntlmv2_session_key: None,
                     user_sid: vec![1, 1, 0, 0, 0, 0, 0, 5, 18, 0, 0, 0],
                     canonical_name: "jack".into(),
                     verified_credentials: vec![wire::CredentialType::Password],
@@ -104,6 +105,7 @@ fn authenticated_results_are_owned_and_preserve_explicit_absence() {
             &socket,
             &wire::encode_authenticated(&wire::Authenticated {
                 mschapv2_success: None,
+                ntlmv2_session_key: None,
                 user_sid: vec![1, 1, 0, 0, 0, 0, 0, 5, 18, 0, 0, 0],
                 canonical_name: "jack".into(),
                 verified_credentials: vec![wire::CredentialType::Password],

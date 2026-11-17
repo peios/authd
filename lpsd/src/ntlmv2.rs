@@ -24,8 +24,9 @@ fn hmac_md5(key: &[u8], parts: &[&[u8]]) -> Zeroizing<[u8; 16]> {
 /// mapping where that is a single BMP character, and is otherwise unchanged.
 fn uppercase_utf16le(bytes: &[u8]) -> Zeroizing<Vec<u8>> {
     let mut out = Zeroizing::new(Vec::with_capacity(bytes.len()));
-    for unit in bytes.chunks_exact(2) {
-        let unit = u16::from_le_bytes([unit[0], unit[1]]);
+    // A validated answer has even length; there is no odd tail to drop.
+    for unit in bytes.as_chunks::<2>().0 {
+        let unit = u16::from_le_bytes(*unit);
         let upper = char::from_u32(u32::from(unit))
             .and_then(|c| {
                 let mut mapped = c.to_uppercase();

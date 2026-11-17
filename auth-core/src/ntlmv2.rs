@@ -86,12 +86,11 @@ impl Answer {
 
 /// Strict UTF-16LE: an odd length or an unpaired surrogate is malformed.
 fn utf16(bytes: &[u8]) -> Result<String, WireError> {
-    if bytes.len() % 2 != 0 {
+    let (units, odd) = bytes.as_chunks::<2>();
+    if !odd.is_empty() {
         return Err(WireError::UnknownValue);
     }
-    let units = bytes
-        .chunks_exact(2)
-        .map(|unit| u16::from_le_bytes([unit[0], unit[1]]));
+    let units = units.iter().map(|unit| u16::from_le_bytes(*unit));
     char::decode_utf16(units)
         .collect::<Result<String, _>>()
         .map_err(|_| WireError::UnknownValue)
