@@ -38,8 +38,11 @@ ssh-key = { version = "0.6.7", default-features = false, features = ["std", "ed2
 signature = "2"
 rsa = { version = "0.9.10", default-features = false, features = ["std"] }
 sha2 = { version = "0.10", features = ["oid"] }
-# Legacy primitives mandated by MSCHAPv2; confined to the credential source.
+# Legacy primitives mandated by MSCHAPv2 and NTLMv2; confined to the
+# credential source.
 md4 = "0.10"
+md-5 = "0.10"
+hmac = "0.12"
 sha1 = "0.10"
 des = { version = "0.8", features = ["zeroize"] }
 zeroize = { version = "1", features = ["derive"] }

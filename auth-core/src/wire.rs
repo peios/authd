@@ -1013,9 +1013,8 @@ pub fn decode_access_granted(buf: &[u8]) -> Result<AccessGranted, WireError> {
     // Nested rather than inlined, so the profile can grow a field without
     // displacing the session key appended after it.
     let profile = read_profile_body(&mut b.open()?)?;
-    let ntlmv2_session_key = crate::ntlmv2::decode_session_key(
-        b.bytes(crate::ntlmv2::SESSION_KEY_BYTES)?,
-    )?;
+    let ntlmv2_session_key =
+        crate::ntlmv2::decode_session_key(b.bytes(crate::ntlmv2::SESSION_KEY_BYTES)?)?;
     Ok(AccessGranted {
         session_id,
         profile,
@@ -1031,7 +1030,10 @@ pub fn encode_access_granted(granted: &AccessGranted) -> Result<Vec<u8>, WireErr
     write_profile_body(&mut w, &granted.profile)?;
     w.close(nested);
     w.bytes(
-        granted.ntlmv2_session_key.as_ref().map_or(&[], |key| &key.0),
+        granted
+            .ntlmv2_session_key
+            .as_ref()
+            .map_or(&[], |key| &key.0),
         crate::ntlmv2::SESSION_KEY_BYTES,
     )?;
     w.close(body);

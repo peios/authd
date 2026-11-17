@@ -940,7 +940,10 @@ pub fn encode_assertion(conversation: u64, assertion: &Assertion) -> Result<Vec<
         20,
     )?;
     w.bytes(
-        assertion.ntlmv2_session_key.as_ref().map_or(&[], |key| &key.0),
+        assertion
+            .ntlmv2_session_key
+            .as_ref()
+            .map_or(&[], |key| &key.0),
         crate::ntlmv2::SESSION_KEY_BYTES,
     )?;
     w.close(body);
@@ -1424,9 +1427,8 @@ mod tests {
     }
 
     fn ntlmv2_answer() -> Secret {
-        let utf16le = |text: &str| -> Vec<u8> {
-            text.encode_utf16().flat_map(u16::to_le_bytes).collect()
-        };
+        let utf16le =
+            |text: &str| -> Vec<u8> { text.encode_utf16().flat_map(u16::to_le_bytes).collect() };
         let mut nt_response = vec![7; crate::ntlmv2::PROOF_BYTES];
         nt_response.extend_from_slice(&[1, 1]);
         nt_response.resize(crate::ntlmv2::MIN_NT_RESPONSE_BYTES, 0);
@@ -1457,9 +1459,15 @@ mod tests {
         let decoded = decode_authenticate(bytes.expose()).unwrap();
         assert!(decoded.start.identifier.is_empty());
         let proof = decoded.presented.expect("the proof survives");
-        assert_eq!(proof.challenge, [0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef]);
+        assert_eq!(
+            proof.challenge,
+            [0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef]
+        );
         assert_eq!(proof.ntlmv2().unwrap().user_name().unwrap(), "jack");
-        assert_eq!(format!("{proof:?}"), "Presented { credential_type: Ntlmv2, .. }");
+        assert_eq!(
+            format!("{proof:?}"),
+            "Presented { credential_type: Ntlmv2, .. }"
+        );
     }
 
     /// A proof is only for the identity-in-answer type its request requires,

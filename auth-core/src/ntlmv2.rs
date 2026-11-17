@@ -221,6 +221,9 @@ mod tests {
         assert!(validate_session_key(Some(CredentialType::Password), &key).is_err());
         assert!(validate_session_key(Some(CredentialType::Ntlmv2), &None).is_err());
         assert!(validate_session_key(None, &None).is_ok());
-        assert_eq!(format!("{:?}", key.unwrap()), "Ntlmv2SessionKey([redacted])");
+        assert_eq!(
+            format!("{:?}", key.unwrap()),
+            "Ntlmv2SessionKey([redacted])"
+        );
     }
 }

@@ -44,7 +44,7 @@ field: object.account.sid                   optional
   The account the credential was checked for. Absent when lpsd holds no
   account by the name it was asked about.
 field: operation.name                       required
-  values: password | ssh-key | mschapv2 | none
+  values: password | ssh-key | mschapv2 | ntlmv2 | none
   closed: false
   What was checked. `none` is an account whose policy is that it signs in
   with no credential, asserted without asking for one.

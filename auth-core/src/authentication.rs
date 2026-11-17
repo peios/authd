@@ -47,8 +47,14 @@ impl AuthenticationRequest {
         // Identity-in-answer (PGSS §2.11): the answer names the principal, so
         // the request names nobody, and requires that type and no other.
         let identity_in_answer = |t: &CredentialType| t.identity_in_answer();
-        if (self.supported_credential_types.iter().any(identity_in_answer)
-            || self.required_credential_type.as_ref().is_some_and(identity_in_answer))
+        if (self
+            .supported_credential_types
+            .iter()
+            .any(identity_in_answer)
+            || self
+                .required_credential_type
+                .as_ref()
+                .is_some_and(identity_in_answer))
             && (!self.identifier.is_empty()
                 || self.supported_credential_types.len() != 1
                 || self.required_credential_type != Some(self.supported_credential_types[0]))
