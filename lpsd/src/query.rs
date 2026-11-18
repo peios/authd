@@ -186,10 +186,17 @@ fn principal_entry(store: &Store, record: &Record, fields: Fields) -> psi::Query
         // would make two components' defaults able to disagree.
         values.push(Value::LogonTypes(record.permitted_logon_types));
     }
-    // A principal is not a group, so its membership list and its description
     if fields.contains(Fields::CREDENTIAL_BINDINGS) {
         values.push(Value::CredentialBindings(
-            record.password_binding.into_iter().collect(),
+            record
+                .password_binding
+                .filter(|_| {
+                    store
+                        .credential_policy(&record.name)
+                        .is_ok_and(|p| p.password())
+                })
+                .into_iter()
+                .collect(),
         ));
     }
     // A principal is not a group, so its membership list and its description
@@ -204,7 +211,6 @@ fn principal_entry(store: &Store, record: &Record, fields: Fields) -> psi::Query
         }
     }
 
-    let _ = store;
     psi::QueryEntry {
         outcome: Outcome::Found,
         sid: record.sid.as_ref().as_bytes().to_vec(),
@@ -258,6 +264,7 @@ fn group_entry(store: &Store, record: &GroupRecord, fields: Fields) -> psi::Quer
         Fields::CLAIMS,
         Fields::ENABLED,
         Fields::LOGON_TYPES,
+        Fields::CREDENTIAL_BINDINGS,
     ] {
         if fields.contains(field) {
             withheld.push(Withheld {
@@ -554,6 +561,34 @@ fn entry_size(entry: &psi::QueryEntry) -> usize {
 mod tests {
     use super::*;
     use crate::store::{NewPrincipal, well_known_group};
+
+    #[test]
+    fn current_bindings_distinguish_disabled_credential_policy_from_unknown_metadata() {
+        let mut store = Store::provision().unwrap();
+        store.add(NewPrincipal::named("user"), Some(b"pw")).unwrap();
+        let binding = store.record("user").unwrap().password_binding.unwrap();
+        let read = |store: &Store| {
+            principal_entry(
+                store,
+                &store.record("user").unwrap(),
+                Fields::CREDENTIAL_BINDINGS,
+            )
+            .values
+        };
+        assert_eq!(read(&store), vec![Value::CredentialBindings(vec![binding])]);
+        store
+            .set_credential_policy("user", auth_core::credential::Policy::Denied)
+            .unwrap();
+        assert_eq!(read(&store), vec![Value::CredentialBindings(vec![])]);
+        assert_eq!(
+            store.record("user").unwrap().password_binding,
+            Some(binding)
+        );
+        store
+            .set_credential_policy("user", auth_core::credential::Policy::Password)
+            .unwrap();
+        assert_eq!(read(&store), vec![Value::CredentialBindings(vec![binding])]);
+    }
 
     fn seeded() -> Store {
         let mut store = Store::provision().expect("must provision");

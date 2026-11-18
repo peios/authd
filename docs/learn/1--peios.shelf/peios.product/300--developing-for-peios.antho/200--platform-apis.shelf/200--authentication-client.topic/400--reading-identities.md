@@ -74,6 +74,12 @@ or unreported field means unknown; it does not establish credential deletion.
 References are scoped to the authoritative principal SID. Neither part is a
 credential, token or proof of possession.
 
+Local queries list currently eligible password bindings. Disabling the
+password credential policy omits that binding from a present list without
+destroying its stored revision. An explicitly empty list is authoritative;
+an unreported or restricted list is unknown. NT-storage policy alone does not
+remove the underlying password binding.
+
 A successful Authenticate result can disclose the binding that actually
 verified. Retain it with the verified SID. Later SID lookups can detect a
 replacement; they cannot advance the revision that a session proved. Only
