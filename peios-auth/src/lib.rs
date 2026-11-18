@@ -442,6 +442,16 @@ impl Operation {
             timeout_ms: raw.timeout_ms,
         })
     }
+    /// Authority-issued operation identifier for diagnostic correlation only.
+    /// Absent until received, or when unsupported/inconsistent. Never use it
+    /// as an authentication proof or an access-control input.
+    pub fn operation_guid(&self) -> Option<[u8; 16]> {
+        // SAFETY: read initializes output while the operation is live/immutable.
+        let raw = read(|out| unsafe { sys::peios_auth_operation_guid(self.handle.as_ptr(), out) })
+            .ok()?;
+        let bytes = copy_bytes(raw);
+        bytes.as_slice().try_into().ok()
+    }
     /// Cancel locally. A submitted mutation can still have taken effect.
     pub fn cancel(&mut self) {
         // SAFETY: exclusive access to the uniquely owned operation.

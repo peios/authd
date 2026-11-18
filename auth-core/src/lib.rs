@@ -83,6 +83,7 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 
 pub mod authentication;
+pub mod correlation;
 pub mod claim;
 pub mod mschapv2;
 pub mod ntlmv2;

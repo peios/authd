@@ -437,6 +437,10 @@ pub fn encode_authenticated(result: &Authenticated) -> Result<Vec<u8>, WireError
 
 pub fn decode_authenticated(buf: &[u8]) -> Result<Authenticated, WireError> {
     let mut r = frame::open_body(&wire::FRAMING, buf, MSG_AUTHENTICATED)?;
+    read_authenticated_body(&mut r)
+}
+
+pub(crate) fn read_authenticated_body(r: &mut Reader<'_>) -> Result<Authenticated, WireError> {
     let user_sid = r.bytes(frame::MAX_SID_BYTES)?.to_vec();
     let canonical_name = r.string(crate::ident::MAX_NAME_BYTES)?.to_owned();
     let verified_credentials = r
@@ -450,8 +454,8 @@ pub fn decode_authenticated(buf: &[u8]) -> Result<Authenticated, WireError> {
         _ => return Err(WireError::UnknownValue),
     };
     let claim_coverage = ClaimCoverage::from_u8(r.u8()?)?;
-    let claims = claim::read_claims(&mut r)?;
-    let absent_claims = read_names(&mut r)?;
+    let claims = claim::read_claims(r)?;
+    let absent_claims = read_names(r)?;
     let mschapv2_success = crate::mschapv2::decode_success(r.bytes(20)?)?;
     let ntlmv2_session_key =
         crate::ntlmv2::decode_session_key(r.bytes(crate::ntlmv2::SESSION_KEY_BYTES)?)?;

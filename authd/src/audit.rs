@@ -81,6 +81,10 @@ impl Record {
         self.set(path, Value::Bin(sid.as_bytes().to_vec()))
     }
 
+    pub fn bin(&mut self, path: &'static str, value: &[u8]) -> &mut Self {
+        self.set(path, Value::Bin(value.to_vec()))
+    }
+
     /// `outcome.success`, and `outcome.reason` when it failed.
     pub fn outcome(&mut self, reason: Option<&str>) -> &mut Self {
         self.bool("outcome.success", reason.is_none());

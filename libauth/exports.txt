@@ -18,6 +18,7 @@ peios_auth_operation_destroy
 peios_auth_operation_ended
 peios_auth_operation_error
 peios_auth_operation_grant
+peios_auth_operation_guid
 peios_auth_operation_identity
 peios_auth_operation_incomplete_source
 peios_auth_operation_message

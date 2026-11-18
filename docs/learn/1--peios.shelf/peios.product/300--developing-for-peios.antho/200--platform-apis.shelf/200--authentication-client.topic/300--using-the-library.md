@@ -79,6 +79,20 @@ owned Rust data.
 
 ## Check the result
 
+For Authenticate and Logon, `peios_auth_operation_guid()` returns a borrowed
+authority operation identifier after a reply supplies it. The Rust accessor
+is `Operation::operation_guid()`. An empty C span or Rust `None` means that
+the identifier is unavailable. Copy the C span before mutating the operation.
+
+The identifier links to `object.authentication.operation.guid` in authority
+events. It is not proof of identity or permission. Older authorities can omit
+the optional metadata. Malformed or inconsistent metadata removes the
+correlation link without changing the credential or token result.
+
+The getter is an additive symbol with unchanged ABI 6 layouts. A program
+using it needs a libauth build exporting the symbol. Existing clients remain
+compatible with that library, and the public framing remains PGSS version 6.
+
 A completed permission query means that authd permitted the proposed action at
 the time of the query. A completed logon provides a token and session profile.
 Neither result changes the calling process's identity.

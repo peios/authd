@@ -91,6 +91,12 @@ typedef struct peios_auth_operation peios_auth_operation;
  * layouts and meanings here; published incompatible changes require a new SONAME.
  * ABI 6 is a coordinated unpublished development replacement retaining
  * libauth.so.1; rebuild all clients and use public PGSS framing version 6.
+ * The additive peios_auth_operation_guid accessor returns a borrowed 16-byte
+ * authority operation GUID, or an empty span until one is received. It works
+ * for Authenticate and Logon, including prompt and failure states. Older
+ * authorities may omit it. It is diagnostic correlation, never authority.
+ * Programs using this symbol require a libauth build exporting it; existing
+ * ABI 6 clients and C layouts are unchanged.
  * MSCHAPV2 prompts carry a 16-byte authenticator challenge in parameters.
  * Answers carry peer-challenge[16] followed by NT-response[24]. A completed
  * MSCHAPV2 authentication view carries its 20-byte authenticator response;

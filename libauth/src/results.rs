@@ -11,6 +11,31 @@ use crate::engine::{Operation, Output, State};
 // the identity protocol's preserved withheld-reason discriminants.
 const FIELD_PRESENT: i32 = 5;
 
+/// Borrow the authority-issued diagnostic operation GUID, or an empty span.
+/// It is available after a reply carries it, including prompt and denial
+/// states. It grants no authority and older authorities may omit it.
+///
+/// # Safety
+/// Operation is live and immutable; out is aligned writable storage disjoint
+/// from it. The span expires at the next mutation or destruction.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn peios_auth_operation_guid(
+    operation: *const Operation,
+    out: *mut Bytes,
+) -> i32 {
+    let Some(operation) = (unsafe { operation.as_ref() }) else {
+        return -1;
+    };
+    let value = bytes(
+        operation
+            .operation_guid
+            .as_ref()
+            .map_or(&[], |v| v.as_slice()),
+    );
+    // SAFETY: required by the accessor's caller contract.
+    unsafe { write(out, value) }
+}
+
 fn record(operation: &Operation, index: usize) -> Option<&ident::Record> {
     match &operation.state {
         State::Complete(Output::Lookup(reply)) if index == 0 => reply.record.as_ref(),

@@ -65,6 +65,7 @@ mod audit;
 mod auth_access;
 mod change;
 mod conversation;
+mod correlation;
 mod derive;
 mod domain;
 mod end;

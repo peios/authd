@@ -53,7 +53,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
-use auth_core::transport::{recv_message, send_message, send_message_with_fd};
+use auth_core::transport::recv_message;
+use crate::correlation::{send_message, send_message_with_fd};
 use auth_core::wire::{
     self, AccessDenied, AccessGranted, CredentialChangeStart, CredentialEnrollStart,
     CredentialRequest, CredentialResponse, CredentialType, Denial, LogonStart, LogonType,
@@ -234,6 +235,7 @@ fn expired(deadline: Instant) -> bool {
 }
 
 fn run(registry: &Registry, stream: &UnixStream, deadline: Instant) -> io::Result<()> {
+    let _correlation = crate::correlation::Scope::new();
     // Who is actually calling? From the socket, never from the message.
     let peer = match peer::identity(stream) {
         Ok(peer) => peer,
@@ -350,7 +352,7 @@ struct Attempt {
 
 impl Attempt {
     fn new(peer: &Sid, start: &LogonStart) -> Self {
-        let mut record = audit::Record::new();
+        let mut record = crate::correlation::record();
         record.sid("source.token.sid", peer.as_ref());
         // The originator's word for where the logon comes from, kept only when
         // it is an address: `source.address` is one, and `login -h` will pass
@@ -580,7 +582,7 @@ fn authenticate(
     start: &wire::AuthenticateStart,
     deadline: Instant,
 ) -> io::Result<()> {
-    let mut record = audit::Record::new();
+    let mut record = crate::correlation::record();
     record.sid("source.token.sid", peer.as_ref());
     let mut attempt = Attempt {
         event: "authd.authentication.attempted",

@@ -112,6 +112,50 @@ struct Server {
     path: PathBuf,
     thread: Option<JoinHandle<()>>,
 }
+
+#[test]
+fn authority_operation_ids_survive_denial_and_inconsistent_metadata_grants_nothing() {
+    for changed in [false, true] {
+        let server = Server::new(move |socket| {
+            recv_message(&wire::FRAMING, &socket).unwrap();
+            let prompt = auth_core::correlation::with_operation_guid(&prompts(), &[7; 16]).unwrap();
+            send_message(&socket, prompt.expose()).unwrap();
+            recv_message(&wire::FRAMING, &socket).unwrap();
+            let denied = wire::encode_access_denied(&wire::AccessDenied {
+                denial: wire::Denial::AuthenticationFailed,
+                reason: "not accepted".into(),
+            })
+            .unwrap();
+            let reply = auth_core::correlation::with_operation_guid(
+                &denied,
+                &[if changed { 9 } else { 7 }; 16],
+            )
+            .unwrap();
+            send_message(&socket, reply.expose()).unwrap();
+        });
+        unsafe {
+            let client = server.client(1000);
+            let operation = peios_auth_logon_begin(client, &start());
+            let mut guid = bytes(&[]);
+            assert_eq!(peios_auth_operation_guid(operation, &mut guid), 0);
+            assert_eq!(guid.len, 0);
+            assert_eq!(peios_auth_operation_wait(operation), 1);
+            assert_eq!(peios_auth_operation_guid(operation, &mut guid), 0);
+            assert_eq!(std::slice::from_raw_parts(guid.data, guid.len), &[7; 16]);
+            let answer = Answer {
+                credential_ref: 77,
+                data: bytes(b"wrong"),
+            };
+            assert_eq!(peios_auth_operation_respond(operation, 1, &answer, 1), 0);
+            assert_eq!(peios_auth_operation_wait(operation), 3);
+            assert_eq!(peios_auth_operation_guid(operation, &mut guid), 0);
+            assert_eq!(guid.len, if changed { 0 } else { 16 });
+            assert_eq!(peios_auth_operation_take_token(operation), -1);
+            peios_auth_operation_destroy(operation);
+            peios_auth_client_destroy(client);
+        }
+    }
+}
 impl Server {
     fn new(serve: impl FnOnce(UnixStream) + Send + 'static) -> Self {
         let path = PathBuf::from(format!(

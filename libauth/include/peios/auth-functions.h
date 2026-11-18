@@ -51,6 +51,7 @@ int32_t peios_auth_operation_grant(const peios_auth_operation *operation,
 int32_t peios_auth_operation_take_token(peios_auth_operation *operation);
 int32_t peios_auth_operation_ended(const peios_auth_operation *operation,
                                    peios_auth_ended_view *out);
+int32_t peios_auth_operation_guid(const peios_auth_operation *operation, peios_auth_bytes *out);
 int32_t peios_auth_operation_authentication(const peios_auth_operation *operation,
                                             peios_auth_authentication_view *out);
 int32_t peios_auth_authentication_absent_claim(const peios_auth_operation *operation, size_t index,

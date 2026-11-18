@@ -80,6 +80,8 @@ pub(crate) enum State {
 pub(crate) struct Operation {
     pub state: State,
     pub round: u64,
+    pub operation_guid: Option<[u8; 16]>,
+    correlation_invalid: bool,
     connection: Option<Connection>,
     kind: Kind,
     capabilities: Vec<wire::CredentialType>,
@@ -121,6 +123,8 @@ impl Operation {
             capabilities,
             authentication,
             round: 0,
+            operation_guid: None,
+            correlation_invalid: false,
             timeout,
             deadline: Instant::now() + timeout,
         }
@@ -226,6 +230,18 @@ impl Operation {
 
     fn accept(&mut self, message: &[u8], token: Option<OwnedFd>) -> Result<State, WireError> {
         let (message_type, _) = auth_core::frame::decode_header(&self.kind.framing(), message)?;
+        if matches!(self.kind, Kind::Logon | Kind::Authenticate) && !self.correlation_invalid {
+            match auth_core::correlation::reply_operation_guid(message) {
+                Ok(Some(guid)) if self.operation_guid.is_none_or(|old| old == guid) => {
+                    self.operation_guid = Some(guid);
+                }
+                Ok(None) => {}
+                _ => {
+                    self.operation_guid = None;
+                    self.correlation_invalid = true;
+                }
+            }
+        }
         let granted = matches!(self.kind, Kind::Logon | Kind::Attest)
             && message_type == wire::MSG_ACCESS_GRANTED;
         if token.is_some() != granted {

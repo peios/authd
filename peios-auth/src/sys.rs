@@ -79,6 +79,7 @@ unsafe extern "C" {
     pub fn peios_auth_operation_grant(operation: *const Operation, out: *mut GrantView) -> i32;
     pub fn peios_auth_operation_take_token(operation: *mut Operation) -> i32;
     pub fn peios_auth_operation_ended(operation: *const Operation, out: *mut EndedView) -> i32;
+    pub fn peios_auth_operation_guid(operation: *const Operation, out: *mut Bytes) -> i32;
     pub fn peios_auth_operation_authentication(
         operation: *const Operation,
         out: *mut AuthenticationView,

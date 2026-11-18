@@ -9,6 +9,16 @@ principal source. It is bound into the verified NTLMv2 proof, which is why
 it is recorded only on success; on failure it is unverified input, like the
 account name.
 
+--- field object.authentication.operation.guid
+type: bin.guid
+
+The authority-issued identifier of one authentication or logon operation.
+
+It correlates PGSS reply metadata with authority events. It is not a token,
+credential, logon session or authorization input. It is absent if diagnostic
+identifier generation was unavailable. An authority reply can omit metadata
+when its message-size bound leaves no space.
+
 --- event authd.logon.attempted
 tier: essential
 gating: decoded logon requests reaching authority handling
@@ -34,6 +44,7 @@ a usable session.
 field: source.token.sid                     required
   The originator: the principal of the process on the other end of
   `/run/logon.sock` that asked for the logon.
+field: object.authentication.operation.guid  optional
 field: source.address                       optional
   The remote peer the originator says the logon is for, where it named one
   and it is an IP address. It is the originator's word, as `login -h` or
@@ -84,6 +95,7 @@ The requested username, credentials and disclosed claims are not recorded.
 
 field: source.token.sid                     required
   The connected caller's kernel-verified user SID.
+field: object.authentication.operation.guid  optional
 field: object.account.sid                   when outcome.success == true
   The authenticated principal's validated SID.
 field: object.account.domain                optional
