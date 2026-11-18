@@ -53,8 +53,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
-use auth_core::transport::recv_message;
 use crate::correlation::{send_message, send_message_with_fd};
+use auth_core::transport::recv_message;
 use auth_core::wire::{
     self, AccessDenied, AccessGranted, CredentialChangeStart, CredentialEnrollStart,
     CredentialRequest, CredentialResponse, CredentialType, Denial, LogonStart, LogonType,
@@ -660,7 +660,11 @@ fn authenticate(
             }
         };
         // No SCM_RIGHTS, token creation, session creation or local provisioning.
-        send_message(stream, &message)?;
+        crate::correlation::send_authenticated(
+            stream,
+            &message,
+            assertion.credential_binding.as_ref(),
+        )?;
         attempt
             .record
             .sid("object.account.sid", identity.user.as_ref());
@@ -836,7 +840,7 @@ pub(crate) fn relay(
                         &format!("The authority could not complete the {noun}."),
                     );
                 }
-                return Ok(Ok(Ended::Asserted(assertion)));
+                return Ok(Ok(Ended::Asserted(*assertion)));
             }
 
             Inbound::Changed => {

@@ -182,6 +182,14 @@ typedef struct peios_auth_operation peios_auth_operation;
 #define PEIOS_AUTH_ENABLED (1u << 8)
 #define PEIOS_AUTH_LOGON_TYPES (1u << 9)
 #define PEIOS_AUTH_DESCRIPTION (1u << 10)
+#define PEIOS_AUTH_CREDENTIAL_BINDINGS (1u << 11)
+/* Opaque, source-owned metadata scoped to a verified SID. These are not proof.
+ * Count and part getters require the matching additive libauth exports. Each
+ * borrowed part is 16 bytes and lives until the operation is released. Only
+ * successful fresh authentication establishes a proved revision; lookup does
+ * not. Lookup disclosure requires the existing Authenticate right. */
+#define PEIOS_AUTH_CREDENTIAL_REFERENCE 0
+#define PEIOS_AUTH_CREDENTIAL_REVISION 1
 #define PEIOS_AUTH_CLAIM_INT64 1
 #define PEIOS_AUTH_CLAIM_UINT64 2
 #define PEIOS_AUTH_CLAIM_STRING 3

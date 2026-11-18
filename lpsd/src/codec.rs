@@ -34,10 +34,11 @@
 /// `PEIOSLPS` — Peios Local Principal Store.
 const MAGIC: [u8; 8] = *b"PEIOSLPS";
 
-/// The layout written. 6 adds optional NT material to framed verifiers.
-pub const VERSION: u16 = 6;
+/// The layout written. 7 persists credential references and revisions.
+pub const VERSION: u16 = 7;
 /// The oldest layout read. A store of format 4 loads, and is written as
-/// [`VERSION`] at the next change; anything older must be reprovisioned.
+/// [`VERSION`] atomically before the loaded store is exposed. Older formats
+/// must be explicitly migrated or restored; never silently reprovision them.
 pub const OLDEST_READABLE_VERSION: u16 = 4;
 
 /// `magic[8] | version u16 | body_len u32 | body_crc u32`

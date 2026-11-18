@@ -73,7 +73,7 @@ pub enum Inbound {
     /// Ask the user for something. Relayed outward to the client verbatim.
     Request(CredentialRequest),
     /// This is who they are. authd derives a token from it.
-    Assert(psi::Assertion),
+    Assert(Box<psi::Assertion>),
     /// Refused, with a reason to relay.
     Refuse(psi::Refusal),
     /// The credential a change conversation asked about has been changed. The
@@ -1194,7 +1194,9 @@ fn changed_here(source: &Arc<Source>, changed: &psi::Changed) {
 fn decode(source: &Arc<Source>, envelope: &psi::Envelope, buf: &[u8]) -> Option<Inbound> {
     let decoded = match envelope.msg_type {
         psi::MSG_CREDENTIAL_REQUEST => psi::decode_credential_request(buf).map(Inbound::Request),
-        psi::MSG_ASSERTION => psi::decode_assertion(buf).map(Inbound::Assert),
+        psi::MSG_ASSERTION => psi::decode_assertion(buf)
+            .map(Box::new)
+            .map(Inbound::Assert),
         psi::MSG_REFUSAL => psi::decode_refusal(buf).map(Inbound::Refuse),
         psi::MSG_QUERY_RESULT => psi::decode_query_result(buf).map(Inbound::Results),
         psi::MSG_ENUMERATE_RESULT => psi::decode_enumerate_result(buf).map(Inbound::Page),
@@ -1225,8 +1227,8 @@ fn decode(source: &Arc<Source>, envelope: &psi::Envelope, buf: &[u8]) -> Option<
 
 #[cfg(test)]
 mod tests {
-    use auth_core::wire::LogonStart;
     use super::*;
+    use auth_core::wire::LogonStart;
 
     fn sid(text: &str) -> Sid {
         text.parse().expect("must parse")
@@ -1428,13 +1430,13 @@ mod tests {
 
         source.deliver(
             b.id,
-            Inbound::Assert(psi::Assertion {
+            Inbound::Assert(Box::new(psi::Assertion {
                 authenticated_credential_type: None,
 
                 user_sid: vec![1, 1, 0, 0, 0, 0, 0, 5, 18, 0, 0, 0],
                 canonical_name: "jack".into(),
                 ..psi::Assertion::default()
-            }),
+            })),
         );
 
         assert!(matches!(

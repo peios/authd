@@ -84,6 +84,7 @@
 
 pub mod authentication;
 pub mod correlation;
+pub mod credential_binding;
 pub mod claim;
 pub mod mschapv2;
 pub mod ntlmv2;

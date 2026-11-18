@@ -2,12 +2,12 @@
 //!
 //! It contains no identity, authority or credential material. Scope restoration
 //! prevents accidental reuse when tests or a future worker serve another peer.
+use crate::audit::Record;
 use std::{
     cell::Cell,
     io,
     os::{fd::BorrowedFd, unix::net::UnixStream},
 };
-use crate::audit::Record;
 
 thread_local! { static CURRENT: Cell<Option<[u8;16]>> = const { Cell::new(None) }; }
 pub(crate) struct Scope(Option<[u8; 16]>);
@@ -52,6 +52,20 @@ pub(crate) fn send_message(stream: &UnixStream, message: &[u8]) -> io::Result<()
     let decorated = decorate(message);
     // Diagnostic size/randomness failures never change the authentication result.
     auth_core::transport::send_message(stream, decorated.as_ref().map_or(message, |v| v.expose()))
+}
+
+pub(crate) fn send_authenticated(
+    stream: &UnixStream,
+    message: &[u8],
+    binding: Option<&auth_core::credential_binding::CredentialBinding>,
+) -> io::Result<()> {
+    let decorated = decorate(message);
+    let message = decorated.as_ref().map_or(message, |v| v.expose());
+    let bound = binding
+        .map(|binding| auth_core::credential_binding::with_authenticated_binding(message, binding))
+        .transpose()
+        .map_err(|_| io::Error::other("invalid authenticated credential metadata"))?;
+    auth_core::transport::send_message(stream, bound.as_ref().map_or(message, |v| v.expose()))
 }
 pub(crate) fn send_message_with_fd(
     stream: &UnixStream,

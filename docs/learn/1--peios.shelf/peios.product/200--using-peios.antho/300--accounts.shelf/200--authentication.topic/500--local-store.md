@@ -141,11 +141,17 @@ either view.
 
 ## Format compatibility
 
-The authd 0.0.24 source reads store formats 4 through 6 and writes format 6.
+The credential-binding source reads formats 4 through 7 and writes format 7.
 Format 4 loads with empty group descriptions. Older password records load
-without NT material; the next successful save writes format 6. This is a
-specific compatibility range, not a promise that
-every release can read its predecessor's store.
+without NT material. Each password has an opaque reference and revision;
+replacement retains its reference and rotates its revision. NT-hash backfill,
+purging NT material, account enablement and metadata edits do not rotate it.
+
+Loading an older format assigns these bindings and atomically saves format 7
+before exposing the store. A failed migration prevents startup. This is a
+specific compatibility range, not a promise that every release can read its
+predecessor's store. Preserve an offline copy before upgrade: older builds
+cannot read format 7.
 
 Check format compatibility before replacing lpsd with an older build. Preserve
 the original store and its security metadata during any planned upgrade or

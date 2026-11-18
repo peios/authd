@@ -4,9 +4,9 @@ use std::os::fd::OwnedFd;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use auth_core::{Secret, ident, lps, wire};
-use auth_core::frame::{Framing, WireError};
 use crate::connection::Connection;
+use auth_core::frame::{Framing, WireError};
+use auth_core::{Secret, ident, lps, wire};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Kind {
@@ -311,6 +311,14 @@ impl Operation {
                 }
                 if result.claim_coverage != wire::ClaimCoverage::None {
                     values.push(ident::Value::Claims(result.claims));
+                }
+                if let Some(binding) =
+                    auth_core::credential_binding::authenticated_binding(message)?
+                {
+                    if result.verified_credentials.is_empty() {
+                        return Err(WireError::UnknownValue);
+                    }
+                    values.push(ident::Value::CredentialBindings(vec![binding]));
                 }
                 Output::Authenticated(AuthenticationOutput {
                     mschapv2_success: result.mschapv2_success,

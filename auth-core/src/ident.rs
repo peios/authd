@@ -216,13 +216,15 @@ impl Fields {
     /// What a group is for, in a person's words. A group without one answers
     /// it empty; a principal has none, and it is withheld as absent.
     pub const DESCRIPTION: Fields = Fields(1 << 10);
+    /// Source-owned credential references and current revisions; no proof.
+    pub const CREDENTIAL_BINDINGS: Fields = Fields(1 << 11);
 
     /// Everything this build implements.
     ///
     /// A peer may set bits outside this; they are ignored rather than refused,
     /// which is the exception to the closed-enum rule that the module docs set
     /// out.
-    pub const KNOWN: Fields = Fields(0x07ff);
+    pub const KNOWN: Fields = Fields(0x0fff);
 
     /// What a `passwd` record needs, in one request.
     pub const PASSWD: Fields = Fields(
@@ -311,6 +313,7 @@ pub enum Value {
     Enabled(bool),
     LogonTypes(crate::wire::LogonTypes),
     Description(String),
+    CredentialBindings(Vec<crate::credential_binding::CredentialBinding>),
 }
 
 impl Value {
@@ -328,6 +331,7 @@ impl Value {
             Self::Enabled(_) => Fields::ENABLED,
             Self::LogonTypes(_) => Fields::LOGON_TYPES,
             Self::Description(_) => Fields::DESCRIPTION,
+            Self::CredentialBindings(_) => Fields::CREDENTIAL_BINDINGS,
         }
     }
 }
@@ -548,6 +552,21 @@ fn write_value(w: &mut Writer, value: &Value) -> Result<(), WireError> {
         Value::Enabled(enabled) => w.u8(u8::from(*enabled)),
         Value::LogonTypes(types) => w.u32(types.bits()),
         Value::Description(text) => w.string(text, MAX_DESCRIPTION_BYTES)?,
+        Value::CredentialBindings(bindings) => {
+            w.count(bindings.len(), crate::credential_binding::MAX_BINDINGS)?;
+            for (i, binding) in bindings.iter().enumerate() {
+                binding.validate()?;
+                if bindings[..i]
+                    .iter()
+                    .any(|old| old.reference == binding.reference)
+                {
+                    return Err(WireError::UnknownValue);
+                }
+                let entry = w.open();
+                w.bytes(&binding.encode(), crate::credential_binding::BINDING_BYTES)?;
+                w.close(entry);
+            }
+        }
     }
     w.close(at);
     Ok(())
@@ -567,6 +586,22 @@ fn read_value(r: &mut Reader<'_>, field: Fields) -> Result<Option<Value>, WireEr
         Fields::ENABLED => Value::Enabled(b.u8()? != 0),
         Fields::LOGON_TYPES => Value::LogonTypes(crate::wire::LogonTypes(b.u32()?)),
         Fields::DESCRIPTION => Value::Description(b.string(MAX_DESCRIPTION_BYTES)?.to_owned()),
+        Fields::CREDENTIAL_BINDINGS => {
+            let bindings = b.array(crate::credential_binding::MAX_BINDINGS, |r| {
+                crate::credential_binding::CredentialBinding::decode(
+                    r.bytes(crate::credential_binding::BINDING_BYTES)?,
+                )
+            })?;
+            for (i, binding) in bindings.iter().enumerate() {
+                if bindings[..i]
+                    .iter()
+                    .any(|old| old.reference == binding.reference)
+                {
+                    return Err(WireError::UnknownValue);
+                }
+            }
+            Value::CredentialBindings(bindings)
+        }
         // A bit this build does not implement. Its value was length-framed, so
         // `open` has already stepped over it and the fields after it are intact.
         _ => return Ok(None),
@@ -1117,10 +1152,50 @@ mod tests {
     #[test]
     fn field_bits_iterate_in_ascending_order() {
         let bits: Vec<u32> = Fields::KNOWN.iter().map(|f| f.0).collect();
-        assert_eq!(bits.len(), 11);
+        assert_eq!(bits.len(), 12);
         assert!(bits.windows(2).all(|w| w[0] < w[1]));
         assert_eq!(bits[0], Fields::UNIX_ID.0);
-        assert_eq!(*bits.last().unwrap(), Fields::DESCRIPTION.0);
+        assert_eq!(*bits.last().unwrap(), Fields::CREDENTIAL_BINDINGS.0);
+    }
+
+    #[test]
+    fn credential_bindings_are_bounded_and_references_are_unique() {
+        let binding = crate::credential_binding::CredentialBinding {
+            reference: [1; 16],
+            revision: [2; 16],
+        };
+        let mut record = record();
+        record.values.push(Value::CredentialBindings(vec![binding]));
+        let reply = LookupReply {
+            tag: 7,
+            outcome: Outcome::Found,
+            record: Some(record.clone()),
+        };
+        assert_eq!(
+            decode_lookup_reply(&encode_lookup_reply(&reply).unwrap()).unwrap(),
+            reply
+        );
+        for invalid in [
+            vec![binding; 2],
+            vec![binding; crate::credential_binding::MAX_BINDINGS + 1],
+            vec![crate::credential_binding::CredentialBinding {
+                reference: [0; 16],
+                ..binding
+            }],
+        ] {
+            record
+                .values
+                .retain(|v| v.field() != Fields::CREDENTIAL_BINDINGS);
+            record.values.push(Value::CredentialBindings(invalid));
+            assert!(
+                encode_lookup_reply(&LookupReply {
+                    tag: 7,
+                    outcome: Outcome::Found,
+                    record: Some(record.clone())
+                })
+                .is_err()
+            );
+        }
     }
 
     #[test]

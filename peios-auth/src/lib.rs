@@ -14,8 +14,8 @@ use auth_abi as abi;
 mod identity;
 mod sys;
 pub use identity::{
-    Account, AccountKey, Authenticated, Claim, ClaimValue, EnumerateRequest, Field, Identity,
-    IdentityKind, Key, Record, Reference, fields,
+    Account, AccountKey, Authenticated, Claim, ClaimValue, CredentialBinding, EnumerateRequest,
+    Field, Identity, IdentityKind, Key, Record, Reference, fields,
 };
 
 /// Application-visible operation progress. Denials and failures are Errors.

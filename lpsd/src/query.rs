@@ -187,6 +187,12 @@ fn principal_entry(store: &Store, record: &Record, fields: Fields) -> psi::Query
         values.push(Value::LogonTypes(record.permitted_logon_types));
     }
     // A principal is not a group, so its membership list and its description
+    if fields.contains(Fields::CREDENTIAL_BINDINGS) {
+        values.push(Value::CredentialBindings(
+            record.password_binding.into_iter().collect(),
+        ));
+    }
+    // A principal is not a group, so its membership list and its description
     // are not absent for a reason worth explaining — they are questions that
     // do not apply.
     for field in [Fields::MEMBERS, Fields::DESCRIPTION] {

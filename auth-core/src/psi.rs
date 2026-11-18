@@ -359,6 +359,7 @@ pub struct Group {
 /// domain SID.
 #[derive(Debug, Default)]
 pub struct Assertion {
+    pub credential_binding: Option<crate::credential_binding::CredentialBinding>,
     pub mschapv2_success: Option<crate::mschapv2::Success>,
     /// The NTLM `SessionBaseKey`, exactly when NTLMv2 was verified.
     pub ntlmv2_session_key: Option<crate::ntlmv2::SessionKey>,
@@ -946,6 +947,13 @@ pub fn encode_assertion(conversation: u64, assertion: &Assertion) -> Result<Vec<
             .map_or(&[], |key| &key.0),
         crate::ntlmv2::SESSION_KEY_BYTES,
     )?;
+    if let Some(binding) = &assertion.credential_binding {
+        if assertion.authenticated_credential_type.is_none() {
+            return Err(WireError::UnknownValue);
+        }
+        binding.validate()?;
+        w.bytes(&binding.encode(), crate::credential_binding::BINDING_BYTES)?;
+    }
     w.close(body);
     w.finish()
 }
@@ -975,7 +983,18 @@ pub fn decode_assertion(buf: &[u8]) -> Result<Assertion, WireError> {
     let ntlmv2_session_key =
         crate::ntlmv2::decode_session_key(b.bytes(crate::ntlmv2::SESSION_KEY_BYTES)?)?;
     crate::ntlmv2::validate_session_key(authenticated_credential_type, &ntlmv2_session_key)?;
+    let credential_binding = if b.at_end() {
+        None
+    } else {
+        Some(crate::credential_binding::CredentialBinding::decode(
+            b.bytes(crate::credential_binding::BINDING_BYTES)?,
+        )?)
+    };
+    if credential_binding.is_some() && authenticated_credential_type.is_none() {
+        return Err(WireError::UnknownValue);
+    }
     Ok(Assertion {
+        credential_binding,
         mschapv2_success,
         ntlmv2_session_key,
         authenticated_credential_type,
@@ -1748,6 +1767,7 @@ mod tests {
 
     fn assertion() -> Assertion {
         Assertion {
+            credential_binding: None,
             mschapv2_success: None,
             ntlmv2_session_key: None,
             authenticated_credential_type: None,

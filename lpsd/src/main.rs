@@ -2042,6 +2042,12 @@ fn assert_identity_with_output(
     let message = psi::encode_assertion(
         conversation,
         &psi::Assertion {
+            credential_binding: match credential {
+                Some(
+                    CredentialType::Password | CredentialType::Mschapv2 | CredentialType::Ntlmv2,
+                ) => identity.password_binding,
+                _ => None,
+            },
             mschapv2_success,
             ntlmv2_session_key,
             authenticated_credential_type: credential,
@@ -2200,6 +2206,10 @@ mod tests {
             if invalidate == 0 {
                 let assertion = psi::decode_assertion(encoded.expose()).unwrap();
                 assert_eq!(
+                    assertion.credential_binding,
+                    h.store.record("User").unwrap().password_binding
+                );
+                assert_eq!(
                     assertion.authenticated_credential_type,
                     Some(CredentialType::Mschapv2)
                 );
@@ -2332,6 +2342,10 @@ mod tests {
                 // The success must already be observable before maintenance.
                 let message = recv_message(&psi::FRAMING, &h.authd).unwrap();
                 let assertion = psi::decode_assertion(message.expose()).unwrap();
+                assert_eq!(
+                    assertion.credential_binding,
+                    candidate.record("User").unwrap().password_binding
+                );
                 assert_eq!(
                     assertion.authenticated_credential_type,
                     Some(CredentialType::Password)

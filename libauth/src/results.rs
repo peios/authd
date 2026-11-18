@@ -1,11 +1,11 @@
 //! Borrowed result views; no wire layouts or Rust collections cross the ABI.
+use crate::api::{bytes, write};
+use crate::engine::{Operation, Output, State};
 use auth_abi::{
-    AuthenticationView, AccountKeyView, AccountView, Bytes, ClaimValue, ClaimView, IdentityView,
+    AccountKeyView, AccountView, AuthenticationView, Bytes, ClaimValue, ClaimView, IdentityView,
     RecordView, ReferenceView,
 };
 use auth_core::{claim::Values, ident};
-use crate::api::{bytes, write};
-use crate::engine::{Operation, Output, State};
 
 // Public PEIOS_AUTH_FIELD_PRESENT from peios/auth.h; other field states use
 // the identity protocol's preserved withheld-reason discriminants.
@@ -42,6 +42,65 @@ fn record(operation: &Operation, index: usize) -> Option<&ident::Record> {
         State::Complete(Output::Listing(reply)) => reply.entries.get(index),
         State::Complete(Output::Authenticated(result)) if index == 0 => Some(&result.record),
         _ => None,
+    }
+}
+
+/// Read the number of disclosed credential bindings on a completed record.
+///
+/// # Safety
+/// Operation must be live and immutable. Out is aligned writable storage
+/// disjoint from the operation; no concurrent mutation or use after fork.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn peios_auth_record_credential_binding_count(
+    operation: *const Operation,
+    index: usize,
+    out: *mut usize,
+) -> i32 {
+    let result = (|| {
+        let ident::Value::CredentialBindings(values) =
+            record(unsafe { operation.as_ref()? }, index)?
+                .value(ident::Fields::CREDENTIAL_BINDINGS)?
+        else {
+            return None;
+        };
+        Some(values.len())
+    })();
+    match result {
+        Some(value) => unsafe { write(out, value) },
+        None => -1,
+    }
+}
+
+/// Borrow reference (part 0) or revision (part 1), exactly 16 bytes.
+///
+/// # Safety
+/// Operation must be live and immutable. Out is aligned writable storage
+/// disjoint from it. The view expires on operation mutation or destruction.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn peios_auth_record_credential_binding(
+    operation: *const Operation,
+    index: usize,
+    item: usize,
+    part: u32,
+    out: *mut Bytes,
+) -> i32 {
+    let result = (|| {
+        let ident::Value::CredentialBindings(values) =
+            record(unsafe { operation.as_ref()? }, index)?
+                .value(ident::Fields::CREDENTIAL_BINDINGS)?
+        else {
+            return None;
+        };
+        let value = values.get(item)?;
+        Some(bytes(match part {
+            0 => &value.reference,
+            1 => &value.revision,
+            _ => return None,
+        }))
+    })();
+    match result {
+        Some(value) => unsafe { write(out, value) },
+        None => -1,
     }
 }
 macro_rules! view {

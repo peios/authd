@@ -1,6 +1,8 @@
 //! Identity and self-account views, copied out of the C ABI into owned Rust data.
+use super::{
+    Client, Error, Operation, abi, copy_bytes, copy_text, invalid, read, span, string, sys,
+};
 use std::collections::BTreeMap;
-use super::{abi, sys, Client, Operation, Error, copy_bytes, copy_text, invalid, read, span, string};
 
 /// Identity attributes to request. Combine constants with bitwise OR.
 pub mod fields {
@@ -15,7 +17,8 @@ pub mod fields {
     pub const ENABLED: u32 = 1 << 8;
     pub const LOGON_TYPES: u32 = 1 << 9;
     pub const DESCRIPTION: u32 = 1 << 10;
-    pub const ALL: u32 = (1 << 11) - 1;
+    pub const CREDENTIAL_BINDINGS: u32 = 1 << 11;
+    pub const ALL: u32 = (1 << 12) - 1;
 }
 #[derive(Clone, Copy)]
 #[repr(u32)]
@@ -133,6 +136,14 @@ pub enum Field {
     Number(u32),
     References(Vec<Reference>),
     Claims(Vec<Claim>),
+    CredentialBindings(Vec<CredentialBinding>),
+}
+
+/// Opaque source-owned metadata, scoped to this record's principal SID.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CredentialBinding {
+    pub reference: [u8; 16],
+    pub revision: [u8; 16],
 }
 #[derive(Debug)]
 pub struct Reference {
@@ -241,7 +252,7 @@ impl Operation {
         unsafe {
             let raw = read(|out| sys::peios_auth_record(self.handle.as_ptr(), index, out))?;
             let mut values = BTreeMap::new();
-            for bit in 0..11 {
+            for bit in 0..12 {
                 let field = 1 << bit;
                 let state = sys::peios_auth_record_field_state(self.handle.as_ptr(), index, field);
                 if state < 0 {
@@ -284,6 +295,56 @@ impl Operation {
                     Ok(Field::References(self.references(index, field)?))
                 }
                 fields::CLAIMS => Ok(Field::Claims(self.claims(index)?)),
+                fields::CREDENTIAL_BINDINGS => {
+                    let count = read(|out| {
+                        sys::peios_auth_record_credential_binding_count(
+                            self.handle.as_ptr(),
+                            index,
+                            out,
+                        )
+                    })?;
+                    if count > 64 {
+                        return Err(invalid());
+                    }
+                    let mut bindings = Vec::with_capacity(count);
+                    for item in 0..count {
+                        let reference: [u8; 16] = copy_bytes(read(|out| {
+                            sys::peios_auth_record_credential_binding(
+                                self.handle.as_ptr(),
+                                index,
+                                item,
+                                0,
+                                out,
+                            )
+                        })?)
+                        .try_into()
+                        .map_err(|_| invalid())?;
+                        let revision: [u8; 16] = copy_bytes(read(|out| {
+                            sys::peios_auth_record_credential_binding(
+                                self.handle.as_ptr(),
+                                index,
+                                item,
+                                1,
+                                out,
+                            )
+                        })?)
+                        .try_into()
+                        .map_err(|_| invalid())?;
+                        if reference == [0; 16]
+                            || revision == [0; 16]
+                            || bindings
+                                .iter()
+                                .any(|b: &CredentialBinding| b.reference == reference)
+                        {
+                            return Err(invalid());
+                        }
+                        bindings.push(CredentialBinding {
+                            reference,
+                            revision,
+                        });
+                    }
+                    Ok(Field::CredentialBindings(bindings))
+                }
                 _ => Err(invalid()),
             }
         }

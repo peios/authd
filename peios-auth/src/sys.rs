@@ -80,6 +80,18 @@ unsafe extern "C" {
     pub fn peios_auth_operation_take_token(operation: *mut Operation) -> i32;
     pub fn peios_auth_operation_ended(operation: *const Operation, out: *mut EndedView) -> i32;
     pub fn peios_auth_operation_guid(operation: *const Operation, out: *mut Bytes) -> i32;
+    pub fn peios_auth_record_credential_binding_count(
+        operation: *const Operation,
+        index: usize,
+        out: *mut usize,
+    ) -> i32;
+    pub fn peios_auth_record_credential_binding(
+        operation: *const Operation,
+        index: usize,
+        item: usize,
+        part: u32,
+        out: *mut Bytes,
+    ) -> i32;
     pub fn peios_auth_operation_authentication(
         operation: *const Operation,
         out: *mut AuthenticationView,

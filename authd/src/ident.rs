@@ -41,8 +41,8 @@ use std::time::Duration;
 use auth_core::ident::{self, Fields, Kind, Outcome, Record, Value, Withheld, WithheldReason};
 use auth_core::transport::{recv_message, send_message};
 
-use crate::log;
 use crate::auth_access::Authorization;
+use crate::log;
 use crate::resolve;
 use crate::source::Registry;
 
@@ -134,23 +134,37 @@ pub fn serve(registry: Arc<Registry>, stream: UnixStream) {
 /// including an enumeration page, rather than per long-lived connection.
 struct ClaimDisclosure {
     requested: bool,
+    bindings_requested: bool,
+    bindings_allowed: bool,
     authorization: Option<Authorization>,
 }
 
 impl ClaimDisclosure {
     fn open(stream: &UnixStream, fields: Fields) -> Self {
         let requested = fields.contains(Fields::CLAIMS);
-        let authorization = requested
+        let bindings_requested = fields.contains(Fields::CREDENTIAL_BINDINGS);
+        let authorization = (requested || bindings_requested)
             .then(|| Authorization::open(stream))
-            .flatten()
-            .filter(|auth| auth.permits(auth_policy::authentication::READ_CLAIM));
+            .flatten();
+        let bindings_allowed = authorization
+            .as_ref()
+            .is_some_and(|auth| auth.permits(auth_policy::authentication::AUTHENTICATE));
+        let authorization =
+            authorization.filter(|auth| auth.permits(auth_policy::authentication::READ_CLAIM));
         Self {
             requested,
+            bindings_requested,
+            bindings_allowed,
             authorization,
         }
     }
 
     fn source_fields(&self, fields: Fields) -> Fields {
+        let fields = if self.bindings_allowed {
+            fields
+        } else {
+            fields.difference(Fields::CREDENTIAL_BINDINGS)
+        };
         if self.authorization.is_none() {
             fields.difference(Fields::CLAIMS)
         } else {
@@ -159,6 +173,18 @@ impl ClaimDisclosure {
     }
 
     fn apply(&self, record: &mut Record) {
+        if self.bindings_requested && !self.bindings_allowed {
+            record
+                .values
+                .retain(|value| value.field() != Fields::CREDENTIAL_BINDINGS);
+            record
+                .withheld
+                .retain(|value| value.field != Fields::CREDENTIAL_BINDINGS);
+            record.withheld.push(Withheld {
+                field: Fields::CREDENTIAL_BINDINGS,
+                reason: auth_core::ident::WithheldReason::Restricted,
+            });
+        }
         if !self.requested {
             return;
         }
@@ -306,6 +332,41 @@ mod tests {
     use super::*;
     use auth_core::ident::Fields;
     use std::thread;
+
+    #[test]
+    fn credential_metadata_is_withheld_without_authenticate_authority() {
+        let disclosure = ClaimDisclosure {
+            requested: false,
+            bindings_requested: true,
+            bindings_allowed: false,
+            authorization: None,
+        };
+        assert!(
+            !disclosure
+                .source_fields(Fields::CREDENTIAL_BINDINGS)
+                .contains(Fields::CREDENTIAL_BINDINGS)
+        );
+        let mut record = Record {
+            sid: vec![1; 12],
+            qualified_name: "jack".into(),
+            kind_found: Kind::Principal,
+            values: vec![Value::CredentialBindings(vec![])],
+            withheld: vec![],
+        };
+        disclosure.apply(&mut record);
+        assert!(record.values.is_empty());
+        assert_eq!(record.withheld[0].field, Fields::CREDENTIAL_BINDINGS);
+        assert_eq!(record.withheld[0].reason, WithheldReason::Restricted);
+        let allowed = ClaimDisclosure {
+            bindings_allowed: true,
+            ..disclosure
+        };
+        assert!(
+            allowed
+                .source_fields(Fields::CREDENTIAL_BINDINGS)
+                .contains(Fields::CREDENTIAL_BINDINGS)
+        );
+    }
 
     fn client() -> (UnixStream, thread::JoinHandle<()>) {
         let (ours, theirs) = UnixStream::pair().expect("socketpair");

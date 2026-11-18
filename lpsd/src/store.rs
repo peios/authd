@@ -98,6 +98,7 @@ use crate::codec::{self, CodecError, Reader, Writer};
 use crate::fs::Fs;
 use crate::random;
 use crate::verifier::{Verifier, VerifierError};
+use auth_core::credential_binding::CredentialBinding;
 
 /// Where the store lives. `/var/state/<daemon>/` is the convention peinit,
 /// loregd and peipkg already follow for daemon-owned state.
@@ -295,6 +296,33 @@ impl From<VerifierError> for StoreError {
     }
 }
 
+fn fresh_password_binding(
+    previous: Option<CredentialBinding>,
+) -> Result<CredentialBinding, StoreError> {
+    let nonzero = || -> Result<[u8; 16], StoreError> {
+        loop {
+            let value = random::array::<16>()?;
+            if value != [0; 16] {
+                return Ok(value);
+            }
+        }
+    };
+    let reference = match previous {
+        Some(binding) => binding.reference,
+        None => nonzero()?,
+    };
+    let revision = loop {
+        let value = nonzero()?;
+        if previous.is_none_or(|old| old.revision != value) {
+            break value;
+        }
+    };
+    Ok(CredentialBinding {
+        reference,
+        revision,
+    })
+}
+
 /// Someone lpsd is authoritative for, as stored.
 #[derive(Debug, Clone)]
 struct Principal {
@@ -309,6 +337,7 @@ struct Principal {
     policy: Policy,
     keys: Vec<PublicKey>,
     credential_generation: u64,
+    password_binding: Option<CredentialBinding>,
     verifier: Option<Verifier>,
     /// Which kinds of sign-on this principal may be used for.
     ///
@@ -408,7 +437,7 @@ pub struct GroupSummary {
 /// it turns out to be.
 #[derive(Debug, Clone)]
 pub enum Object {
-    Principal(Record),
+    Principal(Box<Record>),
     Group(GroupRecord),
 }
 
@@ -449,6 +478,7 @@ pub struct Member {
 /// caller has to reimplement how this machine numbers its principals.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Record {
+    pub password_binding: Option<CredentialBinding>,
     pub name: String,
     pub rid: u32,
     pub unix_id: u32,
@@ -471,6 +501,7 @@ pub struct Record {
 /// express them.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Identity {
+    pub password_binding: Option<CredentialBinding>,
     pub name: String,
     pub sid: Sid,
     pub unix_id: u32,
@@ -798,6 +829,7 @@ impl Store {
     pub fn record(&self, name: &str) -> Result<Record, StoreError> {
         let principal = self.find(name)?;
         Ok(Record {
+            password_binding: principal.password_binding,
             name: principal.name.clone(),
             rid: principal.rid,
             unix_id: principal.unix_id,
@@ -837,7 +869,10 @@ impl Store {
             .principals
             .iter()
             .find(|p| p.matches(name.as_bytes()))?;
-        self.record(&principal.name).ok().map(Object::Principal)
+        self.record(&principal.name)
+            .ok()
+            .map(Box::new)
+            .map(Object::Principal)
     }
 
     /// Resolve a relative identifier — a RID — to the object holding it.
@@ -849,7 +884,10 @@ impl Store {
             return self.group_record_of(group).map(Object::Group);
         }
         let principal = self.principals.iter().find(|p| p.rid == rid)?;
-        self.record(&principal.name).ok().map(Object::Principal)
+        self.record(&principal.name)
+            .ok()
+            .map(Box::new)
+            .map(Object::Principal)
     }
 
     /// Resolve a SID of this domain, and nothing else.
@@ -1174,6 +1212,9 @@ impl Store {
             },
             keys: Vec::new(),
             credential_generation: 0,
+            password_binding: credential
+                .map(|_| fresh_password_binding(None))
+                .transpose()?,
             groups: new.groups,
             primary_group: new.primary_group.unwrap_or_else(default_primary_group),
             home,
@@ -1274,7 +1315,10 @@ impl Store {
     pub fn set_password(&mut self, name: &str, password: &[u8]) -> Result<(), StoreError> {
         refuse_empty_password(Some(password))?;
         let at = self.position(name)?;
-        self.principals[at].verifier = Some(Verifier::create_with_nt(password, self.nt_storage)?);
+        let verifier = Verifier::create_with_nt(password, self.nt_storage)?;
+        let binding = fresh_password_binding(self.principals[at].password_binding)?;
+        self.principals[at].verifier = Some(verifier);
+        self.principals[at].password_binding = Some(binding);
         self.principals[at].credential_generation += 1;
         Ok(())
     }
@@ -1562,7 +1606,10 @@ impl Store {
         }
         let verifier = Verifier::create_with_nt(password, self.nt_storage)
             .map_err(|error| ChangeRefused::Rejected(error.to_string()))?;
+        let binding = fresh_password_binding(self.principals[at].password_binding)
+            .map_err(|error| ChangeRefused::Rejected(error.to_string()))?;
         self.principals[at].verifier = Some(verifier);
+        self.principals[at].password_binding = Some(binding);
         self.principals[at].credential_generation += 1;
         Ok(())
     }
@@ -2032,6 +2079,7 @@ impl Store {
     /// The assertion this principal produces once authenticated.
     fn identity_of(&self, principal: &Principal) -> Option<Identity> {
         Some(Identity {
+            password_binding: principal.password_binding,
             name: principal.name.clone(),
             sid: self.sid_of(principal.rid).ok()?,
             unix_id: principal.unix_id,
@@ -2064,7 +2112,13 @@ impl Store {
             return Ok(None);
         };
         let (version, body) = codec::open(file.expose())?;
-        Ok(Some(Self::decode(version, body)?))
+        let store = Self::decode(version, body)?;
+        // Persist migration before any newly assigned binding can be issued.
+        // Failure is fatal; a restart must not invent another live revision.
+        if version < codec::VERSION {
+            store.save(fs, path)?;
+        }
+        Ok(Some(store))
     }
 
     /// Write the store, replacing any previous one atomically.
@@ -2155,6 +2209,11 @@ impl Store {
                 w.str(&key.label);
                 w.bytes(&key.created.to_le_bytes());
             }
+            w.bytes(
+                &principal
+                    .password_binding
+                    .map_or(Vec::new(), |b| b.encode().to_vec()),
+            );
         }
         w.finish()
     }
@@ -2300,6 +2359,25 @@ impl Store {
                     created,
                 });
             }
+            let password_binding = if version >= 7 {
+                match r.bytes()? {
+                    [] if verifier.is_none() => None,
+                    bytes if verifier.is_some() => Some(
+                        CredentialBinding::decode(bytes)
+                            .map_err(|_| StoreError::Invalid("invalid password binding".into()))?,
+                    ),
+                    _ => {
+                        return Err(StoreError::Invalid(
+                            "password binding without a verifier".into(),
+                        ));
+                    }
+                }
+            } else {
+                verifier
+                    .as_ref()
+                    .map(|_| fresh_password_binding(None))
+                    .transpose()?
+            };
             principals.push(Principal {
                 rid,
                 unix_id,
@@ -2308,6 +2386,7 @@ impl Store {
                 policy,
                 keys,
                 credential_generation: 0,
+                password_binding,
                 verifier,
                 groups: memberships,
                 primary_group,
@@ -2664,6 +2743,41 @@ pub fn store_descriptor() -> peios::Result<peios::security::SecurityDescriptor> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn password_binding_survives_reload_and_only_password_replacement_rotates_it() {
+        let mut store = Store::provision().unwrap();
+        store
+            .add(NewPrincipal::named("User"), Some(b"clientPass"))
+            .unwrap();
+        let original = store.principals[0].password_binding.unwrap();
+        let reloaded = Store::decode(codec::VERSION, &store.encode()).unwrap();
+        assert_eq!(reloaded.principals[0].password_binding, Some(original));
+        store.set_enabled("User", false).unwrap();
+        store.set_enabled("User", true).unwrap();
+        assert_eq!(store.principals[0].password_binding, Some(original));
+        store.set_password("User", b"replacement").unwrap();
+        let replacement = store.principals[0].password_binding.unwrap();
+        assert_eq!(replacement.reference, original.reference);
+        assert_ne!(replacement.revision, original.revision);
+        let reloaded = Store::decode(codec::VERSION, &store.encode()).unwrap();
+        assert_eq!(reloaded.principals[0].password_binding, Some(replacement));
+    }
+
+    #[test]
+    fn nt_backfill_and_purge_do_not_replace_the_password_binding() {
+        let mut store = Store::provision().unwrap();
+        store.nt_storage = false;
+        store
+            .add(NewPrincipal::named("User"), Some(b"clientPass"))
+            .unwrap();
+        let original = store.principals[0].password_binding.unwrap();
+        store.nt_storage = true;
+        assert!(store.backfill_nt(b"User", b"clientPass", store.credential_generation(b"User")));
+        assert_eq!(store.principals[0].password_binding, Some(original));
+        store.apply_nt_policy(false, true);
+        assert_eq!(store.principals[0].password_binding, Some(original));
+    }
 
     #[test]
     fn nt_material_round_trips_and_password_reset_invalidates_pending_proof() {
@@ -4535,14 +4649,18 @@ mod tests {
             );
             at += record + 4;
         }
-        out.extend_from_slice(&body[at..]);
+        // This legacy fixture has one password principal and no SSH keys.
+        // Version 7's final binding frame was absent in versions 4 through 6.
+        assert_eq!(store.principals.len(), 1);
+        let binding = store.principals[0].password_binding.unwrap().encode();
+        assert_eq!(&body[body.len() - 32..], &binding);
+        out.extend_from_slice(&body[at..body.len() - 36]);
         out
     }
 
-    /// Format 4 had no group descriptions. Its store loads with each one
-    /// empty, and is written as format 5 from then on.
+    /// Format 4 had no group descriptions or credential bindings.
     #[test]
-    fn a_format_4_store_loads_and_is_written_as_format_5() {
+    fn a_format_4_store_loads_and_gains_a_persistent_password_binding() {
         let mut store = seeded();
         store.create_group("developers", "").unwrap();
         store
@@ -4553,15 +4671,52 @@ mod tests {
         let loaded = Store::decode(4, &old).expect("a format 4 store must load");
         assert_eq!(loaded.group_summaries().unwrap()[0].description, "");
         assert_eq!(loaded.group_summaries().unwrap()[0].members, 1);
+        let mut expected = store.record("jack").unwrap();
+        expected.password_binding = loaded.record("jack").unwrap().password_binding;
+        assert_eq!(loaded.record("jack").unwrap(), expected);
+        let again = Store::decode(codec::VERSION, &loaded.encode()).unwrap();
         assert_eq!(
-            loaded.encode(),
-            store.encode(),
-            "written again, it is format 5"
+            again.principals[0].password_binding,
+            loaded.principals[0].password_binding
         );
         assert!(
             Store::decode(4, &store.encode()).is_err(),
             "a format 5 body is not format 4's"
         );
+    }
+
+    #[test]
+    fn legacy_binding_migration_is_durable_before_returning_a_store() {
+        let fs = FaultyFs::new();
+        let mut file = codec::seal(&format_4_body(&seeded()));
+        file[8..10].copy_from_slice(&4u16.to_le_bytes());
+        fs.preload(path(), &file);
+        let loaded = Store::load(&fs, path()).unwrap().unwrap();
+        let binding = loaded.principals[0].password_binding.unwrap();
+        fs.crash(false);
+        let again = Store::load(&fs, path()).unwrap().unwrap();
+        assert_eq!(again.principals[0].password_binding, Some(binding));
+        assert_eq!(codec::open(&fs.read_now(path()).unwrap()).unwrap().0, 7);
+    }
+
+    #[test]
+    fn failed_legacy_migration_never_exposes_an_unpersisted_binding() {
+        use crate::fs::Op;
+        for failure in [
+            Op::Create,
+            Op::Write,
+            Op::SetSd,
+            Op::Sync,
+            Op::Rename,
+            Op::SyncDir,
+        ] {
+            let fs = FaultyFs::new();
+            let mut file = codec::seal(&format_4_body(&seeded()));
+            file[8..10].copy_from_slice(&4u16.to_le_bytes());
+            fs.preload(path(), &file);
+            fs.fail_next(failure);
+            assert!(Store::load(&fs, path()).is_err(), "{failure:?}");
+        }
     }
 
     #[test]
@@ -4717,9 +4872,18 @@ mod tests {
     #[test]
     fn setting_a_password_does_not_disturb_anything_else() {
         let mut store = seeded();
-        let before = store.record("jack").expect("must read");
+        let mut before = store.record("jack").expect("must read");
         store.set_password("jack", b"different").expect("must set");
         let after = store.record("jack").expect("must read");
+        assert_eq!(
+            before.password_binding.unwrap().reference,
+            after.password_binding.unwrap().reference
+        );
+        assert_ne!(
+            before.password_binding.unwrap().revision,
+            after.password_binding.unwrap().revision
+        );
+        before.password_binding = after.password_binding;
         assert_eq!(before, after);
     }
 

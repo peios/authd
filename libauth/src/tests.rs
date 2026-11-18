@@ -9,11 +9,11 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
-use auth_abi::*;
-use auth_core::{ident, lps, wire};
-use auth_core::transport::{recv_message, send_message, send_message_with_fd};
 use crate::api::*;
 use crate::results::*;
+use auth_abi::*;
+use auth_core::transport::{recv_message, send_message, send_message_with_fd};
+use auth_core::{ident, lps, wire};
 
 static NEXT_SOCKET: AtomicUsize = AtomicUsize::new(0);
 
@@ -33,22 +33,30 @@ fn authenticate_uses_the_shared_conversation_and_never_exposes_a_token() {
         assert_eq!(response.answers[0].data.expose(), b"test-secret");
         send_message(
             &socket,
-            &wire::encode_authenticated(&wire::Authenticated {
-                mschapv2_success: None,
-                ntlmv2_session_key: None,
-                user_sid: vec![1, 1, 0, 0, 0, 0, 0, 5, 18, 0, 0, 0],
-                canonical_name: "jack".into(),
-                verified_credentials: vec![wire::CredentialType::Password],
-                groups: Some(Vec::new()),
-                claims: vec![auth_core::Claim {
-                    name: "Department".into(),
-                    flags: 0,
-                    values: auth_core::claim::Values::String(vec!["engineering".into()]),
-                }],
-                absent_claims: vec!["office".into()],
-                claim_coverage: wire::ClaimCoverage::Named,
-            })
-            .unwrap(),
+            auth_core::credential_binding::with_authenticated_binding(
+                &wire::encode_authenticated(&wire::Authenticated {
+                    mschapv2_success: None,
+                    ntlmv2_session_key: None,
+                    user_sid: vec![1, 1, 0, 0, 0, 0, 0, 5, 18, 0, 0, 0],
+                    canonical_name: "jack".into(),
+                    verified_credentials: vec![wire::CredentialType::Password],
+                    groups: Some(Vec::new()),
+                    claims: vec![auth_core::Claim {
+                        name: "Department".into(),
+                        flags: 0,
+                        values: auth_core::claim::Values::String(vec!["engineering".into()]),
+                    }],
+                    absent_claims: vec!["office".into()],
+                    claim_coverage: wire::ClaimCoverage::Named,
+                })
+                .unwrap(),
+                &auth_core::credential_binding::CredentialBinding {
+                    reference: [11; 16],
+                    revision: [12; 16],
+                },
+            )
+            .unwrap()
+            .expose(),
         )
         .unwrap();
     });
@@ -99,6 +107,31 @@ fn authenticate_uses_the_shared_conversation_and_never_exposes_a_token() {
             0
         );
         assert_eq!(count, 0);
+        assert_eq!(
+            peios_auth_record_credential_binding_count(operation, 0, &mut count),
+            0
+        );
+        assert_eq!(count, 1);
+        for (part, expected) in [(0, 11), (1, 12)] {
+            let mut value = bytes(&[]);
+            assert_eq!(
+                peios_auth_record_credential_binding(operation, 0, 0, part, &mut value),
+                0
+            );
+            assert_eq!(
+                std::slice::from_raw_parts(value.data, value.len),
+                &[expected; 16]
+            );
+        }
+        let mut value = bytes(&[]);
+        assert_eq!(
+            peios_auth_record_credential_binding(operation, 0, 1, 0, &mut value),
+            -1
+        );
+        assert_eq!(
+            peios_auth_record_credential_binding(operation, 0, 0, 2, &mut value),
+            -1
+        );
         let mut name = bytes(&[]);
         assert_eq!(
             peios_auth_authentication_absent_claim(operation, 0, &mut name),
