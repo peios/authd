@@ -68,13 +68,13 @@ call or destruction. The Rust wrapper returns owned result data.
 
 ## Detect credential replacement
 
-`CREDENTIAL_BINDINGS` requests source-owned opaque reference and revision pairs.
-Its disclosure requires the existing Authenticate right. A missing, restricted
-or unreported field means unknown; it does not establish credential deletion.
+`CREDENTIAL_BINDINGS` requests opaque reference and revision pairs owned by
+the source. Disclosure requires the existing Authenticate right. A missing,
+restricted, or unreported field means unknown; it does not establish deletion.
 References are scoped to the authoritative principal SID. Neither part is a
-credential, token or proof of possession.
+credential, token, or proof of possession.
 
-Local queries list currently eligible password bindings. Disabling the
+Local queries list eligible password bindings. Disabling the
 password credential policy omits that binding from a present list without
 destroying its stored revision. An explicitly empty list is authoritative;
 an unreported or restricted list is unknown. NT-storage policy alone does not
@@ -83,8 +83,8 @@ remove the underlying password binding.
 A successful Authenticate result can disclose the binding that actually
 verified. Retain it with the verified SID. Later SID lookups can detect a
 replacement; they cannot advance the revision that a session proved. Only
-fresh successful authentication can do that. Password, MSCHAPv2 and NTLMv2
-refer to the same underlying local password binding. Older sources can omit it.
+fresh successful authentication can do that. Password, MSCHAPv2, and NTLMv2
+refer to the same local password binding. Older sources can omit it.
 
 C uses `peios_auth_record_credential_binding_count()` and
 `peios_auth_record_credential_binding()` with reference or revision parts;

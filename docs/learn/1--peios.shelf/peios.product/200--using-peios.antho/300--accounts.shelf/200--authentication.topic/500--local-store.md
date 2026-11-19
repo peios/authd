@@ -145,7 +145,7 @@ The credential-binding source reads formats 4 through 7 and writes format 7.
 Format 4 loads with empty group descriptions. Older password records load
 without NT material. Each password has an opaque reference and revision;
 replacement retains its reference and rotates its revision. NT-hash backfill,
-purging NT material, account enablement and metadata edits do not rotate it.
+purging NT material, account enablement, and metadata edits do not rotate it.
 
 Loading an older format assigns these bindings and atomically saves format 7
 before exposing the store. A failed migration prevents startup. This is a
