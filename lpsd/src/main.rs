@@ -387,13 +387,18 @@ fn wait(
 fn open_store() -> Result<Store, StoreError> {
     let path = Path::new(store::STORE_PATH);
     if let Some(directory) = path.parent() {
-        // Durably: an atomically-replaced file inside a directory that is not
-        // itself durable buys nothing, and losing the directory means losing
-        // the domain. See `RealFs::create_directory`.
-        RealFs.create_directory(directory).map_err(StoreError::Io)?;
         let sd = peios::security::sddl::parse("O:S-1-5-80-4242895835-3884168475-4287610261-1596539771-2019494472G:S-1-5-80-4242895835-3884168475-4287610261-1596539771-2019494472D:P(A;OICI;GA;;;SY)(A;OICI;GA;;;S-1-5-80-4242895835-3884168475-4287610261-1596539771-2019494472)")
             .map_err(std::io::Error::from)?;
-        RealFs.set_sd(directory, &sd).map_err(StoreError::Io)?;
+        // Durably: an atomically-replaced file inside a directory that is not
+        // itself durable buys nothing, and losing the directory means losing
+        // the domain. See `RealFs::create_directory`. A new directory carries
+        // the descriptor from its creation; one already there is re-stamped.
+        let created = RealFs
+            .create_directory_with_sd(directory, &sd)
+            .map_err(StoreError::Io)?;
+        if !created {
+            RealFs.set_sd(directory, &sd).map_err(StoreError::Io)?;
+        }
     }
     if let Some(store) = Store::load(&RealFs, path)? {
         return Ok(store);
