@@ -171,6 +171,43 @@ impl RealFs {
             None => Ok(()),
         }
     }
+
+    /// Create `dir` carrying `sd`, and any missing ancestors, each durably.
+    ///
+    /// The ancestors inherit as [`create_directory`](Self::create_directory)
+    /// makes them. `dir` itself is created with `sd` supplied, so it never
+    /// exists without it. Returns whether this call created `dir`: one that
+    /// already existed keeps whatever descriptor it has.
+    pub fn create_directory_with_sd(
+        &self,
+        dir: &Path,
+        sd: &SecurityDescriptor,
+    ) -> io::Result<bool> {
+        use peios::file::{CreateOptions, Disposition, FileAccess, OpenFlags, OpenOptions};
+        if dir.is_dir() {
+            return Ok(false);
+        }
+        if let Some(parent) = dir.parent() {
+            self.create_directory(parent)?;
+        }
+        // A control handle, with no data right: nothing is read from it.
+        let created = OpenOptions::new()
+            .desired_access(FileAccess::READ_ATTRIBUTES | FileAccess::SYNCHRONIZE)
+            .disposition(Disposition::Create)
+            .options(CreateOptions::DIRECTORY)
+            .flags(OpenFlags::SYMLINK_NOFOLLOW)
+            .creator_sd(sd)
+            .create(None, dir);
+        match created {
+            Ok(_) => {}
+            Err(error) if error.raw_os_error() == Some(libc::EEXIST) => return Ok(false),
+            Err(error) => return Err(io::Error::from(error)),
+        }
+        match dir.parent() {
+            Some(parent) => self.sync_dir(parent).map(|()| true),
+            None => Ok(true),
+        }
+    }
 }
 
 fn remove_stale_stage(path: &Path) -> io::Result<()> {

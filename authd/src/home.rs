@@ -38,7 +38,7 @@
 use std::io;
 use std::path::Path;
 
-use peios::file::{self, SecInfo};
+use peios::file::{self, CreateOptions, Disposition, FileAccess, OpenFlags, OpenOptions, SecInfo};
 use peios::security::{SdView, SidRef, sddl};
 
 use crate::log;
@@ -132,26 +132,22 @@ fn check_existing(user: &SidRef, home: &str, path: &Path) {
     }
 }
 
-/// Create the directory and stamp it.
+/// Create the directory carrying its descriptor.
 ///
-/// Only the leaf: `create_dir`, not `create_dir_all`. A principal source
-/// asserts the path, and minting a tree of directories on its say-so
-/// turns a typo into structure that outlives the mistake. A missing
-/// parent is reported instead, which is a much easier thing to diagnose
-/// than an unexpected `/hoem` appearing at the root.
+/// Only the leaf, not its ancestors. A principal source asserts the
+/// path, and minting a tree of directories on its say-so turns a typo
+/// into structure that outlives the mistake. A missing parent is
+/// reported instead, which is a much easier thing to diagnose than an
+/// unexpected `/hoem` appearing at the root.
 ///
-/// Between the `create_dir` and the `set_sd` the directory carries what
-/// it inherited from `/home`, which is SYSTEM and Administrators and
-/// nothing else — fsbase's Everyone ACE there is not inheritable. So the
-/// window is closed rather than open: the failure mode of interrupting
-/// this is a directory its owner cannot enter, not one anybody can read.
+/// The descriptor is supplied to the create, so the directory never
+/// exists without it. If the kernel refuses the descriptor, it removes
+/// the directory again and the create fails: there is no half-made home
+/// to finish by hand.
+///
+/// The handle is a control handle, with no data right: nothing is read
+/// from the directory, and it is closed at once.
 fn create(user: &SidRef, home: &str, path: &Path) {
-    if let Err(error) = std::fs::create_dir(path) {
-        log::warn(format_args!(
-            "could not create home {home} for {user}: {error}"
-        ));
-        return;
-    }
     let text = home_sddl(user);
     let sd = match sddl::parse(&text) {
         Ok(sd) => sd,
@@ -162,15 +158,16 @@ fn create(user: &SidRef, home: &str, path: &Path) {
             return;
         }
     };
-    let info = SecInfo::OWNER | SecInfo::GROUP | SecInfo::DACL;
-    if let Err(error) = file::set_sd(None, path, info, &sd, AT_SYMLINK_NOFOLLOW) {
-        // The directory is left in place: it inherited SYSTEM and
-        // Administrators, so an administrator can finish the job with
-        // `sd`. Removing it would destroy nothing today but would race
-        // anything that had already looked.
-        log::error(format_args!(
-            "created home {home} for {user} but could not stamp its descriptor: {error}; \
-             it is unusable by its owner until an administrator sets one"
+    let created = OpenOptions::new()
+        .desired_access(FileAccess::READ_ATTRIBUTES | FileAccess::SYNCHRONIZE)
+        .disposition(Disposition::Create)
+        .options(CreateOptions::DIRECTORY)
+        .flags(OpenFlags::SYMLINK_NOFOLLOW)
+        .creator_sd(&sd)
+        .create(None, path);
+    if let Err(error) = created {
+        log::warn(format_args!(
+            "could not create home {home} for {user}: {error}"
         ));
         return;
     }
