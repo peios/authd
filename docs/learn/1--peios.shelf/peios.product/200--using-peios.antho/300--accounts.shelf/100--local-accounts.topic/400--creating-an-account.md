@@ -72,14 +72,15 @@ privileges on tokens issued to that group.
 `lps` records the home path without creating the directory. When `authd`
 grants a logon with a home path, it creates a missing home with access for the
 account, `LocalSystem`, and administrators. The descriptor blocks inherited
-grants from widening that access. The parent directory must already exist;
-authd creates the missing leaf, not a parent tree.
+grants from widening that access. The directory is created with that
+descriptor, so it never exists without it. The parent directory must already
+exist; authd creates the missing leaf, not a parent tree.
 
 The shipped authd service retains `SeRestorePrivilege` to assign the new
-home's owner and group. Removing it from the service's `RequiredPrivileges`
-can leave a new directory inaccessible to its intended owner. Inspect the
-authority's diagnostics and repair the descriptor deliberately; retrying a
-sign-in does not take over an existing directory.
+home's owner and group. If it is removed from the service's
+`RequiredPrivileges`, the kernel refuses the descriptor and no home is
+created. The authority's diagnostics record the failure, and the logon starts
+in `/`. Retrying a sign-in does not take over a directory that already exists.
 
 An existing directory is left alone. Changing the recorded home does not move
 files or repair its ownership. If home preparation fails, the logon can still
@@ -88,7 +89,7 @@ succeed; `login` reports an inaccessible home and starts in `/`.
 Every kind of logon prepares the home by default, including network logons
 such as file sharing, so a file server can offer users their homes. To limit
 it, list the logon types that should prepare homes in
-`Machine\Software\Authd ProvisionLogonTypes`. For the Windows behaviour,
+`Machine\Software\Authd ProvisionLogonTypes`. For the Windows behavior,
 where a network logon creates no profile, leave out `Network` and
 `NetworkCleartext`. The same setting governs the account's per-user Registry
 root.
