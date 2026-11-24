@@ -34,7 +34,7 @@
       "prefix": "github.com/peios/peios-rs",
       "git": "https://github.com/peios/peios-rs",
       "dir": "",
-      "rev": "623520bc0405fdd4526bab45f45882e7f19b1ab1"
+      "rev": "ebb1e39ca99ae8371dd9e8dc45844feb474d056c"
     },
     {
       "prefix": "github.com/gcslib/clang",
@@ -83,8 +83,8 @@
       "path": "github.com/peios/peios-rs",
       "git": "https://github.com/peios/peios-rs",
       "dir": "",
-      "commit": "623520bc0405fdd4526bab45f45882e7f19b1ab1",
-      "tree": "e1f418600c8c3d6ae17dbbccb36c69c95d3cfc18a9796c4bbd5783413f9c585a"
+      "commit": "ebb1e39ca99ae8371dd9e8dc45844feb474d056c",
+      "tree": "f3b3cd13f7feb744e73e1e00455c36ea686d7116c288a5d0c74638736a6f5089"
     },
     {
       "path": "github.com/peios/peios-sdk",

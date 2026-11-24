@@ -623,10 +623,11 @@ dependencies = [
 [[package]]
 name = "peios"
 version = "0.5.0"
-source = "git+https://github.com/peios/peios-rs.git?rev=623520bc0405fdd4526bab45f45882e7f19b1ab1#623520bc0405fdd4526bab45f45882e7f19b1ab1"
+source = "git+https://github.com/peios/peios-rs.git?rev=ebb1e39ca99ae8371dd9e8dc45844feb474d056c#ebb1e39ca99ae8371dd9e8dc45844feb474d056c"
 dependencies = [
  "bitflags",
  "libc",
+ "peios-casefold",
  "peios-sys",
 ]
 
@@ -639,9 +640,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "peios-casefold"
+version = "0.1.0"
+source = "git+https://github.com/peios/peios-rs.git?rev=ebb1e39ca99ae8371dd9e8dc45844feb474d056c#ebb1e39ca99ae8371dd9e8dc45844feb474d056c"
+
+[[package]]
 name = "peios-sys"
 version = "0.4.0"
-source = "git+https://github.com/peios/peios-rs.git?rev=623520bc0405fdd4526bab45f45882e7f19b1ab1#623520bc0405fdd4526bab45f45882e7f19b1ab1"
+source = "git+https://github.com/peios/peios-rs.git?rev=ebb1e39ca99ae8371dd9e8dc45844feb474d056c#ebb1e39ca99ae8371dd9e8dc45844feb474d056c"
 dependencies = [
  "bindgen",
  "pkg-config",
