@@ -25,7 +25,7 @@ auth-core = { path = "../auth-core" }
 # Without its `write` feature it opens no key for writing.
 auth-policy = { path = "../auth-policy" }
 libc = "0.2"
-peios = { git = "https://github.com/peios/peios-rs.git", rev = "623520bc0405fdd4526bab45f45882e7f19b1ab1" }
+peios = { git = "https://github.com/peios/peios-rs.git", rev = "ebb1e39ca99ae8371dd9e8dc45844feb474d056c" }
 # The access-list API takes the SDK's object-type entries. This exposes the
 # already-linked SDK ABI types; it adds no second access-check implementation.
-peios-sys = { git = "https://github.com/peios/peios-rs.git", rev = "623520bc0405fdd4526bab45f45882e7f19b1ab1" }
+peios-sys = { git = "https://github.com/peios/peios-rs.git", rev = "ebb1e39ca99ae8371dd9e8dc45844feb474d056c" }
